@@ -1,0 +1,114 @@
+# Reference manifest for the Gusto employees API (demo environment), the first OAuth practice
+# integration. Tenants connect through the authorization-code flow; the platform holds one
+# registered OAuth app for all tenants.
+name: gusto
+version: 0.1.0
+display_name: Gusto
+description: Employee reads from Gusto via OAuth 2.0 (demo environment).
+base_url: "https://api.gusto-demo.com/v1"
+auth:
+  type: oauth2
+  authorization_url: "https://api.gusto-demo.com/oauth/authorize"
+  token_url: "https://api.gusto-demo.com/oauth/token"
+  scopes: [companies:read]
+  pkce: true
+  token_auth_method: client_secret_post
+  refresh_leeway_seconds: 300
+default_headers:
+  Accept: application/json
+  X-Gusto-API-Version: "2024-04-01"
+rate_limit:
+  requests_per_second: 3
+  burst: 5
+endpoints:
+  - id: list_employees
+    method: GET
+    path: /companies/{company_uuid}/employees
+    description: Employees of a company
+    scopes: [employees:read]
+    parameters:
+      - { name: company_uuid, location: path, required: true }
+      - { name: terminated, location: query, description: Include terminated employees when true }
+    pagination:
+      style: page
+      page_param: page
+      size_param: per
+      page_size: 100
+    response_schema:
+      type: array
+      items:
+        type: object
+        required: [uuid, first_name, last_name]
+        properties:
+          uuid: { type: string }
+          first_name: { type: string }
+          last_name: { type: string }
+          email: { type: [string, "null"] }
+          work_email: { type: [string, "null"] }
+          department: { type: [string, "null"] }
+          manager_uuid: { type: [string, "null"] }
+          terminated: { type: boolean }
+          onboarded: { type: boolean }
+          current_employment_status: { type: [string, "null"] }
+          jobs:
+            type: array
+            items:
+              type: object
+              properties:
+                uuid: { type: string }
+                title: { type: [string, "null"] }
+                primary: { type: boolean }
+                hire_date: { type: [string, "null"] }
+          terminations:
+            type: array
+            items:
+              type: object
+              properties:
+                effective_date: { type: [string, "null"] }
+  - id: get_employee
+    method: GET
+    path: /employees/{employee_uuid}
+    description: One employee
+    scopes: [employees:read]
+    parameters:
+      - { name: employee_uuid, location: path, required: true }
+    response_schema:
+      type: object
+      required: [uuid, first_name, last_name]
+      properties:
+        uuid: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: [string, "null"] }
+        work_email: { type: [string, "null"] }
+        department: { type: [string, "null"] }
+        manager_uuid: { type: [string, "null"] }
+        terminated: { type: boolean }
+        jobs:
+          type: array
+          items:
+            type: object
+            properties:
+              title: { type: [string, "null"] }
+              hire_date: { type: [string, "null"] }
+mappings:
+  - endpoint_id: list_employees
+    canonical_object: Employee
+    fields: &employee_fields
+      - { target: source_id, source: uuid }
+      - { target: first_name, source: first_name }
+      - { target: last_name, source: last_name }
+      - { target: display_name, transform: concat, args: { paths: [first_name, last_name] } }
+      - { target: work_email, source: work_email }
+      - { target: personal_email, source: email }
+      - { target: department, source: department }
+      - { target: manager_source_id, source: manager_uuid, transform: to_str }
+      - { target: job_title, source: jobs.0.title }
+      - { target: hire_date, source: jobs.0.hire_date, transform: to_date }
+      - target: employment_status
+        source: terminated
+        transform: enum_map
+        args: { map: { "true": terminated, "false": active }, default: unknown }
+  - endpoint_id: get_employee
+    canonical_object: Employee
+    fields: *employee_fields

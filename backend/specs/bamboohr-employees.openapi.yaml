@@ -1,0 +1,110 @@
+openapi: 3.0.3
+info:
+  title: BambooHR API (employee subset)
+  version: "1"
+  description: |
+    Hand-written subset of the BambooHR REST API covering employee reads. Used as the first
+    documented practice API. Authentication is HTTP Basic with the API key as the username and
+    any string as the password. The company subdomain is part of the base URL.
+servers:
+  - url: https://api.bamboohr.com/api/gateway.php/{companyDomain}/v1
+    variables:
+      companyDomain:
+        default: acme
+        description: The company subdomain used to sign in to BambooHR.
+security:
+  - basicAuth: []
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: API key as the username, any value as the password.
+  schemas:
+    DirectoryEmployee:
+      type: object
+      required: [id, displayName]
+      properties:
+        id: { type: string }
+        displayName: { type: string, nullable: true }
+        firstName: { type: string, nullable: true }
+        lastName: { type: string, nullable: true }
+        preferredName: { type: string, nullable: true }
+        jobTitle: { type: string, nullable: true }
+        workPhone: { type: string, nullable: true }
+        mobilePhone: { type: string, nullable: true }
+        workEmail: { type: string, format: email, nullable: true }
+        department: { type: string, nullable: true }
+        location: { type: string, nullable: true }
+        division: { type: string, nullable: true }
+        linkedIn: { type: string, nullable: true }
+        pronouns: { type: string, nullable: true }
+        supervisor: { type: string, nullable: true, description: Display name of the manager }
+        photoUploaded: { type: boolean }
+        photoUrl: { type: string, nullable: true }
+        canUploadPhoto: { type: integer }
+    Employee:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        firstName: { type: string, nullable: true }
+        lastName: { type: string, nullable: true }
+        displayName: { type: string, nullable: true }
+        workEmail: { type: string, format: email, nullable: true }
+        jobTitle: { type: string, nullable: true }
+        department: { type: string, nullable: true }
+        division: { type: string, nullable: true }
+        location: { type: string, nullable: true }
+        hireDate: { type: string, format: date, nullable: true, description: "YYYY-MM-DD; 0000-00-00 when unset" }
+        terminationDate: { type: string, nullable: true, description: "YYYY-MM-DD; 0000-00-00 when still employed" }
+        status: { type: string, enum: [Active, Inactive], nullable: true }
+        supervisorEId: { type: string, nullable: true, description: Employee id of the manager }
+        supervisor: { type: string, nullable: true, description: Display name of the manager }
+paths:
+  /employees/directory:
+    get:
+      operationId: getEmployeeDirectory
+      summary: Employee directory (all active employees, no pagination)
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [employees]
+                properties:
+                  fields:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        type: { type: string }
+                        name: { type: string }
+                  employees:
+                    type: array
+                    items: { $ref: "#/components/schemas/DirectoryEmployee" }
+  /employees/{id}:
+    get:
+      operationId: getEmployee
+      summary: One employee with the requested fields
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: fields
+          in: query
+          required: true
+          description: Comma-separated field names to return
+          schema: { type: string }
+      responses:
+        "200":
+          description: Employee record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Employee" }
+        "404":
+          description: Unknown employee

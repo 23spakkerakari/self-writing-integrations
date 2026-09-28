@@ -1,0 +1,121 @@
+# Reference manifest for the BambooHR employee subset. This is what the synthesis agent is
+# expected to produce from specs/bamboohr-employees.openapi.yaml; the tests use it directly.
+name: bamboohr
+version: 0.1.0
+display_name: BambooHR
+description: Employee directory and employee detail reads from BambooHR.
+base_url: "https://api.bamboohr.com/api/gateway.php/{company_domain}/v1"
+config_vars: [company_domain]
+auth:
+  type: basic
+  username_secret_ref: api_key
+  password_literal: x
+default_headers:
+  Accept: application/json
+rate_limit:
+  requests_per_second: 5
+  burst: 10
+retry:
+  max_attempts: 3
+  backoff_seconds: 0.5
+endpoints:
+  - id: list_employees
+    method: GET
+    path: /employees/directory
+    description: Employee directory (all active employees, no pagination)
+    items_path: employees
+    response_schema:
+      type: object
+      required: [employees]
+      properties:
+        fields:
+          type: array
+          items:
+            type: object
+        employees:
+          type: array
+          items:
+            type: object
+            required: [id, displayName]
+            properties:
+              id: { type: string }
+              displayName: { type: [string, "null"] }
+              firstName: { type: [string, "null"] }
+              lastName: { type: [string, "null"] }
+              preferredName: { type: [string, "null"] }
+              jobTitle: { type: [string, "null"] }
+              workPhone: { type: [string, "null"] }
+              mobilePhone: { type: [string, "null"] }
+              workEmail: { type: [string, "null"], format: email }
+              department: { type: [string, "null"] }
+              location: { type: [string, "null"] }
+              division: { type: [string, "null"] }
+              supervisor: { type: [string, "null"] }
+              photoUploaded: { type: boolean }
+              photoUrl: { type: [string, "null"] }
+  - id: get_employee
+    method: GET
+    path: /employees/{id}
+    description: One employee with the requested fields
+    parameters:
+      - { name: id, location: path, required: true }
+      - { name: fields, location: query, required: true, description: Comma-separated field list }
+    default_query:
+      fields: firstName,lastName,displayName,workEmail,jobTitle,department,division,location,hireDate,terminationDate,status,supervisorEId,supervisor
+    response_schema:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        firstName: { type: [string, "null"] }
+        lastName: { type: [string, "null"] }
+        displayName: { type: [string, "null"] }
+        workEmail: { type: [string, "null"] }
+        jobTitle: { type: [string, "null"] }
+        department: { type: [string, "null"] }
+        division: { type: [string, "null"] }
+        location: { type: [string, "null"] }
+        hireDate: { type: [string, "null"] }
+        terminationDate: { type: [string, "null"] }
+        status: { type: [string, "null"], enum: [Active, Inactive, null] }
+        supervisorEId: { type: [string, "null"] }
+        supervisor: { type: [string, "null"] }
+mappings:
+  - endpoint_id: list_employees
+    canonical_object: Employee
+    fields:
+      - { target: source_id, source: id }
+      - { target: display_name, source: displayName }
+      - { target: first_name, source: firstName }
+      - { target: last_name, source: lastName }
+      - { target: work_email, source: workEmail }
+      - { target: job_title, source: jobTitle }
+      - { target: department, source: department }
+      - { target: division, source: division }
+      - { target: location, source: location }
+      - { target: work_phone, source: workPhone }
+      - { target: mobile_phone, source: mobilePhone }
+      - { target: manager_display_name, source: supervisor }
+      - { target: employment_status, transform: const, args: { value: active } }
+  - endpoint_id: get_employee
+    canonical_object: Employee
+    fields:
+      - { target: source_id, source: id }
+      - { target: display_name, source: displayName }
+      - { target: first_name, source: firstName }
+      - { target: last_name, source: lastName }
+      - { target: work_email, source: workEmail }
+      - { target: job_title, source: jobTitle }
+      - { target: department, source: department }
+      - { target: division, source: division }
+      - { target: location, source: location }
+      - { target: hire_date, source: hireDate, transform: to_date }
+      - { target: termination_date, source: terminationDate, transform: to_date }
+      - target: employment_status
+        source: status
+        transform: enum_map
+        args:
+          map: { Active: active, Inactive: terminated }
+          default: unknown
+      - { target: manager_source_id, source: supervisorEId, transform: to_str }
+      - { target: manager_display_name, source: supervisor }
