@@ -19,7 +19,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 from app.db import Base, Database, utcnow
 from app.manifest.schema import IntegrationManifest
 
-Status = Literal["draft", "verified", "published", "superseded", "rejected"]
+Status = Literal["draft", "verified", "published", "superseded", "rejected", "rolled_back"]
 
 
 class RegistryError(Exception):
@@ -63,12 +63,20 @@ class SpecSnapshotRow(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SpecSnapshot(BaseModel):
+    integration: str
+    content: str
+    content_hash: str
+    fetched_at: datetime
+
+
 class VersionRecord(BaseModel):
     name: str
     version: str
     status: Status
     provenance: str
     manifest: dict[str, Any]
+    spec_source: str | None = None
     verification: dict[str, Any] | None = None
     created_at: datetime
     published_at: datetime | None = None
@@ -81,6 +89,7 @@ class VersionRecord(BaseModel):
             status=row.status,  # type: ignore[arg-type]
             provenance=row.provenance,
             manifest=json.loads(row.manifest_json),
+            spec_source=row.spec_source,
             verification=json.loads(row.verification_json) if row.verification_json else None,
             created_at=row.created_at,
             published_at=row.published_at,
@@ -151,12 +160,41 @@ class Registry:
             s.refresh(row)
             return VersionRecord.from_row(row)
 
+    def rollback(self, name: str) -> VersionRecord:
+        """One-step rollback: the most recently superseded version becomes published again and the
+        current published version is marked rolled_back (so it can never be re-published by accident)."""
+        with self._sessions() as s:
+            current = s.scalar(select(VersionRow).where(VersionRow.integration_name == name, VersionRow.status == "published"))
+            if current is None:
+                raise NotFound(f"no published version of '{name}'")
+            candidates = list(
+                s.scalars(select(VersionRow).where(VersionRow.integration_name == name, VersionRow.status == "superseded"))
+            )
+            if not candidates:
+                raise RegistryError(f"{name}@{current.version} has no previous published version to roll back to")
+            previous = max(candidates, key=lambda r: (r.published_at or r.created_at, r.id))
+            current.status = "rolled_back"
+            previous.status = "published"
+            previous.published_at = utcnow()
+            s.commit()
+            s.refresh(previous)
+            return VersionRecord.from_row(previous)
+
     def save_snapshot(self, name: str, content: str) -> str:
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         with self._sessions() as s:
             s.add(SpecSnapshotRow(integration_name=name, content=content, content_hash=digest))
             s.commit()
         return digest
+
+    def latest_snapshot(self, name: str) -> SpecSnapshot | None:
+        with self._sessions() as s:
+            row = s.scalar(
+                select(SpecSnapshotRow).where(SpecSnapshotRow.integration_name == name).order_by(SpecSnapshotRow.id.desc())
+            )
+            if row is None:
+                return None
+            return SpecSnapshot(integration=name, content=row.content, content_hash=row.content_hash, fetched_at=row.fetched_at)
 
     # --- reads ------------------------------------------------------------------------
 

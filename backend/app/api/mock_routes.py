@@ -2,7 +2,9 @@
 
 The MockEnvironment owns one mock authorization server per OAuth integration and builds the
 composite transport (token endpoint plus API mock) that both the broker and the gateway use.
-POST /mock/authorize plays the user's browser approving the consent screen at the provider."""
+POST /mock/authorize plays the user's browser approving the consent screen at the provider.
+POST /mock/drift/{integration} makes the mock API drift: from then on it behaves like the
+published manifest plus the scenario, whatever manifest version the caller uses."""
 from __future__ import annotations
 
 import time
@@ -11,11 +13,12 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.manifest.schema import IntegrationManifest, OAuth2Auth
+from app.manifest.schema import IntegrationManifest, OAuth2Auth, load_manifest
 from app.oauth.broker import OAuthBroker
-from app.registry.store import NotFound
+from app.registry.store import NotFound, Registry
+from app.verification.drift_scenarios import DriftScenario, DriftWorld
 from app.verification.mock_oauth import MockAuthorizationServer, composite_transport
 from app.verification.mock_server import MockServer
 
@@ -28,6 +31,7 @@ class MockEnvironment:
         self.clock = clock
         self.access_ttl = access_ttl
         self.auth_servers: dict[str, MockAuthorizationServer] = {}
+        self.worlds: dict[str, DriftWorld] = {}
 
     def auth_server(self, manifest: IntegrationManifest) -> MockAuthorizationServer | None:
         if not isinstance(manifest.auth, OAuth2Auth):
@@ -42,13 +46,27 @@ class MockEnvironment:
             self.auth_servers[manifest.name] = server
         return server
 
+    def pin_world(self, manifest: IntegrationManifest, scenario: DriftScenario) -> DriftWorld:
+        """From now on the mock API for this integration behaves like `manifest` plus `scenario`."""
+        server = self.auth_server(manifest)
+        world = DriftWorld(manifest, scenario, bearer_validator=server.is_valid_access_token if server else None)
+        self.worlds[manifest.name] = world
+        return world
+
+    def clear_world(self, integration_name: str) -> bool:
+        return self.worlds.pop(integration_name, None) is not None
+
     def transport(self, manifest: IntegrationManifest) -> httpx.BaseTransport:
         server = self.auth_server(manifest)
-        api = MockServer(manifest, bearer_validator=server.is_valid_access_token if server else None)
+        world = self.worlds.get(manifest.name)
+        if world is not None:
+            api_handle = world.handle
+        else:
+            api_handle = MockServer(manifest, bearer_validator=server.is_valid_access_token if server else None).handle
         routes = []
         if server is not None:
             routes.append((server.matches, server.handle))
-        routes.append((lambda r: True, api.handle))
+        routes.append((lambda r: True, api_handle))
         return composite_transport(routes)
 
 
@@ -84,6 +102,48 @@ def simulate_user_approval(body: AuthorizeRequest, request: Request) -> Authoriz
         raise HTTPException(400, detail=str(exc)) from exc
     q = {k: v[0] for k, v in parse_qs(urlparse(redirect).query).items()}
     return AuthorizeResponse(redirect_url=redirect, state=q["state"], code=q["code"])
+
+
+class DriftInjection(BaseModel):
+    scenario: DriftScenario
+    version: str | None = Field(default=None, description="Pin the world to this version instead of the published one")
+
+
+class DriftWorldInfo(BaseModel):
+    integration: str
+    pinned_version: str
+    scenario: DriftScenario
+
+
+@router.get("/drift", response_model=list[DriftWorldInfo])
+def list_drift(request: Request) -> list[DriftWorldInfo]:
+    env: MockEnvironment = request.app.state.mock_env
+    return [
+        DriftWorldInfo(integration=name, pinned_version=world.pinned.version, scenario=world.scenario)
+        for name, world in env.worlds.items()
+    ]
+
+
+@router.post("/drift/{integration_name}", response_model=DriftWorldInfo)
+def inject_drift(integration_name: str, body: DriftInjection, request: Request) -> DriftWorldInfo:
+    """Make the provider drift. The mock keeps serving the pinned manifest's shape plus the scenario
+    to every caller, so a candidate manifest is verified against the drifted API, not itself."""
+    env: MockEnvironment = request.app.state.mock_env
+    registry: Registry = request.app.state.registry
+    try:
+        record = registry.get_version(integration_name, body.version) if body.version else registry.get_published(integration_name)
+    except NotFound as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    world = env.pin_world(load_manifest(record.manifest), body.scenario)
+    return DriftWorldInfo(integration=integration_name, pinned_version=world.pinned.version, scenario=world.scenario)
+
+
+@router.delete("/drift/{integration_name}")
+def clear_drift(integration_name: str, request: Request) -> dict[str, str]:
+    env: MockEnvironment = request.app.state.mock_env
+    if not env.clear_world(integration_name):
+        raise HTTPException(404, detail="no drift scenario is active for this integration")
+    return {"status": "cleared", "integration": integration_name}
 
 
 @router.post("/revoke-at-provider/{integration_name}")

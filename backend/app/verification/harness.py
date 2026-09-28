@@ -114,8 +114,13 @@ def _check_endpoint(
     check.pages = result.pages
     check.records = len(result.records)
     check.canonical = len(result.canonical)
-    check.errors.extend(f"{e.kind}: {e.detail}" for e in result.drift_events)
-    check.errors.extend(f"mapping: {m}" for m in result.mapping_errors)
+    for event in result.drift_events:
+        line = f"{event.kind}: {event.detail}"
+        # A Sunset/Deprecation notice on a successful response is advance warning, not a failure.
+        if event.kind == "deprecation" and event.status_code is not None and 200 <= event.status_code < 300:
+            check.warnings.append(line)
+        else:
+            check.errors.append(line)
     if result.status_code is None or not (200 <= result.status_code < 300):
         check.passed = False
 

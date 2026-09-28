@@ -109,3 +109,22 @@ def test_app_registration_requires_oauth_manifest(api, manifest_dict):
     response = api.post("/oauth/apps", json={"integration_name": "bamboohr", "client_id": "a", "client_secret": "b"})
     assert response.status_code == 400
     assert api.post("/oauth/apps", json={"integration_name": "nope", "client_id": "a", "client_secret": "b"}).status_code == 404
+
+
+def test_tenant_listing_audit_feed_and_notification_read(api):
+    assert api.get("/tenants").json() == []
+    tenant_id, conn_id = connect(api)
+    tenants = api.get("/tenants").json()
+    assert [t["id"] for t in tenants] == [tenant_id] and tenants[0]["name"] == "Acme"
+
+    feed = api.get("/audit", params={"tenant_id": tenant_id}).json()
+    assert [e["event"] for e in feed] == ["connection_created", "consent_started", "consent_granted"]
+    assert all(e["connection_id"] == conn_id for e in feed)
+    assert api.get("/audit", params={"tenant_id": "nobody"}).json() == []
+
+    api.post("/mock/revoke-at-provider/gusto")
+    assert api.post(f"/connections/{conn_id}/refresh").status_code == 409
+    notes = api.get("/notifications", params={"tenant_id": tenant_id}).json()
+    assert len(notes) == 1 and notes[0]["read"] is False
+    assert api.post(f"/notifications/{notes[0]['id']}/read").status_code == 204
+    assert api.get("/notifications", params={"tenant_id": tenant_id, "unread_only": "true"}).json() == []

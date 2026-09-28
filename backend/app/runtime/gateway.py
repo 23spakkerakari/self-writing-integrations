@@ -42,7 +42,18 @@ class Connection(BaseModel):
     config: dict[str, str] = Field(default_factory=dict)
 
 
-DriftKind = Literal["schema_violation", "unexpected_status", "malformed_body", "transport_error"]
+DriftKind = Literal[
+    "schema_violation",  # response failed the stored JSON Schema
+    "unexpected_status",  # non-2xx after retries: 401/403 auth, 404 moved, 429 limits, 5xx
+    "malformed_body",  # non-JSON body
+    "transport_error",  # gave up after connection failures
+    "deprecation",  # Sunset/Deprecation headers on a success, or 410 Gone
+    "pagination_runaway",  # max_pages exhausted while the API still advertised more
+    "mapping_error",  # a record could not be mapped onto its canonical object
+    "spec_changed",  # a re-fetched spec differs from the last snapshot (emitted by the drift monitor)
+]
+
+_NOTICE_HEADERS = ("Sunset", "Deprecation", "Link", "Retry-After")
 
 
 class DriftEvent(BaseModel):
@@ -51,6 +62,7 @@ class DriftEvent(BaseModel):
     endpoint_id: str
     kind: DriftKind
     detail: str
+    status_code: int | None = None
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -132,7 +144,10 @@ class Gateway:
         result.url = url
 
         page_state: dict[str, Any] = {"page": 1, "offset": 0, "cursor": None}
+        more = False
+        notice_seen = False
         for page_index in range(max_pages if paginate else 1):
+            more = False
             page_query = self._paginated_query(endpoint, query, page_state)
             response = self._request_with_retry(endpoint, url, page_query, headers, result)
             if response is None:
@@ -142,10 +157,16 @@ class Gateway:
             result.pages += 1
             if not (200 <= response.status_code < 300):
                 result.ok = False
-                self._drift(result, endpoint, "unexpected_status", f"HTTP {response.status_code}: {response.text[:300]}")
+                kind: DriftKind = "deprecation" if response.status_code == 410 else "unexpected_status"
+                self._drift(result, endpoint, kind, self._status_detail(response), response.status_code)
                 break
+            if not notice_seen:
+                notice = self._deprecation_notice(response)
+                if notice:
+                    notice_seen = True
+                    self._drift(result, endpoint, "deprecation", notice, response.status_code)
             body = self._parse_body(response, endpoint, result)
-            if body is None and result.drift_events:
+            if body is None and result.drift_events and result.drift_events[-1].kind == "malformed_body":
                 result.ok = False
                 break
             if page_index == 0:
@@ -154,8 +175,18 @@ class Gateway:
             items = get_path(body, endpoint.items_path) if endpoint.items_path else body
             page_items = items if isinstance(items, list) else ([] if items is None else [items])
             result.records.extend(page_items)
-            if not paginate or not self._advance(endpoint, body, page_items, page_state):
+            more = paginate and self._advance(endpoint, body, page_items, page_state)
+            if not more:
                 break
+        if more:
+            self._drift(
+                result,
+                endpoint,
+                "pagination_runaway",
+                f"stopped after {max_pages} pages while the API still advertised more; "
+                f"pagination style '{endpoint.pagination.style}' may no longer match",
+                result.status_code,
+            )
 
         mapping = self.manifest.mapping_for(endpoint_id)
         if mapping is not None and result.records:
@@ -163,6 +194,8 @@ class Gateway:
             result.canonical_object = mapping.canonical_object
             result.canonical = [c.model_dump(mode="json") for c in canonical]
             result.mapping_errors = errors
+            for message in errors[:20]:
+                self._drift(result, endpoint, "mapping_error", message, result.status_code)
         if result.validation_errors or result.mapping_errors:
             result.ok = False
         return result
@@ -314,8 +347,22 @@ class Gateway:
         try:
             return response.json()
         except json.JSONDecodeError:
-            self._drift(result, endpoint, "malformed_body", f"non-JSON body: {response.text[:200]!r}")
+            self._drift(result, endpoint, "malformed_body", f"non-JSON body: {response.text[:200]!r}", response.status_code)
             return None
+
+    @staticmethod
+    def _status_detail(response: httpx.Response) -> str:
+        detail = f"HTTP {response.status_code}: {response.text[:300]}"
+        notices = [f"{h}: {response.headers[h]}" for h in _NOTICE_HEADERS if h in response.headers]
+        return detail + (" | " + "; ".join(notices) if notices else "")
+
+    @staticmethod
+    def _deprecation_notice(response: httpx.Response) -> str:
+        """Sunset (RFC 8594) and Deprecation (RFC 9745) headers announce retirement ahead of time."""
+        parts = [f"{h}: {response.headers[h]}" for h in ("Sunset", "Deprecation") if h in response.headers]
+        if parts and "Link" in response.headers:
+            parts.append(f"Link: {response.headers['Link']}")
+        return "; ".join(parts)
 
     def _validate(self, endpoint: Endpoint, body: Any, result: CallResult) -> None:
         if endpoint.response_schema is None:
@@ -328,9 +375,11 @@ class Gateway:
             location = "/".join(str(p) for p in err.absolute_path) or "$"
             message = f"{location}: {err.message}"
             result.validation_errors.append(message)
-            self._drift(result, endpoint, "schema_violation", message)
+            self._drift(result, endpoint, "schema_violation", message, result.status_code)
 
-    def _drift(self, result: CallResult, endpoint: Endpoint, kind: DriftKind, detail: str) -> None:
+    def _drift(
+        self, result: CallResult, endpoint: Endpoint, kind: DriftKind, detail: str, status_code: int | None = None
+    ) -> None:
         result.drift_events.append(
             DriftEvent(
                 integration=self.manifest.name,
@@ -338,5 +387,6 @@ class Gateway:
                 endpoint_id=endpoint.id,
                 kind=kind,
                 detail=detail,
+                status_code=status_code,
             )
         )

@@ -14,7 +14,12 @@ The architecture, decisions, and milestone plan live in [docs/ARCHITECTURE.md](d
 - **Milestone 2, built.** Multi-tenant OAuth broker: envelope-encrypted vault, PKCE consent with a
   human-approved scope screen, autonomous refresh and re-consent detection, append-only audit log,
   notifications, and a mock authorization server for offline tests. Gusto is the practice integration.
-- Next: milestone 3, drift detection and the repair pipeline.
+- **Milestone 3, built.** Drift detection and repair: the gateway's drift events (schema, status, auth,
+  deprecation, pagination, mapping) aggregate into incidents; deterministic triage assigns class and risk;
+  a mechanical patch or the repair agent produces a candidate that is verified against the API as it
+  behaves now; change requests wait for approval (or a per-risk policy), run a canary, promote, and roll
+  back in one step. Drift worlds simulate every drift type against the mock.
+- Next: milestone 4, the traffic-first ingester.
 
 ```
 cd backend
@@ -32,4 +37,6 @@ uvicorn app.main:app --reload      # http://127.0.0.1:8000/docs
 Environment variables: `DATABASE_URL` (default SQLite in the working directory), `GATEWAY_MODE`
 (`live` or `mock`), `SYNTHESIS_MODEL` (default `claude-opus-5`), `ANTHROPIC_API_KEY` for synthesis,
 `VAULT_MASTER_KEY` (generate with `python -m app.cli vault-key`; a fixed dev key is used when unset),
-`PUBLIC_BASE_URL` for the OAuth callback, `REFRESH_SCHEDULER=1` to run token refresh in-process.
+`PUBLIC_BASE_URL` for the OAuth callback, `REFRESH_SCHEDULER=1` to run token refresh in-process,
+`DRIFT_WORKER=1` to run the drift worker in-process (`DRIFT_INTERVAL_SECONDS`, `CANARY_FRACTION`,
+`CANARY_MIN_CALLS`, `REPAIR_MAX_ROUNDS` tune it).

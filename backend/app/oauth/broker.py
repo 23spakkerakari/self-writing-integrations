@@ -126,6 +126,11 @@ class OAuthBroker:
             s.commit()
             return Tenant(id=row.id, name=row.name, created_at=as_utc(row.created_at) or utcnow())
 
+    def list_tenants(self) -> list[Tenant]:
+        with self.db.session() as s:
+            rows = s.scalars(select(TenantRow).order_by(TenantRow.created_at))
+            return [Tenant(id=r.id, name=r.name, created_at=as_utc(r.created_at) or utcnow()) for r in rows]
+
     def get_tenant(self, tenant_id: str) -> Tenant:
         with self.db.session() as s:
             row = s.get(TenantRow, tenant_id)

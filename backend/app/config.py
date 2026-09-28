@@ -23,6 +23,14 @@ class Settings:
     # Start the background token-refresh loop with the API process.
     refresh_scheduler: bool = field(default_factory=lambda: os.environ.get("REFRESH_SCHEDULER", "0") == "1")
     refresh_interval_seconds: int = field(default_factory=lambda: int(os.environ.get("REFRESH_INTERVAL_SECONDS", "60")))
+    # Drift worker: triage open incidents, run repairs, start canaries, promote or abort them.
+    drift_worker: bool = field(default_factory=lambda: os.environ.get("DRIFT_WORKER", "0") == "1")
+    drift_interval_seconds: int = field(default_factory=lambda: int(os.environ.get("DRIFT_INTERVAL_SECONDS", "300")))
+    repair_max_rounds: int = field(default_factory=lambda: int(os.environ.get("REPAIR_MAX_ROUNDS", "2")))
+    # Share of an integration's calls routed to a candidate while it is in canary, and how many
+    # candidate calls must be observed before the canary is judged.
+    canary_fraction: float = field(default_factory=lambda: float(os.environ.get("CANARY_FRACTION", "0.5")))
+    canary_min_calls: int = field(default_factory=lambda: int(os.environ.get("CANARY_MIN_CALLS", "5")))
 
 
 def load_settings() -> Settings:

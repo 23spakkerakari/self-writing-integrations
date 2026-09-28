@@ -1,5 +1,5 @@
-"""HTTP control plane for milestone one: import or synthesize a manifest, verify it,
-publish it, and call it through the gateway."""
+"""HTTP control plane: import or synthesize a manifest, verify it, publish it, call it through
+the gateway (with canary routing and drift capture), and wire the OAuth and drift routers."""
 from __future__ import annotations
 
 import json
@@ -11,19 +11,26 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
+from app.api.common import ConnectionSpec, secrets_for
+from app.api.drift_routes import router as drift_router
 from app.api.mock_routes import MockEnvironment
 from app.api.mock_routes import router as mock_router
 from app.api.oauth_routes import router as oauth_router
 from app.canonical.people import canonical_schemas
 from app.config import Settings, load_settings
 from app.db import Database, utcnow
-from app.manifest.schema import IntegrationManifest, load_manifest
+from app.drift.changes import ChangeRequests
+from app.drift.models import DriftIncident
+from app.drift.monitor import DriftMonitor
+from app.drift.repair import RepairPipeline, World
+from app.drift.worker import DriftWorker
+from app.manifest.schema import IntegrationManifest, OAuth2Auth, load_manifest
 from app.oauth.broker import OAuthBroker
 from app.oauth.scheduler import RefreshScheduler
 from app.oauth.vault import Vault
 from app.registry.store import IntegrationSummary, NotFound, Registry, RegistryError, VersionRecord
 from app.runtime.gateway import CallResult, ConfigError, Connection, Gateway, GatewayError
-from app.runtime.secrets import DictSecretsProvider, EnvSecretsProvider, SecretNotFound, SecretsProvider
+from app.runtime.secrets import DictSecretsProvider, SecretNotFound
 from app.runtime.transforms import TRANSFORM_DOCS
 from app.synthesis.pipeline import PipelineResult, synthesize_and_verify
 from app.verification.harness import VerificationReport, verify
@@ -45,17 +52,6 @@ class SynthesizeRequest(BaseModel):
     max_rounds: int = Field(default=2, ge=1, le=5)
 
 
-class ConnectionSpec(BaseModel):
-    tenant_id: str = "default"
-    config: dict[str, str] = Field(default_factory=dict)
-    secret_env: dict[str, str] = Field(
-        default_factory=dict, description="secret_ref -> environment variable name, resolved server-side"
-    )
-    secrets: dict[str, str] = Field(
-        default_factory=dict, description="secret_ref -> value. Development only; use secret_env in real deployments"
-    )
-
-
 class VerifyRequest(BaseModel):
     mode: str = "mock"
     connection: ConnectionSpec = Field(default_factory=ConnectionSpec)
@@ -67,23 +63,6 @@ class CallRequest(BaseModel):
     paginate: bool = True
     version: str | None = Field(default=None, description="Defaults to the published version")
     connection: ConnectionSpec = Field(default_factory=ConnectionSpec)
-
-
-class _ChainSecrets:
-    def __init__(self, *providers: SecretsProvider) -> None:
-        self._providers = providers
-
-    def get(self, ref: str) -> str:
-        for p in self._providers:
-            try:
-                return p.get(ref)
-            except SecretNotFound:
-                continue
-        raise SecretNotFound(f"secret '{ref}' not provided")
-
-
-def _secrets(spec: ConnectionSpec) -> SecretsProvider:
-    return _ChainSecrets(DictSecretsProvider(spec.secrets), EnvSecretsProvider(spec.secret_env))
 
 
 # --- dependencies -------------------------------------------------------------------
@@ -101,8 +80,8 @@ def get_settings(request: Request) -> Settings:
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(settings: Settings = Depends(get_settings)) -> dict[str, str]:
+    return {"status": "ok", "mode": settings.gateway_mode, "version": "0.2.0"}
 
 
 @router.get("/canonical")
@@ -184,7 +163,7 @@ def verify_version(
         transport = request.app.state.transport_factory(manifest)
         connection = Connection(tenant_id=body.connection.tenant_id, config=body.connection.config)
         try:
-            report = verify(manifest, mode="live", connection=connection, secrets=_secrets(body.connection), transport=transport)
+            report = verify(manifest, mode="live", connection=connection, secrets=secrets_for(body.connection), transport=transport)
         except (ConfigError, SecretNotFound) as exc:
             raise HTTPException(400, detail=str(exc)) from exc
     else:
@@ -207,20 +186,32 @@ def publish_version(name: str, version: str, registry: Registry = Depends(get_re
 def call_integration(
     name: str, body: CallRequest, request: Request, registry: Registry = Depends(get_registry)
 ) -> CallResult:
+    """Calls without an explicit version take part in any running canary for the integration, and
+    their drift events feed the monitor."""
+    changes: ChangeRequests = request.app.state.changes
+    monitor: DriftMonitor = request.app.state.monitor
     try:
-        record = registry.get_version(name, body.version) if body.version else registry.get_published(name)
+        if body.version:
+            record, canary, arm = registry.get_version(name, body.version), None, "base"
+        else:
+            record, canary, arm = changes.select_version(name)
     except NotFound as exc:
         raise HTTPException(404, detail=str(exc)) from exc
     manifest = load_manifest(record.manifest)
     transport = request.app.state.transport_factory(manifest)
     connection = Connection(tenant_id=body.connection.tenant_id, config=body.connection.config)
     try:
-        with Gateway(manifest, connection, _secrets(body.connection), transport=transport) as gateway:
-            return gateway.call(body.endpoint_id, body.params, paginate=body.paginate)
+        with Gateway(manifest, connection, secrets_for(body.connection), transport=transport) as gateway:
+            result = gateway.call(body.endpoint_id, body.params, paginate=body.paginate)
     except KeyError as exc:
         raise HTTPException(404, detail=str(exc)) from exc
     except (ConfigError, SecretNotFound, GatewayError) as exc:
         raise HTTPException(400, detail=str(exc)) from exc
+    if canary is not None:
+        changes.record_call(canary.id, arm, record.version, result)
+    if arm == "base" and not body.version:
+        monitor.ingest_result(result, tenant_id=body.connection.tenant_id)
+    return result
 
 
 def _record(registry: Registry, name: str, version: str) -> VersionRecord:
@@ -254,14 +245,73 @@ def create_app(settings: Settings | None = None, clock: Callable[[], datetime] |
 
     scheduler = RefreshScheduler(broker, settings.refresh_interval_seconds)
 
+    # Drift: monitor -> repair pipeline -> change requests -> worker.
+    monitor = DriftMonitor(db, registry, clock=clock)
+    changes = ChangeRequests(db, registry, monitor, clock=clock, min_calls=settings.canary_min_calls)
+    pipeline = RepairPipeline(
+        registry,
+        monitor,
+        changes,
+        model=settings.synthesis_model,
+        max_attempts=settings.synthesis_max_attempts,
+        max_rounds=settings.repair_max_rounds,
+    )
+
+    def world_for(
+        manifest: IntegrationManifest,
+        connection_spec: ConnectionSpec | None = None,
+        connection_id: str | None = None,
+        incident: DriftIncident | None = None,
+    ) -> World | None:
+        """How a repair is verified: the API as it behaves now, reached with real credentials that
+        never leave the gateway. Returns None when nothing usable exists."""
+        transport = transport_factory(manifest)
+        if connection_id:
+            conn = broker.get_connection(connection_id)
+            return World(Connection(tenant_id=conn.tenant_id, config=conn.config), broker.secrets_for(conn.id), transport)
+        if connection_spec is not None and not connection_spec.is_empty():
+            connection = Connection(tenant_id=connection_spec.tenant_id, config=connection_spec.config)
+            return World(connection, secrets_for(connection_spec), transport)
+        if isinstance(manifest.auth, OAuth2Auth):
+            active = [c for c in broker.list_connections() if c.integration_name == manifest.name and c.status == "active"]
+            if incident is not None and incident.tenant_id:
+                active.sort(key=lambda c: c.tenant_id != incident.tenant_id)
+            if not active:
+                return None
+            conn = active[0]
+            return World(Connection(tenant_id=conn.tenant_id, config=conn.config), broker.secrets_for(conn.id), transport)
+        if settings.gateway_mode == "mock":
+            connection = Connection(tenant_id="mock", config={v: f"mock-{v}" for v in manifest.config_vars})
+            return World(connection, DictSecretsProvider({ref: f"mock-{ref}" for ref in manifest.secret_refs()}), transport)
+        return None
+
+    def world_for_incident(incident: DriftIncident) -> World | None:
+        try:
+            manifest = load_manifest(registry.get_published(incident.integration).manifest)
+        except NotFound:
+            return None
+        return world_for(manifest, incident=incident)
+
+    worker = DriftWorker(
+        monitor,
+        changes,
+        pipeline,
+        world_for_incident,
+        canary_fraction=settings.canary_fraction,
+        interval_seconds=settings.drift_interval_seconds,
+    )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.refresh_scheduler:
             scheduler.start()
+        if settings.drift_worker:
+            worker.start()
         yield
+        worker.stop()
         scheduler.stop()
 
-    app = FastAPI(title="Self-writing integrations", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Self-writing integrations", version="0.3.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.db = db
     app.state.registry = registry
@@ -270,8 +320,14 @@ def create_app(settings: Settings | None = None, clock: Callable[[], datetime] |
     app.state.scheduler = scheduler
     app.state.transport_factory = transport_factory
     app.state.mock_env = mock_env
+    app.state.monitor = monitor
+    app.state.changes = changes
+    app.state.pipeline = pipeline
+    app.state.worker = worker
+    app.state.world_for = world_for
     app.include_router(router)
     app.include_router(oauth_router)
+    app.include_router(drift_router)
     if mock_env is not None:
         app.include_router(mock_router)
     return app

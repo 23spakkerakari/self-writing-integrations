@@ -25,6 +25,7 @@ class Database:
 
     def create_all(self) -> None:
         # Import every module that declares tables so metadata is complete before create_all.
+        import app.drift.models  # noqa: F401
         import app.oauth.models  # noqa: F401
         import app.registry.store  # noqa: F401
 

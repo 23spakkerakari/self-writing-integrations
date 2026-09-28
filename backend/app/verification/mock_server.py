@@ -155,19 +155,20 @@ class MockServer:
         self.requests: list[httpx.Request] = []
         # Literal routes first so '/employees/directory' beats '/employees/{id}'.
         ordered = sorted(manifest.endpoints, key=lambda e: e.path.count("{"))
-        self._routes = [(e, self._compile(e.path)) for e in ordered]
+        self._routes = [(e, self.compile_path(e.path)) for e in ordered]
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
     @staticmethod
-    def _compile(path: str) -> re.Pattern[str]:
+    def compile_path(path: str) -> re.Pattern[str]:
+        """Regex for a manifest path template; '{var}' segments match any single path segment."""
         pattern = re.sub(r"{[^/]+}", r"[^/]+", re.escape(path).replace(r"\{", "{").replace(r"\}", "}"))
         return re.compile(pattern.rstrip("/") + "/?$")
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        endpoint = self._match(request)
+        endpoint = self.match(request)
         if endpoint is None:
             return httpx.Response(404, json={"error": f"no mock route for {request.method} {request.url.path}"})
         if not self._authorized(request):
@@ -180,7 +181,7 @@ class MockServer:
             body = replaced
         return httpx.Response(200, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
 
-    def _match(self, request: httpx.Request) -> Endpoint | None:
+    def match(self, request: httpx.Request) -> Endpoint | None:
         for endpoint, pattern in self._routes:
             if endpoint.method == request.method and pattern.search(request.url.path):
                 return endpoint

@@ -183,23 +183,39 @@ wrong master key cannot unwrap anything. 79 tests pass.
 Gusto developer app: register it with `POST /oauth/apps`, set `PUBLIC_BASE_URL` to a reachable callback
 host, and run with `GATEWAY_MODE=live`.
 
-### Milestone 3: Drift and repair (designed)
+### Milestone 3: Drift and repair (built)
 
-**Goal.** Detect every drift type against a mutated mock, patch it, verify, approve, canary, promote.
+**Goal.** Detect every drift type against a drifted mock, patch it, verify, approve, canary, promote.
 
 **Architecture.**
 
-| Component | Responsibility |
-|---|---|
-| Drift monitor | Consumes gateway DriftEvents from live traffic plus scheduled spec re-fetch diffs, Sunset and Deprecation headers, and changelog watchers. Aggregates into `drift_incidents(integration, endpoint, kind, first_seen, last_seen, count, sample)`. |
-| Triage agent | Classifies an incident: cosmetic, schema, behavioral, auth, deprecation, semantic. Assigns a risk class that decides the approval policy. |
-| Repair agent | The synthesis agent's repair mode with the incident, the current manifest, samples of failing responses, and the latest spec snapshot. Produces a candidate manifest version. |
-| Verification | The milestone 1 harness against mock and, when available, live. |
-| Approval gate | `change_requests(candidate_version, incident, risk_class, diff, status, decided_by, decided_at)`. UI shows the manifest diff and the report. Auto-approval policy is per integration and per risk class, default off. |
-| Canary and promote | Route a configurable fraction of calls for the integration to the candidate, compare error and validation rates, then publish or roll back. |
+| Component | Where | What it does |
+|---|---|---|
+| Drift signals | `backend/app/runtime/gateway.py` | Every call emits DriftEvents: schema_violation, unexpected_status, malformed_body, transport_error, and now deprecation (Sunset/Deprecation headers, 410 Gone), pagination_runaway (max_pages exhausted while more is advertised) and mapping_error. Events carry the HTTP status. |
+| Drift worlds | `backend/app/verification/drift_scenarios.py` | Middleware around the mock that pins the API to the published manifest plus a scenario: rename, remove or retype a field, a new enum value, a moved list key, a fixed status, a non-JSON body, a newly required header, a retired path with a successor, a Sunset notice, endless pagination. A candidate is verified against the world, never against a mock built from its own schema. `POST /mock/drift/{integration}` injects a scenario in mock mode. |
+| Drift monitor | `backend/app/drift/monitor.py` | Folds events into `drift_incidents(integration, endpoint, kind, status, first_seen, last_seen, count, samples, sample_body)`: one incident per (integration, endpoint, kind) while unresolved. `check_spec` snapshots a re-fetched spec and opens a spec_changed incident carrying the diff. |
+| Triage | `backend/app/drift/triage.py` | Deterministic rules, not a model: class (schema, behavioral, auth, deprecation, semantic, transient, cosmetic), risk (low, medium, high) and repairability. Risk gates the approval policy, so it must be reproducible. Anything touching auth, a mapped field or a retired endpoint is high. |
+| Repair | `backend/app/drift/patches.py`, `backend/app/drift/repair.py` | A mechanical rename patch is tried first (schema, items_path, cursor path and mapping sources rewritten together). Otherwise the synthesis agent's repair mode receives the incident, its samples, the sample body, the latest spec snapshot and class-specific guidance; a verification failure feeds a second round. Every candidate is stored as a new version with provenance `repair:<strategy>:incident:<id>`. |
+| Approval gate | `backend/app/drift/changes.py` | `change_requests(base_version, candidate_version, risk_class, diff, verification, status, decided_by, decided_at)`. The diff aligns lists by identity, so a reviewer reads `/mappings/[endpoint_id=list_employees]/fields/[target=display_name]/source`. `approval_policies` per integration and risk class, default off. |
+| Canary and promote | `backend/app/drift/changes.py` | Calls without an explicit version take part in a running canary: a fraction goes to the candidate and every call's outcome is recorded per arm. Verdict: pass once the candidate has `CANARY_MIN_CALLS` calls, a failure rate under 10% and no worse than the base; fail otherwise. Promote publishes; abort keeps the base live. |
+| Rollback | `backend/app/registry/store.py` | One step: the previous published version is re-published and the current one is marked rolled_back, so it can never be published again. The promoting change request is marked rolled_back and its incident goes back to a human. |
+| Worker | `backend/app/drift/worker.py` | One tick triages open incidents, runs repairs, starts canaries for approved changes and judges running ones. In-process with `DRIFT_WORKER=1`, or on demand through `POST /drift/tick`. |
+| Control plane | `backend/app/api/drift_routes.py` | `/drift/incidents`, `/drift/incidents/{id}/{triage,repair,dismiss}`, `/drift/spec-check/{name}`, `/drift/tick`, `/changes`, `/changes/{id}/{approve,reject,canary,promote,abort}`, `/integrations/{name}/approval-policy`, `/integrations/{name}/rollback`. CLI: `incidents`, `changes`, `approve`, `reject`, `promote`, `rollback`, `policy`. |
 
-**Exit criteria.** Each drift type in the taxonomy is simulated through the mock hook, detected, repaired,
-and promoted with an approval. Rollback restores the previous published version in one step.
+**Exit criteria, met.** Every drift type in the taxonomy is simulated by a drift world and detected as the
+right kind. Repairable drift (renamed field, moved list key, new enum value, new auth header, retired path,
+retyped field) is repaired and promoted through approval and canary; a Sunset notice and upstream failures
+are routed to a human instead. Rollback restores the previous published version in one step. The suite is
+142 tests; the live-agent repair test runs when `ANTHROPIC_API_KEY` is set.
+
+**Decisions made while building.**
+
+- Triage is rule-based because it decides how much supervision a repair gets; the model only proposes patches.
+- A repair is verified against the API as it behaves now (a live connection, or the pinned drift world), never
+  against a mock generated from the candidate's own schema.
+- Incidents keep aggregating by (integration, endpoint, kind) while a human holds them, so a second change on
+  the same endpoint adds evidence to the open incident rather than opening a parallel one.
+- Changelog watchers and Sunset-driven migration planning stay manual for now; the notice opens an incident.
 
 ### Milestone 4: Traffic-first ingester (designed)
 
@@ -253,8 +269,9 @@ backend/
     registry/      store.py             versioned storage
     oauth/         models.py vault.py broker.py scheduler.py   tenancy and OAuth broker
     synthesis/     agent.py pipeline.py Claude synthesis and repair loop
-    verification/  mock_server.py mock_oauth.py harness.py
-    api/           routes.py oauth_routes.py mock_routes.py   FastAPI control plane
+    drift/         models.py monitor.py triage.py patches.py repair.py changes.py worker.py diff.py
+    verification/  mock_server.py mock_oauth.py harness.py drift_scenarios.py
+    api/           routes.py oauth_routes.py drift_routes.py mock_routes.py common.py   FastAPI control plane
     db.py cli.py main.py config.py
   manifests/       bamboohr.yaml gusto.yaml   reference manifests
   specs/           bamboohr-employees.openapi.yaml   practice spec
@@ -299,3 +316,23 @@ Then, against `http://127.0.0.1:8000`:
 6. `POST /mock/revoke-at-provider/gusto`, then `POST /connections/{id}/refresh` to see the needs_reconsent transition and `GET /notifications?tenant_id=...`.
 
 Set `REFRESH_SCHEDULER=1` to run the background refresh loop inside the API process.
+
+## 10. Running milestone three (drift and repair) against the mock provider
+
+```
+set GATEWAY_MODE=mock
+uvicorn app.main:app --reload
+```
+
+1. Import, verify and publish `manifests/bamboohr.yaml` as in section 8.
+2. Make the provider drift: `POST /mock/drift/bamboohr {"scenario": {"mutations": [{"type": "rename_field", "endpoint_id": "list_employees", "old": "displayName", "new": "display_name"}]}}`.
+3. Call it: `POST /integrations/bamboohr/call {"endpoint_id": "list_employees", "connection": {"config": {"company_domain": "acme"}, "secrets": {"api_key": "x"}}}` returns `ok: false`, and `GET /drift/incidents` shows the incident.
+4. Repair: `POST /drift/incidents/1/repair {}`. The mechanical patch is verified against the drifted mock and opens change request 1; `GET /changes/1` shows the diff and the verification report.
+5. Approve and canary: `POST /changes/1/approve {"actor": "you"}`, `POST /changes/1/canary {"fraction": 0.5}`, make a few calls, then `GET /changes/1/canary`.
+6. Promote: `POST /changes/1/promote {"actor": "you"}`. `GET /integrations` shows 0.1.1 published. `POST /integrations/bamboohr/rollback {}` restores 0.1.0.
+7. Let the worker do steps 4 to 6: `PUT /integrations/bamboohr/approval-policy {"risk_class": "medium", "auto_approve": true}`, then `POST /drift/tick` after each batch of calls, or run with `DRIFT_WORKER=1`.
+
+Other mutation types: `set_field` (a new enum value; needs the repair agent and `ANTHROPIC_API_KEY`),
+`require_header`, `path_moved`, `retype_field`, `remove_field`, `wrap_items`, `status`, `non_json`,
+`sunset`, `endless_pagination`. `DELETE /mock/drift/bamboohr` heals the provider. Environment:
+`DRIFT_WORKER`, `DRIFT_INTERVAL_SECONDS`, `CANARY_FRACTION`, `CANARY_MIN_CALLS`, `REPAIR_MAX_ROUNDS`.

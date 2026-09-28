@@ -1,5 +1,6 @@
 def test_health_and_reference_endpoints(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    health = client.get("/health").json()
+    assert health["status"] == "ok" and health["mode"] == "mock"
     canonical = client.get("/canonical").json()
     assert "Employee" in canonical["objects"] and "to_date" in canonical["transforms"]
     assert client.get("/manifest-schema").json()["title"] == "IntegrationManifest"

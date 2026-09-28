@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,11 @@ class ConnectionCall(BaseModel):
 @router.post("/tenants", response_model=Tenant, status_code=201)
 def create_tenant(body: TenantCreate, broker: OAuthBroker = Depends(get_broker)) -> Tenant:
     return broker.create_tenant(body.name)
+
+
+@router.get("/tenants", response_model=list[Tenant])
+def list_tenants(broker: OAuthBroker = Depends(get_broker)) -> list[Tenant]:
+    return broker.list_tenants()
 
 
 @router.post("/oauth/apps", response_model=OAuthApp, status_code=201)
@@ -167,9 +172,21 @@ def connection_audit(connection_id: str, broker: OAuthBroker = Depends(get_broke
     return broker.audit(connection_id=connection_id)
 
 
+@router.get("/audit", response_model=list[AuthEvent])
+def tenant_audit(tenant_id: str, broker: OAuthBroker = Depends(get_broker)) -> list[AuthEvent]:
+    """Every auth event for a tenant across all of its connections, oldest first."""
+    return broker.audit(tenant_id=tenant_id)
+
+
 @router.get("/notifications", response_model=list[Notification])
 def notifications(tenant_id: str, unread_only: bool = False, broker: OAuthBroker = Depends(get_broker)) -> list[Notification]:
     return broker.notifications(tenant_id, unread_only)
+
+
+@router.post("/notifications/{notification_id}/read", status_code=204, response_model=None)
+def mark_notification_read(notification_id: int, broker: OAuthBroker = Depends(get_broker)) -> Response:
+    broker.mark_read(notification_id)
+    return Response(status_code=204)
 
 
 @router.post("/connections/{connection_id}/call", response_model=CallResult)
@@ -181,12 +198,22 @@ def call_through_connection(connection_id: str, body: ConnectionCall, request: R
         raise HTTPException(404, detail=str(exc)) from exc
     if conn.status != "active":
         raise HTTPException(409, detail=f"connection is {conn.status}")
-    manifest = load_manifest(broker.manifest_for(conn.integration_name).model_dump(mode="json"))
+    changes = request.app.state.changes
+    try:
+        record, canary, arm = changes.select_version(conn.integration_name)
+    except NotFound as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    manifest = load_manifest(record.manifest)
     transport = request.app.state.transport_factory(manifest)
     try:
         with Gateway(manifest, Connection(tenant_id=conn.tenant_id, config=conn.config), broker.secrets_for(conn.id), transport=transport) as gateway:
-            return gateway.call(body.endpoint_id, body.params, paginate=body.paginate)
+            result = gateway.call(body.endpoint_id, body.params, paginate=body.paginate)
     except KeyError as exc:
         raise HTTPException(404, detail=str(exc)) from exc
     except (ConfigError, SecretNotFound, GatewayError) as exc:
         raise HTTPException(400, detail=str(exc)) from exc
+    if canary is not None:
+        changes.record_call(canary.id, arm, record.version, result)
+    if arm == "base":
+        request.app.state.monitor.ingest_result(result, tenant_id=conn.tenant_id)
+    return result
