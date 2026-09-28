@@ -138,7 +138,7 @@ Consent is human, everything after is autonomous, everything is audited.
 | Broker | `backend/app/oauth/broker.py` | Registers one OAuth app per integration. Creates connections. Builds the consent request with PKCE S256, a random state, and the minimal scope set. Completes consent by exchanging the code and storing tokens in the vault. Refreshes ahead of expiry, rotates refresh tokens, and on `invalid_grant` flips the connection to needs_reconsent, destroys its credentials, appends audit events, and notifies the tenant. Exposes a per-connection SecretsProvider that the gateway uses; on a 401 the gateway asks it to refresh once and retries. |
 | Refresh scheduler | `backend/app/oauth/scheduler.py` | Ticks over connections inside their leeway window. Runs as a daemon thread with the API when `REFRESH_SCHEDULER=1`. Transient provider errors retry next tick. |
 | Mock authorization server | `backend/app/verification/mock_oauth.py` | Plays the provider offline: simulated user approval, code exchange with PKCE verification, refresh token rotation, bearer validation for the mock API, and revocation and expiry controls for drift simulation. |
-| Consent screen | `backend/app/api/oauth_routes.py` | Server-rendered page showing exactly which scopes will be requested, with the link to the provider. This is the human-in-the-loop step. A React version belongs to the developer UI work in milestone 5. |
+| Consent screen | `backend/app/api/oauth_routes.py` | Server-rendered page showing exactly which scopes will be requested, with the link to the provider. This is the human-in-the-loop step. The developer console renders the same screen at `/connections/{id}/consent` (`frontend/src/pages/consent.tsx`); the server-rendered page stays for API-only use. |
 | Control plane | `backend/app/api/oauth_routes.py`, `mock_routes.py` | Tenants, app registration, connections, consent, callback, refresh, revoke, audit, notifications, and calling an integration through a connection so callers never handle credentials. Mock-mode routes simulate the user approving at the provider and revoking the app there. |
 
 **Data model.**
@@ -276,7 +276,10 @@ backend/
   manifests/       bamboohr.yaml gusto.yaml   reference manifests
   specs/           bamboohr-employees.openapi.yaml   practice spec
   tests/
-frontend/          placeholder for the developer UI
+frontend/          developer console: Vite, React, TypeScript, Tailwind (npm run dev proxies /api to the backend)
+  src/lib/         api.ts types.ts format.ts hooks.ts tenant.tsx   typed client, DTO mirrors, formatting, tenant context
+  src/components/  ui/ shell/ call-console manifest-view verification-report drift-tables ...
+  src/pages/       integrations, versions, connections, consent, drift, changes, activity, canonical
 docs/              this document
 ```
 

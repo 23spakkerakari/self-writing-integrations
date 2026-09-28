@@ -19,6 +19,10 @@ The architecture, decisions, and milestone plan live in [docs/ARCHITECTURE.md](d
   a mechanical patch or the repair agent produces a candidate that is verified against the API as it
   behaves now; change requests wait for approval (or a per-risk policy), run a canary, promote, and roll
   back in one step. Drift worlds simulate every drift type against the mock.
+- **Developer console, built.** A React/Vite app under `frontend/`: integrations, versions and their
+  verification reports, a call console, tenant connections with the consent screen, drift incidents and
+  change requests behind the approval gate, per-integration approval policies, rollback, the activity
+  feed and the canonical model reference. Runs against the API in mock or live mode.
 - Next: milestone 4, the traffic-first ingester.
 
 ```
@@ -32,6 +36,10 @@ python -m app.cli publish bamboohr 0.1.0
 python -m app.cli call bamboohr list_employees --config company_domain=acme --secret api_key=BAMBOOHR_API_KEY --mock
 
 uvicorn app.main:app --reload      # http://127.0.0.1:8000/docs
+
+cd ../frontend
+npm install
+npm run dev                        # http://127.0.0.1:5173, proxies /api to the backend
 ```
 
 Environment variables: `DATABASE_URL` (default SQLite in the working directory), `GATEWAY_MODE`

@@ -99,6 +99,8 @@ class MockAuthorizationServer:
             return httpx.Response(400, json={"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
         if self.require_pkce and _s256(form.get("code_verifier", "")) != code["challenge"]:
             return httpx.Response(400, json={"error": "invalid_grant", "error_description": "PKCE verification failed"})
+        # A fresh authorization code means the user approved the app again; the revocation is over.
+        self.revoked = False
         return self._issue(code["scope"])
 
     def _refresh_grant(self, form: dict[str, str]) -> httpx.Response:

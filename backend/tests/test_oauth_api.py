@@ -128,3 +128,20 @@ def test_tenant_listing_audit_feed_and_notification_read(api):
     assert len(notes) == 1 and notes[0]["read"] is False
     assert api.post(f"/notifications/{notes[0]['id']}/read").status_code == 204
     assert api.get("/notifications", params={"tenant_id": tenant_id, "unread_only": "true"}).json() == []
+
+
+def test_reconsent_after_provider_revocation_restores_calls(api):
+    tenant_id, conn_id = connect(api)
+    api.post("/mock/revoke-at-provider/gusto")
+    assert api.post(f"/connections/{conn_id}/refresh").status_code == 409
+    assert api.get(f"/connections/{conn_id}").json()["status"] == "needs_reconsent"
+
+    consent = api.post(f"/connections/{conn_id}/consent").json()
+    approval = api.post("/mock/authorize", json={"authorize_url": consent["authorize_url"]}).json()
+    restored = api.get("/oauth/callback", params={"state": approval["state"], "code": approval["code"]}).json()
+    assert restored["status"] == "active"
+
+    call = api.post(f"/connections/{conn_id}/call", json={"endpoint_id": "list_employees", "params": {"company_uuid": "co-1"}})
+    assert call.status_code == 200 and call.json()["ok"] is True, call.text
+    assert api.post(f"/connections/{conn_id}/refresh").status_code == 200
+    assert api.get(f"/connections/{conn_id}").json()["status"] == "active"
