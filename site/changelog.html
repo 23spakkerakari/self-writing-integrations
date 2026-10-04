@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="What has shipped, what is being drawn, and what is designed, with the dates each milestone met its exit criteria.">
+<meta name="theme-color" content="#5A3BB0">
+<meta property="og:title" content="Changelog, Self-writing integrations">
+<meta property="og:description" content="Revision history: three milestones and a console built, traffic ingestion being drawn, flows and codebases designed.">
+<meta property="og:type" content="website">
+<title>Changelog</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="sub">
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+  <ol class="zones" style="--zones: 4" aria-label="Sections">
+    <li><a href="#a"><b>A</b><span>Built</span></a></li>
+    <li><a href="#b"><b>B</b><span>Being drawn</span></a></li>
+    <li><a href="#c"><b>C</b><span>Designed</span></a></li>
+    <li><a href="#d"><b>D</b><span>Decisions</span></a></li>
+  </ol>
+
+  <div class="gutter">
+    <div class="wrap">
+      <header class="mast">
+        <a class="brand" href="index.html">Self-writing integrations</a>
+        <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+        <nav class="nav" id="nav" aria-label="Site">
+          <a href="index.html">Home</a>
+          <a href="how-it-works.html">How it works</a>
+          <a href="console.html">Console</a>
+          <a href="docs.html">Docs</a>
+          <a href="changelog.html" aria-current="page">Changelog</a>
+          <a class="btn sm primary" href="/integrations">Open the console</a>
+        </nav>
+      </header>
+
+      <main id="main">
+      <section class="intro">
+        <h1>Revision history.</h1>
+        <p class="lede">What has shipped, what is being drawn, and what is designed. Dates are the day each milestone met its exit criteria.</p>
+      </section>
+
+      <!-- Zone A -->
+      <section class="zone first" id="a">
+        <header class="zhead">
+          <a class="zmark" href="#a" aria-label="Zone A">A</a>
+          <span class="zname">Built</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Three milestones and a console, in the registry.</h2>
+        <p class="lede">Each milestone shipped with its tests and a written exit criterion that was met before the next one started.</p>
+
+        <div class="tablewrap">
+          <table class="revtable revlog">
+            <thead>
+              <tr><th>Rev</th><th>Milestone</th><th>What shipped</th><th>Checked</th><th>Date</th></tr>
+            </thead>
+            <tbody>
+              <tr class="b-brand">
+                <td class="rev">1</td>
+                <td>Manifest and runtime</td>
+                <td>Manifest schema with cross-checks, gateway with response validation, rate limiting, retries and pagination, spec-derived mock server, verification harness, versioned registry, synthesis agent, HTTP API and CLI. BambooHR mapped onto Employee.</td>
+                <td class="chk"><span class="checked">53 tests</span></td>
+                <td class="date">2026-09-27</td>
+              </tr>
+              <tr class="b-brand">
+                <td class="rev">2</td>
+                <td>OAuth broker</td>
+                <td>Envelope-encrypted vault, PKCE consent with a human scope screen, autonomous refresh and re-consent detection, append-only audit log, notifications, mock authorization server. Gusto demo as the practice integration.</td>
+                <td class="chk"><span class="checked">79 tests</span></td>
+                <td class="date">2026-09-27</td>
+              </tr>
+              <tr class="b-brand">
+                <td class="rev">3</td>
+                <td>Drift and repair</td>
+                <td>Events folded into incidents, deterministic triage, mechanical patch and repair agent, change requests, approval policies, canary, promote, rollback, drift worlds for every drift type.</td>
+                <td class="chk"><span class="checked">142 tests</span></td>
+                <td class="date">2026-09-28</td>
+              </tr>
+              <tr class="b-accent">
+                <td class="rev">UI</td>
+                <td>Developer console</td>
+                <td>Integrations, versions and reports, call console, connections and the consent screen, drift incidents, change requests, approval policies, activity, canonical model. Restyled 2026-10-02.</td>
+                <td class="chk"><span class="checked">Typecheck and build</span></td>
+                <td class="date">2026-09-28</td>
+              </tr>
+              <tr class="b-accent">
+                <td class="rev">Site</td>
+                <td>This site</td>
+                <td>Overview, how it works, console tour, docs and this changelog, laid out as drawing sheets.</td>
+                <td class="chk"><span class="checked">Rendered on desktop and phone</span></td>
+                <td class="date">2026-10-04</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <dl class="terms">
+          <dt>Milestone 1 exit criteria</dt>
+          <dd>The reference BambooHR manifest passes mock verification, publishes, and returns canonical Employees through the gateway; simulated drift fails verification with the right event kind; the pipeline repairs a broken manifest from feedback.</dd>
+          <dt>Milestone 2 exit criteria</dt>
+          <dd>A tenant completes consent once and the connection becomes active with its scopes recorded; a simulated week of hourly ticks produces 168 autonomous refreshes with no re-consent; revoking at the provider flips the connection to needs re-consent, destroys its credentials and notifies the tenant; vault tests prove tenant isolation.</dd>
+          <dt>Milestone 3 exit criteria</dt>
+          <dd>Every drift type is simulated by a drift world and detected as the right kind; repairable drift is repaired and promoted through approval and canary; a Sunset notice and upstream failures are routed to a person; rollback restores the previous published version in one step.</dd>
+        </dl>
+      </section>
+
+      <!-- Zone B -->
+      <section class="zone" id="b">
+        <header class="zhead">
+          <a class="zmark" href="#b" aria-label="Zone B">B</a>
+          <span class="zname">Being drawn</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Milestone 4: manifests from traffic alone.</h2>
+        <p class="lede">Build a manifest for an undocumented API from what it actually sends, and score the result against a spec the agent never saw.</p>
+
+        <div class="spec">
+          <div><span class="lbl">Capture inputs</span><span class="val">HAR, proxy, SDK logs</span><p>A HAR import, a recording proxy developers route through, or SDK request logs. Secrets are redacted at ingest.</p></div>
+          <div><span class="lbl">Endpoint clustering</span><span class="val">By method and path pattern</span><p>Samples are grouped, and path variables are inferred from the segments that vary.</p></div>
+          <div><span class="lbl">Schema inference</span><span class="val">Per-field confidence</span><p>Response bodies merge into a JSON Schema with sample counts. Fields seen in every sample become required; the rest optional and nullable.</p></div>
+          <div><span class="lbl">Probing policy</span><span class="val">GET and HEAD only</span><p>Only on endpoints already observed, rate limited, never on internal APIs without an explicit allowlist.</p></div>
+          <div><span class="lbl">Benchmark</span><span class="val">Score against a hidden spec</span><p>The ingester runs on a documented API with the spec hidden; inferred endpoints, fields, types and required flags are scored against it.</p></div>
+          <div><span class="lbl">Exit criterion</span><span class="val st st-warn">Not yet met</span><p>An inferred BambooHR manifest from traffic alone reaches an agreed score, and confidence correlates with correctness.</p></div>
+        </div>
+        <p class="note">The discovery module (capture, clustering, inference, mapping proposals) exists in the repository and is not yet covered by the test suite.</p>
+      </section>
+
+      <!-- Zone C -->
+      <section class="zone" id="c">
+        <header class="zhead">
+          <a class="zmark" href="#c" aria-label="Zone C">C</a>
+          <span class="zname">Designed</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Flows, then codebases.</h2>
+        <p class="lede">Two milestones are designed on paper: moving canonical objects between integrations, and treating a folder of code as a third discovery source.</p>
+
+        <div class="two">
+          <div>
+            <h3>Milestone 5: flows</h3>
+            <div class="spec">
+              <div><span class="lbl">Flow definition</span><span class="val">Source to destination</span><p>A source connection and endpoint, a canonical object, a destination, a schedule and a filter. Manifests gain write endpoints with request mappings.</p></div>
+              <div><span class="lbl">Runner</span><span class="val">Read, map, dedupe, write</span><p>Scheduled or event-triggered, through the gateway both ways, with per-run counts of read, written and failed records.</p></div>
+              <div><span class="lbl">Event bus and watchers</span><span class="val">Agents subscribe</span><p>Flow and drift events are published; agents alert on failed writes, hold a flow when its source has open drift, or summarize a run. Their tools are the gateway and the registry, exposed as MCP servers.</p></div>
+              <div><span class="lbl">Exit criterion</span><span class="val">One schedule tick</span><p>An Employee created in the source appears in the destination within one tick; simulated drift on the source pauses the flow and opens a change request.</p></div>
+            </div>
+          </div>
+          <div>
+            <h3>Milestone 6: codebase integrations</h3>
+            <div class="spec">
+              <div><span class="lbl">Discovery source</span><span class="val">Code, after specs and traffic</span><p>The platform reads a folder, produces a manifest for the API that code serves, and observes its live traffic through the same loop.</p></div>
+              <div><span class="lbl">Extraction</span><span class="val">Deterministic first, agent second</span><p>Frameworks that describe themselves are converted exactly; an AST pass covers the rest; the agent fills only what is left blank, with confidence and source lines.</p></div>
+              <div><span class="lbl">Lockfile, ledger, tap</span><span class="val">Observe-only by default</span><p>A lockfile pins manifest version to commit, a call ledger records every exchange's metadata, and a tap mirrors inbound traffic asynchronously.</p></div>
+              <div><span class="lbl">Exit criterion</span><span class="val">Scored against hidden OpenAPI</span><p>The extractor scores against this repo's own backend; tapped calls appear in the ledger with trace ids; a renamed route opens a change request before any traffic shows it.</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Zone D -->
+      <section class="zone" id="d">
+        <header class="zhead">
+          <a class="zmark" href="#d" aria-label="Zone D">D</a>
+          <span class="zname">Decisions</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Decisions that hold.</h2>
+        <p class="lede">Made while building, written down so later work does not relitigate them.</p>
+
+        <dl class="terms">
+          <dt>Manifest first</dt>
+          <dd>Integrations are declarative data interpreted by a generic runtime. Sandboxed generated code is the escape hatch, not the default.</dd>
+          <dt>Triage is deterministic</dt>
+          <dd>Rules assign class and risk because risk gates approval, so the outcome has to be reproducible. The model only proposes patches.</dd>
+          <dt>Repairs are verified against reality</dt>
+          <dd>Against the live connection or a drift world pinned to the published manifest, never against a mock built from the candidate's own schema.</dd>
+          <dt>Incidents aggregate</dt>
+          <dd>One incident per integration, endpoint and kind while a human holds it, so new evidence lands on the open incident.</dd>
+          <dt>Approval on for everything</dt>
+          <dd>Every repair waits for a person until a risk class is unlocked per integration. Canary and rollback stay on either way.</dd>
+          <dt>Consent is human, refresh is autonomous</dt>
+          <dd>A person approves the scope screen; token refresh and re-consent detection run on their own; every credential event is audited.</dd>
+        </dl>
+      </section>
+
+      <div class="next">
+        <span class="lbl">Next sheet</span>
+        <a href="index.html">Back to the overview</a>
+      </div>
+      </main>
+
+      <footer class="titleblock" id="f">
+        <div class="r">
+          <div><span class="lbl">Title</span><span class="val big">Self-writing integrations</span></div>
+          <div><span class="lbl">Status</span><span class="val">Developer preview. Milestones 1 to 3 built.</span></div>
+          <div><span class="lbl">Practice integrations</span><span class="val">BambooHR (API key), Gusto demo (OAuth 2.0)</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Drawn by</span><span class="val">The synthesis agent</span></div>
+          <div><span class="lbl">Checked by</span><span class="val">The verification harness</span></div>
+          <div><span class="lbl">Approved by</span><span class="val">You, or a policy per risk class</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Sheet</span><span class="val mono">5 of 5, Changelog</span></div>
+          <div><span class="lbl">Rev</span><span class="val mono">0.4.0, 2026-10-04</span></div>
+          <div class="links"><span class="lbl">Sheets</span><span class="val"><a href="index.html">Overview</a><a href="how-it-works.html">How it works</a><a href="console.html">Console</a><a href="docs.html">Docs</a><a href="https://github.com/23spakkerakari/self-writing-integrations">Source</a></span></div>
+        </div>
+        <p class="colophon">Python 3.11, FastAPI, React. Set in IBM Plex.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

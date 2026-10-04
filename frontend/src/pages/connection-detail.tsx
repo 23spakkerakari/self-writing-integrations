@@ -87,12 +87,10 @@ export function ConnectionPage() {
             {tenant ? <span className="font-normal text-ink-2"> for {tenant.name}</span> : null}
           </>
         }
-        meta={
-          <>
-            <Status tone={status.tone}>{status.label}</Status>
-            <Mono>{record.id}</Mono>
-          </>
-        }
+        block={[
+          { label: "Status", value: <Status tone={status.tone}>{status.label}</Status> },
+          { label: "Connection id", value: <Mono>{record.id}</Mono> },
+        ]}
         actions={
           <>
             {record.status === "pending_consent" && isOAuth ? (

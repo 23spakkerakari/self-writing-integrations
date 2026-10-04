@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Install the backend and console, the CLI, the control plane API, environment variables and the manifest format.">
+<meta name="theme-color" content="#5A3BB0">
+<meta property="og:title" content="Docs, Self-writing integrations">
+<meta property="og:description" content="Run it locally in ten minutes. Install, CLI, API, environment, manifest format and the console.">
+<meta property="og:type" content="website">
+<title>Docs, Self-writing integrations</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="sub">
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+  <ol class="zones" style="--zones: 6" aria-label="Sections">
+    <li><a href="#a"><b>A</b><span>Install</span></a></li>
+    <li><a href="#b"><b>B</b><span>CLI</span></a></li>
+    <li><a href="#c"><b>C</b><span>API</span></a></li>
+    <li><a href="#d"><b>D</b><span>Environment</span></a></li>
+    <li><a href="#e"><b>E</b><span>Manifest</span></a></li>
+    <li><a href="#f"><b>F</b><span>Console</span></a></li>
+  </ol>
+
+  <div class="gutter">
+    <div class="wrap">
+      <header class="mast">
+        <a class="brand" href="index.html">Self-writing integrations</a>
+        <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+        <nav class="nav" id="nav" aria-label="Site">
+          <a href="index.html">Home</a>
+          <a href="how-it-works.html">How it works</a>
+          <a href="console.html">Console</a>
+          <a href="docs.html" aria-current="page">Docs</a>
+          <a href="changelog.html">Changelog</a>
+          <a class="btn sm primary" href="/integrations">Open the console</a>
+        </nav>
+      </header>
+
+      <main id="main">
+      <section class="intro">
+        <h1>Run it locally in ten minutes.</h1>
+        <p class="lede">A Python 3.11 and FastAPI backend, SQLite by default and Postgres when deployed, and a Vite console that proxies /api to it. Everything below comes from the repository's README and architecture document.</p>
+      </section>
+
+      <div class="docs">
+        <ul class="toc" aria-label="On this sheet">
+          <li><a href="#a"><b>A</b>Install</a></li>
+          <li><a href="#b"><b>B</b>CLI</a></li>
+          <li><a href="#c"><b>C</b>API</a></li>
+          <li><a href="#d"><b>D</b>Environment</a></li>
+          <li><a href="#e"><b>E</b>Manifest</a></li>
+          <li><a href="#f"><b>F</b>Console</a></li>
+        </ul>
+        <div class="prose">
+
+          <!-- Zone A -->
+          <section class="zone first" id="a">
+            <header class="zhead">
+              <a class="zmark" href="#a" aria-label="Zone A">A</a>
+              <span class="zname">Install</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>Backend first, then the console.</h2>
+            <p class="lede">The tests run offline against the mock provider. No credentials are needed for the first ten minutes.</p>
+            <h3>Backend</h3>
+<pre class="code"><span class="l">cd backend</span>
+<span class="l">pip install -e ".[dev]"</span>
+<span class="l">python -m pytest</span></pre>
+            <h3>Import, verify, publish, call</h3>
+            <p>The reference BambooHR manifest is the quickest first integration. The call goes to a mock built from the manifest's own response schemas.</p>
+<pre class="code"><span class="l">python -m app.cli import manifests/bamboohr.yaml</span>
+<span class="l">python -m app.cli verify bamboohr 0.1.0</span>
+<span class="l">python -m app.cli publish bamboohr 0.1.0</span>
+<span class="l">python -m app.cli call bamboohr list_employees \</span>
+<span class="l">  --config company_domain=acme \</span>
+<span class="l">  --secret api_key=BAMBOOHR_API_KEY --mock</span></pre>
+            <p>Drop <code>--mock</code> to hit the real BambooHR API once a key exists. Set <code>ANTHROPIC_API_KEY</code> and have the agent build the manifest from the spec instead of importing the reference one:</p>
+<pre class="code"><span class="l">python -m app.cli synthesize \</span>
+<span class="l">  specs/bamboohr-employees.openapi.yaml --name bamboohr</span></pre>
+            <h3>Control plane</h3>
+<pre class="code"><span class="l">uvicorn app.main:app --reload</span>
+<span class="l c"># OpenAPI UI at http://127.0.0.1:8000/docs</span></pre>
+            <p>Set <code>GATEWAY_MODE=mock</code> to run against the offline provider, including the mock authorization server for OAuth flows.</p>
+            <h3>Console</h3>
+<pre class="code"><span class="l">cd ../frontend</span>
+<span class="l">npm install</span>
+<span class="l">npm run dev</span>
+<span class="l c"># http://127.0.0.1:5173, proxies /api to the backend</span></pre>
+          </section>
+
+          <!-- Zone B -->
+          <section class="zone" id="b">
+            <header class="zhead">
+              <a class="zmark" href="#b" aria-label="Zone B">B</a>
+              <span class="zname">CLI</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>The same loop from the terminal.</h2>
+            <p class="lede">Every command runs as <code>python -m app.cli</code> from the backend folder.</p>
+            <div class="tablewrap">
+              <table class="compact cli">
+                <thead>
+                  <tr><th>Command</th><th>What it does</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">import &lt;manifest.yaml&gt;</td><td>Stores a manifest file as a draft version of its integration.</td></tr>
+                  <tr><td class="key">synthesize &lt;spec&gt; --name &lt;name&gt;</td><td>Has the agent write a manifest from a spec, verify it on the mock, and feed failures back for another round.</td></tr>
+                  <tr><td class="key">verify &lt;name&gt; &lt;version&gt;</td><td>Runs every endpoint of a version against the spec-derived mock and stores the report.</td></tr>
+                  <tr><td class="key">publish &lt;name&gt; &lt;version&gt;</td><td>Makes a verified version the published one. The previous published version is superseded.</td></tr>
+                  <tr><td class="key">call &lt;name&gt; &lt;endpoint&gt; --config k=v --secret k=ENV --mock</td><td>Calls an endpoint through the gateway. Config values fill the base URL; secrets are environment variable names resolved server-side. <code>--mock</code> targets the mock.</td></tr>
+                  <tr><td class="key">vault-key</td><td>Generates a master key for <code>VAULT_MASTER_KEY</code>.</td></tr>
+                  <tr><td class="key">incidents</td><td>Lists drift incidents.</td></tr>
+                  <tr><td class="key">changes</td><td>Lists change requests.</td></tr>
+                  <tr><td class="key">approve</td><td>Approves a change request.</td></tr>
+                  <tr><td class="key">reject</td><td>Rejects a change request.</td></tr>
+                  <tr><td class="key">promote</td><td>Promotes a change request, publishing its candidate version.</td></tr>
+                  <tr><td class="key">rollback</td><td>Re-publishes the previous version of an integration in one step.</td></tr>
+                  <tr><td class="key">policy</td><td>Reads or sets the per-risk-class approval policy of an integration.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Zone C -->
+          <section class="zone" id="c">
+            <header class="zhead">
+              <a class="zmark" href="#c" aria-label="Zone C">C</a>
+              <span class="zname">API</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>One control plane, three milestones.</h2>
+            <p class="lede">The routes the CLI and the console use. The OpenAPI UI at <code>/docs</code> documents request and response bodies.</p>
+            <h3>Manifests and the runtime</h3>
+<pre class="code"><span class="l">GET  /health</span>
+<span class="l">GET  /canonical</span>
+<span class="l">GET  /manifest-schema</span>
+<span class="l">GET  /integrations</span>
+<span class="l">POST /integrations/import</span>
+<span class="l">POST /integrations/synthesize</span>
+<span class="l">GET  /integrations/{name}/versions</span>
+<span class="l">GET  /integrations/{name}/versions/{v}</span>
+<span class="l">POST /integrations/{name}/versions/{v}/verify</span>
+<span class="l">POST /integrations/{name}/versions/{v}/publish</span>
+<span class="l">POST /integrations/{name}/call</span></pre>
+            <h3>Tenants and OAuth</h3>
+<pre class="code"><span class="l">POST /tenants</span>
+<span class="l">POST /oauth/apps</span>
+<span class="l">POST /connections</span>
+<span class="l">GET  /connections?tenant_id=</span>
+<span class="l">GET  /connections/{id}</span>
+<span class="l">POST /connections/{id}/consent</span>
+<span class="l">GET  /connections/{id}/consent-page</span>
+<span class="l">GET  /oauth/callback?state=&amp;code=</span>
+<span class="l">POST /connections/{id}/refresh</span>
+<span class="l">POST /connections/{id}/revoke</span>
+<span class="l">GET  /connections/{id}/audit</span>
+<span class="l">GET  /notifications?tenant_id=</span>
+<span class="l">POST /connections/{id}/call</span>
+<span class="l c">POST /mock/authorize                          mock mode only</span>
+<span class="l c">POST /mock/revoke-at-provider/{integration}   mock mode only</span></pre>
+            <h3>Drift and repair</h3>
+<pre class="code"><span class="l">GET  /drift/incidents</span>
+<span class="l">POST /drift/incidents/{id}/triage</span>
+<span class="l">POST /drift/incidents/{id}/repair</span>
+<span class="l">POST /drift/incidents/{id}/dismiss</span>
+<span class="l">POST /drift/spec-check/{name}</span>
+<span class="l">POST /drift/tick</span>
+<span class="l">GET  /changes</span>
+<span class="l">POST /changes/{id}/approve</span>
+<span class="l">POST /changes/{id}/reject</span>
+<span class="l">POST /changes/{id}/canary</span>
+<span class="l">POST /changes/{id}/promote</span>
+<span class="l">POST /changes/{id}/abort</span>
+<span class="l">GET  /integrations/{name}/approval-policy</span>
+<span class="l">POST /integrations/{name}/approval-policy</span>
+<span class="l">POST /integrations/{name}/rollback</span>
+<span class="l c">POST /mock/drift/{integration}                mock mode only</span></pre>
+            <p>The console also uses <code>GET /tenants</code>, <code>GET /audit</code> and <code>POST /notifications/{id}/read</code>. <code>/health</code> reports the gateway mode, mock or live, which the console shows in its sidebar.</p>
+          </section>
+
+          <!-- Zone D -->
+          <section class="zone" id="d">
+            <header class="zhead">
+              <a class="zmark" href="#d" aria-label="Zone D">D</a>
+              <span class="zname">Environment</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>Twelve variables, all optional at first.</h2>
+            <p class="lede">The defaults run offline. Credentials and the model key only matter once you leave mock mode.</p>
+            <div class="tablewrap">
+              <table class="compact">
+                <thead>
+                  <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">DATABASE_URL</td><td>SQLite in the working directory</td><td>Where the registry, tenants and incidents are stored. Postgres in deployment.</td></tr>
+                  <tr><td class="key">GATEWAY_MODE</td><td>unset</td><td><code>live</code> or <code>mock</code>. Mock serves the spec-derived provider and the mock authorization server.</td></tr>
+                  <tr><td class="key">SYNTHESIS_MODEL</td><td>claude-opus-5</td><td>The Claude model used for synthesis and repair.</td></tr>
+                  <tr><td class="key">ANTHROPIC_API_KEY</td><td>unset</td><td>Needed for synthesis and agent repair. Live-model tests are skipped without it.</td></tr>
+                  <tr><td class="key">VAULT_MASTER_KEY</td><td>fixed dev key when unset</td><td>Wraps the per-tenant data keys. Generate one with <code>python -m app.cli vault-key</code>.</td></tr>
+                  <tr><td class="key">PUBLIC_BASE_URL</td><td>unset</td><td>The reachable host for the OAuth callback.</td></tr>
+                  <tr><td class="key">REFRESH_SCHEDULER</td><td>unset</td><td>Set to <code>1</code> to run token refresh in-process with the API.</td></tr>
+                  <tr><td class="key">DRIFT_WORKER</td><td>unset</td><td>Set to <code>1</code> to run the drift worker in-process.</td></tr>
+                  <tr><td class="key">DRIFT_INTERVAL_SECONDS</td><td>unset</td><td>How often the in-process drift worker ticks.</td></tr>
+                  <tr><td class="key">CANARY_FRACTION</td><td>unset</td><td>The share of calls routed to a candidate during a canary.</td></tr>
+                  <tr><td class="key">CANARY_MIN_CALLS</td><td>unset</td><td>Calls a candidate must receive before the canary is judged.</td></tr>
+                  <tr><td class="key">REPAIR_MAX_ROUNDS</td><td>unset</td><td>How many verify-and-retry rounds a repair may take.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Zone E -->
+          <section class="zone" id="e">
+            <header class="zhead">
+              <a class="zmark" href="#e" aria-label="Zone E">E</a>
+              <span class="zname">Manifest</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>The document the runtime reads.</h2>
+            <p class="lede">A manifest is validated against a JSON Schema with cross-checks. Extra keys are rejected, so a typo cannot become a silent default.</p>
+            <h3>Top-level keys</h3>
+            <div class="tablewrap">
+              <table class="compact">
+                <thead>
+                  <tr><th>Key</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">name</td><td>The integration's identifier, such as <code>bamboohr</code>.</td></tr>
+                  <tr><td class="key">version</td><td>The version string. Versions are immutable once stored.</td></tr>
+                  <tr><td class="key">display_name</td><td>What the console shows.</td></tr>
+                  <tr><td class="key">description</td><td>One sentence on what the integration reads.</td></tr>
+                  <tr><td class="key">base_url</td><td>May contain <code>{variables}</code> filled from a connection's config.</td></tr>
+                  <tr><td class="key">config_vars</td><td>The variables the base URL needs. Every variable used must be listed.</td></tr>
+                  <tr><td class="key">auth</td><td>One of the auth types below.</td></tr>
+                  <tr><td class="key">default_headers</td><td>Sent on every call.</td></tr>
+                  <tr><td class="key">rate_limit</td><td><code>requests_per_second</code> and <code>burst</code>, enforced by a token bucket.</td></tr>
+                  <tr><td class="key">retry</td><td><code>max_attempts</code>, <code>backoff_seconds</code> and <code>retry_on_status</code>. Retry-After is honoured.</td></tr>
+                  <tr><td class="key">endpoints</td><td>The list of endpoints. Ids must be unique.</td></tr>
+                  <tr><td class="key">mappings</td><td>Field-level mappings from an endpoint's records onto a canonical object.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h3>Auth types</h3>
+            <div class="tablewrap">
+              <table class="compact">
+                <thead>
+                  <tr><th>Type</th><th>Keys</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">none</td><td>No credentials.</td></tr>
+                  <tr><td class="key">api_key</td><td><code>location</code> (header or query), <code>name</code>, <code>prefix</code>, <code>secret_ref</code>.</td></tr>
+                  <tr><td class="key">bearer</td><td><code>secret_ref</code>.</td></tr>
+                  <tr><td class="key">basic</td><td><code>username_secret_ref</code> or <code>username_literal</code>, <code>password_secret_ref</code> or <code>password_literal</code>.</td></tr>
+                  <tr><td class="key">oauth2</td><td><code>flow</code> (authorization_code), <code>authorization_url</code>, <code>token_url</code>, <code>scopes</code>, <code>scope_separator</code>, <code>pkce</code>, <code>token_auth_method</code> (client_secret_post or client_secret_basic), <code>refresh_leeway_seconds</code>, <code>extra_authorization_params</code>.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>A secret reference names a secret the connection supplies. The manifest never holds a secret value, and the gateway is the only component that resolves one.</p>
+            <h3>Endpoint keys</h3>
+            <div class="tablewrap">
+              <table class="compact">
+                <thead>
+                  <tr><th>Key</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">id</td><td>Unique within the manifest, such as <code>list_employees</code>.</td></tr>
+                  <tr><td class="key">method</td><td>GET, POST, PUT, PATCH or DELETE.</td></tr>
+                  <tr><td class="key">path</td><td>Relative to the base URL. Path parameters are written as <code>{id}</code> and must be declared.</td></tr>
+                  <tr><td class="key">description</td><td>What the endpoint returns.</td></tr>
+                  <tr><td class="key">parameters</td><td>Each with <code>name</code>, <code>location</code> (path, query or header), <code>required</code> and <code>description</code>.</td></tr>
+                  <tr><td class="key">default_query</td><td>Query parameters sent when the caller gives none.</td></tr>
+                  <tr><td class="key">default_headers</td><td>Headers for this endpoint only.</td></tr>
+                  <tr><td class="key">response_schema</td><td>The JSON Schema every live response is validated against.</td></tr>
+                  <tr><td class="key">items_path</td><td>Where the list of records sits in the body.</td></tr>
+                  <tr><td class="key">pagination</td><td><code>style</code> is none, page, offset or cursor, with <code>page_param</code>, <code>size_param</code>, <code>page_size</code>, <code>offset_param</code>, <code>limit_param</code>, <code>cursor_param</code> and <code>next_cursor_path</code> as the style needs.</td></tr>
+                  <tr><td class="key">scopes</td><td>OAuth scopes this endpoint needs on top of the base scopes.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h3>Mappings and transforms</h3>
+            <p>A mapping names an <code>endpoint_id</code>, a <code>canonical_object</code> (Employee or Department) and a list of <code>fields</code>. Each field has a <code>target</code>, an optional <code>source</code>, an optional <code>transform</code> and its <code>args</code>.</p>
+            <div class="tablewrap">
+              <table class="compact">
+                <thead>
+                  <tr><th>Transform</th><th>What it does</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="key">to_date</td><td>Parses a date string into a date.</td></tr>
+                  <tr><td class="key">enum_map</td><td>Maps source values onto canonical ones through <code>args.map</code>, with <code>args.default</code> for anything else.</td></tr>
+                  <tr><td class="key">concat</td><td>Joins several source values.</td></tr>
+                  <tr><td class="key">first_non_null</td><td>Takes the first source value that is present.</td></tr>
+                  <tr><td class="key">const</td><td>Sets a fixed value from <code>args.value</code>.</td></tr>
+                  <tr><td class="key">split_take</td><td>Splits a string and takes one part.</td></tr>
+                  <tr><td class="key">to_str and other coercions</td><td>Coerce a value to a type.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>The registry is closed: a manifest can only name transforms from this list, so no arbitrary code ever enters one. Two rules apply to every mapping: <code>source_id</code> must always be mapped, and an Employee must carry at least one identity field, which is display name, work email, first name or last name.</p>
+          </section>
+
+          <!-- Zone F -->
+          <section class="zone" id="f">
+            <header class="zhead">
+              <a class="zmark" href="#f" aria-label="Zone F">F</a>
+              <span class="zname">Console</span>
+              <span class="zrule" aria-hidden="true"></span>
+            </header>
+            <h2>Five pages and a tenant switcher.</h2>
+            <p class="lede">The console runs against the control plane in mock or live mode and shows which in its sidebar.</p>
+            <ul>
+              <li><b>Integrations.</b> The registry, each integration's versions and their verification reports, endpoints, drift, approval policy and the call console.</li>
+              <li><b>Connections.</b> Tenant connections, OAuth app registration, the consent screen and each connection's audit timeline.</li>
+              <li><b>Drift.</b> Incidents and change requests, the approval gate, canary, promote, abort and the worker tick.</li>
+              <li><b>Activity.</b> The audit log and notifications for the selected tenant.</li>
+              <li><b>Canonical model.</b> Employee and Department, field by field.</li>
+            </ul>
+            <p>The tenant switcher in the sidebar scopes connections, audit history and notifications to one tenant, and creates new tenants. The mode indicator beneath it reads Mock gateway or Live gateway from <code>/health</code>. In development, <code>npm run dev</code> proxies <code>/api</code> to the backend on port 8000, so the browser never deals with CORS.</p>
+          </section>
+
+        </div>
+      </div>
+
+      <div class="next">
+        <span class="lbl">Next sheet</span>
+        <a href="changelog.html">Revision history</a>
+      </div>
+      </main>
+
+      <footer class="titleblock" id="title">
+        <div class="r">
+          <div><span class="lbl">Title</span><span class="val big">Self-writing integrations</span></div>
+          <div><span class="lbl">Status</span><span class="val">Developer preview. Milestones 1 to 3 built.</span></div>
+          <div><span class="lbl">Practice integrations</span><span class="val">BambooHR (API key), Gusto demo (OAuth 2.0)</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Drawn by</span><span class="val">The synthesis agent</span></div>
+          <div><span class="lbl">Checked by</span><span class="val">The verification harness</span></div>
+          <div><span class="lbl">Approved by</span><span class="val">You, or a policy per risk class</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Sheet</span><span class="val mono">4 of 5, Docs</span></div>
+          <div><span class="lbl">Rev</span><span class="val mono">0.4.0, 2026-10-04</span></div>
+          <div class="links"><span class="lbl">Sheets</span><span class="val"><a href="index.html">Overview</a><a href="how-it-works.html">How it works</a><a href="console.html">Console</a><a href="changelog.html">Changelog</a><a href="https://github.com/23spakkerakari/self-writing-integrations">Source</a></span></div>
+        </div>
+        <p class="colophon">Python 3.11, FastAPI, React. Set in IBM Plex.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

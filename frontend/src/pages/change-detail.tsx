@@ -84,20 +84,21 @@ export function ChangePage() {
             <span className="font-mono font-medium">{record.candidate_version}</span>
           </>
         }
-        meta={
-          <>
-            <Status tone={status.tone}>{status.label}</Status>
-            <Status tone={riskTone[record.risk_class]}>{record.risk_class} risk</Status>
-            <span>{record.drift_class} drift</span>
-            <span>Change {record.id}</span>
-            {record.incident_id ? (
+        block={[
+          { label: "Status", value: <Status tone={status.tone}>{status.label}</Status> },
+          { label: "Risk", value: <Status tone={riskTone[record.risk_class]}>{record.risk_class}</Status> },
+          { label: "Drift class", value: record.drift_class },
+          { label: "Change", value: record.id },
+          {
+            label: "Incident",
+            value: record.incident_id ? (
               <Link className="hover:underline" to={`/drift/incidents/${record.incident_id}`}>
                 Incident {record.incident_id}
               </Link>
-            ) : null}
-            <span className="basis-full text-xs text-ink-3">Strategy {record.strategy}</span>
-          </>
-        }
+            ) : null,
+          },
+          { label: "Strategy", value: record.strategy, grow: true },
+        ]}
         actions={
           <>
             {record.status === "pending" ? (

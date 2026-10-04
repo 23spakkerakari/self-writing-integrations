@@ -6,8 +6,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.canonical.people import CANONICAL_OBJECTS, CanonicalObject
-from app.manifest.schema import Mapping
-from app.runtime.paths import get_path
+from app.manifest.schema import Mapping, RequestMapping
+from app.runtime.paths import get_path, set_path
 from app.runtime.transforms import TRANSFORMS
 
 
@@ -49,3 +49,19 @@ def map_records(
         except MappingError as exc:
             errors.append(f"record[{index}]: {exc}")
     return out, errors
+
+
+def build_request(mapping: RequestMapping, record: dict[str, Any]) -> dict[str, Any]:
+    """Apply a RequestMapping to one canonical record (as JSON data), producing a request body."""
+    body: dict[str, Any] = {}
+    for fm in mapping.fields:
+        value = record.get(fm.source) if fm.source is not None else None
+        if fm.transform is not None:
+            try:
+                value = TRANSFORMS[fm.transform](value, fm.args, record)
+            except Exception as exc:  # transform errors are data errors, not crashes
+                raise MappingError(f"{fm.target}: transform '{fm.transform}' failed: {exc}") from exc
+        if value is None and mapping.omit_null:
+            continue
+        set_path(body, fm.target, value)
+    return body

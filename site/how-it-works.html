@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="The six stages that write an integration and every repair after it: discover, synthesize, verify, publish, watch, repair.">
+<meta name="theme-color" content="#5A3BB0">
+<meta property="og:title" content="How it works, Self-writing integrations">
+<meta property="og:description" content="One loop, six stages, every version. What each stage reads, what it produces, and what can stop it.">
+<meta property="og:type" content="website">
+<title>How it works</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="sub">
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+  <ol class="zones" style="--zones: 6" aria-label="Sections">
+    <li><a href="#a"><b>A</b><span>Discover</span></a></li>
+    <li><a href="#b"><b>B</b><span>Synthesize</span></a></li>
+    <li><a href="#c"><b>C</b><span>Verify</span></a></li>
+    <li><a href="#d"><b>D</b><span>Publish</span></a></li>
+    <li><a href="#e"><b>E</b><span>Watch</span></a></li>
+    <li><a href="#f"><b>F</b><span>Repair</span></a></li>
+  </ol>
+
+  <div class="gutter">
+    <div class="wrap">
+      <header class="mast">
+        <a class="brand" href="index.html">Self-writing integrations</a>
+        <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+        <nav class="nav" id="nav" aria-label="Site">
+          <a href="index.html">Home</a>
+          <a href="how-it-works.html" aria-current="page">How it works</a>
+          <a href="console.html">Console</a>
+          <a href="docs.html">Docs</a>
+          <a href="changelog.html">Changelog</a>
+          <a class="btn sm primary" href="/integrations">Open the console</a>
+        </nav>
+      </header>
+
+      <main id="main">
+      <section class="intro">
+        <h1>One loop, six stages, every version.</h1>
+        <p class="lede">The same loop writes the first version of an integration and every repair after it. Each stage below says what it reads, what it produces, and what can stop it.</p>
+      </section>
+
+      <!-- Zone A -->
+      <section class="zone first" id="a">
+        <header class="zhead">
+          <a class="zmark" href="#a" aria-label="Zone A">A</a>
+          <span class="zname">Discover</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Start from whatever the API gives you.</h2>
+        <p class="lede">A spec, a docs page, a collection, or the traffic you already send. Each input is normalized to one internal spec before the agent sees it.</p>
+
+        <div class="spec">
+          <div><span class="lbl">OpenAPI or GraphQL spec</span><span class="val st st-ok">Built</span><p>Imported as is and snapshotted with a content hash, so later re-fetches can be diffed.</p></div>
+          <div><span class="lbl">Docs URL</span><span class="val st st-ok">Built</span><p>A documentation page is read and normalized the same way as a spec.</p></div>
+          <div><span class="lbl">Postman collection</span><span class="val st st-ok">Built</span><p>Requests in a collection become candidate endpoints with their parameters.</p></div>
+          <div><span class="lbl">Captured traffic</span><span class="val st st-warn">Milestone 4, being built</span><p>HAR files, a recording proxy, or SDK request logs, with secrets redacted at ingest.</p></div>
+          <div><span class="lbl">Code in a repository</span><span class="val st st-warn">Milestone 6, designed</span><p>The API a folder of code serves, extracted deterministically first and by the agent second.</p></div>
+        </div>
+
+        <p class="note">Active probing is limited to safe methods, GET and HEAD, only on endpoints already observed, rate limited, and never on internal APIs without an explicit allowlist.</p>
+      </section>
+
+      <!-- Zone B -->
+      <section class="zone" id="b">
+        <header class="zhead">
+          <a class="zmark" href="#b" aria-label="Zone B">B</a>
+          <span class="zname">Synthesize</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>The agent drafts a manifest it cannot break.</h2>
+        <p class="lede">Claude produces the manifest as structured output constrained to the manifest JSON Schema. What it writes is data, and the schema decides what data is allowed.</p>
+
+        <div class="spec">
+          <div><span class="lbl">Output</span><span class="val">Structured, schema-constrained</span><p>If the provider rejects the schema, the agent falls back to free-form JSON that is validated the same way.</p></div>
+          <div><span class="lbl">Feedback</span><span class="val">Bounded attempts</span><p>Validation errors go back to the agent for a fixed number of tries. Extra keys are rejected outright.</p></div>
+          <div><span class="lbl">Cross-checks</span><span class="val">Five rules</span><p>Unique endpoint ids, declared path parameters, known canonical targets, known transforms, and base URL variables listed in config vars.</p></div>
+          <div><span class="lbl">Model</span><span class="val mono">claude-opus-5</span><p>The default, set with SYNTHESIS_MODEL. The same entry point repairs a manifest from verification feedback.</p></div>
+        </div>
+
+        <div class="tablewrap">
+          <table class="compact transforms">
+            <thead>
+              <tr><th>Transform</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="key">to_date</td><td>Parses a source value into a date, as for hire_date and termination_date.</td></tr>
+              <tr><td class="key">enum_map</td><td>Maps source values onto canonical ones with a default, as Active and Inactive onto employment status.</td></tr>
+              <tr><td class="key">concat</td><td>Joins several source fields into one value.</td></tr>
+              <tr><td class="key">first_non_null</td><td>Takes the first source field that carries a value.</td></tr>
+              <tr><td class="key">const</td><td>Sets a fixed value, as employment_status active for a directory of active employees.</td></tr>
+              <tr><td class="key">split_take</td><td>Splits a string and keeps one part.</td></tr>
+              <tr><td class="key">to_str and other coercions</td><td>Converts a value to the type the canonical field expects, as a numeric manager id to a string.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">The registry is closed. The agent chooses from these names and nothing else, so no arbitrary code enters a manifest.</p>
+      </section>
+
+      <!-- Zone C -->
+      <section class="zone" id="c">
+        <header class="zhead">
+          <a class="zmark" href="#c" aria-label="Zone C">C</a>
+          <span class="zname">Verify</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Checked on a mock, then checked for real.</h2>
+        <p class="lede">The harness calls every endpoint of the manifest, first against a mock generated from the spec, then against a live account when one exists. Both produce the same report.</p>
+
+        <div class="spec">
+          <div><span class="lbl">Order</span><span class="val">List endpoints first</span><p>Ids harvested from list responses feed the detail endpoints, so get_employee is called with a real id.</p></div>
+          <div><span class="lbl">Grades</span><span class="val">Four checks per endpoint</span><p>Status code, schema validation, mapping onto the canonical object, and identity completeness of the result.</p></div>
+          <div><span class="lbl">Mock and live</span><span class="val">Same report shape</span><p>A report from the mock reads the same as one from the real API, so the console shows both in one table.</p></div>
+          <div><span class="lbl">On failure</span><span class="val">Back to synthesis</span><p>Failures feed back into the agent, up to a maximum number of rounds, before a version is stored as rejected.</p></div>
+        </div>
+
+        <div class="inset" style="margin-top: clamp(28px, 4vw, 44px)">
+          <div class="tblock">
+            <div><span class="lbl">Result</span><span class="val st st-ok">Passed on mock</span></div>
+            <div><span class="lbl">Endpoints checked</span><span class="val big">2</span></div>
+            <div><span class="lbl">Took</span><span class="val">31 ms</span></div>
+            <div class="grow"><span class="lbl">Version</span><span class="val">BambooHR <span class="mono">0.1.0</span></span></div>
+          </div>
+          <div class="tablewrap" style="margin-top: 16px">
+            <table class="compact">
+              <thead>
+                <tr><th>Endpoint</th><th>Result</th><th>HTTP</th><th>Pages</th><th>Records</th><th>Canonical</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="key">list_employees</td><td><span class="st st-ok">Passed</span></td><td class="key">200</td><td>1</td><td>3</td><td>3</td></tr>
+                <tr><td class="key">get_employee</td><td><span class="st st-ok">Passed</span></td><td class="key">200</td><td>1</td><td>1</td><td>1</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Zone D -->
+      <section class="zone" id="d">
+        <header class="zhead">
+          <a class="zmark" href="#d" aria-label="Zone D">D</a>
+          <span class="zname">Publish</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Versions are immutable. Rollback is one step.</h2>
+        <p class="lede">A version moves through the registry and never changes once stored. Publishing supersedes the previous published version; rolling back re-publishes it.</p>
+
+        <div class="flow" aria-label="Version statuses">
+          <span class="step">draft</span>
+          <span class="arrow" aria-hidden="true"></span>
+          <span class="step">verified</span>
+          <span class="arrow" aria-hidden="true"></span>
+          <span class="step on">published</span>
+          <span class="arrow" aria-hidden="true"></span>
+          <span class="step">superseded</span>
+          <span class="fork">or</span>
+          <span class="step">rejected</span>
+          <span class="fork">or</span>
+          <span class="step">rolled_back</span>
+        </div>
+        <p class="note">A version that fails verification is stored as rejected. A rolled back version is marked rolled_back and can never be published again.</p>
+
+        <div class="spec">
+          <div><span class="lbl">Stored per version</span><span class="val">Manifest, report, provenance</span><p>The manifest JSON, its verification report, and where it came from: an import, a synthesis run, or a repair naming its incident.</p></div>
+          <div><span class="lbl">Spec snapshots</span><span class="val">Content hashed</span><p>Every fetched spec is kept with a hash, so a re-fetch can be diffed and a change opens an incident.</p></div>
+          <div><span class="lbl">On publish</span><span class="val">Previous version superseded</span><p>The gateway serves the published version by default; a caller may name another version to try a draft.</p></div>
+          <div><span class="lbl">On rollback</span><span class="val">One step</span><p>The previous published version is re-published and the promoting change request is marked rolled back.</p></div>
+        </div>
+      </section>
+
+      <!-- Zone E -->
+      <section class="zone" id="e">
+        <header class="zhead">
+          <a class="zmark" href="#e" aria-label="Zone E">E</a>
+          <span class="zname">Watch</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Drift is noticed before users notice.</h2>
+        <p class="lede">The gateway validates every live response instead of just executing calls. For an undocumented API there is no spec to re-fetch, so the response itself is the primary signal.</p>
+
+        <div class="tablewrap">
+          <table class="drift">
+            <thead>
+              <tr><th>Type</th><th>Example</th><th>Primary signal</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="key">schema</td><td>Field renamed, removed, or changed type</td><td>Live response validation against the stored schema</td></tr>
+              <tr><td class="key">behavioral</td><td>Pagination style changes, rate limits tighten, error format changes</td><td>Pagination never terminates, 429 rate rises, non-JSON bodies</td></tr>
+              <tr><td class="key">auth</td><td>New required scopes, token endpoint moves, refresh tokens start expiring</td><td>401 and 403 rate, refresh failures</td></tr>
+              <tr><td class="key">deprecation</td><td>Sunset headers, version retirement, 410 responses</td><td>Header inspection, status codes, changelog watch</td></tr>
+              <tr><td class="key">semantic</td><td>Same field name, different meaning; an enum gains a value</td><td>Mapping errors, unknown enum values, downstream data anomalies</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="spec">
+          <div><span class="lbl">Event kinds from the gateway</span><span class="val mono">schema_violation, unexpected_status, malformed_body, transport_error</span><p>Emitted per call, carrying the HTTP status.</p></div>
+          <div><span class="lbl">Added for drift</span><span class="val mono">deprecation, pagination_runaway, mapping_error</span><p>Sunset or Deprecation headers and 410 Gone; max_pages exhausted while more is advertised; records that no longer map.</p></div>
+          <div><span class="lbl">From the spec watcher</span><span class="val mono">spec_changed</span><p>A re-fetched spec is snapshotted and diffed; a difference opens an incident carrying the diff.</p></div>
+          <div><span class="lbl">Aggregation</span><span class="val">One incident per endpoint and kind</span><p>Events fold into an incident while it is unresolved, so a second change on the same endpoint adds evidence instead of opening a parallel one.</p></div>
+        </div>
+      </section>
+
+      <!-- Zone F -->
+      <section class="zone" id="f">
+        <header class="zhead">
+          <a class="zmark" href="#f" aria-label="Zone F">F</a>
+          <span class="zname">Repair</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Triage by rules, patch by machine or agent, promote by consent.</h2>
+        <p class="lede">Rules, not the model, assign the class and the risk, because risk decides how much supervision a repair gets. The model only proposes patches.</p>
+
+        <div class="tablewrap">
+          <table class="compact triage">
+            <thead>
+              <tr><th>Signal</th><th>Class</th><th>Risk</th><th>Repairable</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Transport failure</td><td>transient</td><td><span class="st st-ok">low</span></td><td class="dim">No, the gateway retries</td></tr>
+              <tr><td>HTTP 401 or 403</td><td>auth</td><td><span class="st st-bad">high</span></td><td>Needs approval</td></tr>
+              <tr><td>HTTP 404</td><td>deprecation</td><td><span class="st st-bad">high</span></td><td>The endpoint may have moved</td></tr>
+              <tr><td>HTTP 429 after retries</td><td>behavioral</td><td><span class="st st-ok">low</span></td><td>Yes, lower requests_per_second</td></tr>
+              <tr><td>HTTP 5xx</td><td>transient</td><td><span class="st st-ok">low</span></td><td class="dim">No, monitor</td></tr>
+              <tr><td>Other unexpected status</td><td>behavioral</td><td><span class="st st-warn">medium</span></td><td>Yes</td></tr>
+              <tr><td>HTTP 410 Gone</td><td>deprecation</td><td><span class="st st-bad">high</span></td><td>A successor must be adopted</td></tr>
+              <tr><td>Sunset or Deprecation header on a working endpoint</td><td>deprecation</td><td><span class="st st-warn">medium</span></td><td>A person plans the migration</td></tr>
+              <tr><td>Non-JSON body</td><td>behavioral</td><td><span class="st st-warn">medium</span></td><td>Yes</td></tr>
+              <tr><td>Pagination never terminates</td><td>behavioral</td><td><span class="st st-warn">medium</span></td><td>Yes</td></tr>
+              <tr><td>Records no longer map</td><td>semantic</td><td><span class="st st-bad">high</span></td><td>A field's meaning or format may have changed</td></tr>
+              <tr><td>Enum value outside the schema</td><td>semantic</td><td><span class="st st-bad">high</span></td><td>The new value's meaning has to be mapped</td></tr>
+              <tr><td>Schema change touching mapped fields</td><td>schema</td><td><span class="st st-bad">high</span></td><td>The canonical mapping must change with it</td></tr>
+              <tr><td>Field changed type</td><td>schema</td><td><span class="st st-warn">medium</span></td><td>Yes</td></tr>
+              <tr><td>Required fields missing</td><td>schema</td><td><span class="st st-warn">medium</span></td><td>Yes</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="spec">
+          <div><span class="lbl">First attempt</span><span class="val">Mechanical rename</span><p>Schema, items_path, cursor path and mapping sources are rewritten together before the agent is asked.</p></div>
+          <div><span class="lbl">Second attempt</span><span class="val">Repair agent</span><p>Receives the incident, its samples, the sample body, the latest spec snapshot and class guidance. A verification failure buys one more round.</p></div>
+          <div><span class="lbl">Change request</span><span class="val">Diff aligned by identity</span><p>A reviewer reads a path like <code>/mappings/[endpoint_id=list_employees]/fields/[target=display_name]/source</code>, not a list index.</p></div>
+          <div><span class="lbl">Approval policy</span><span class="val">Per integration, per risk class</span><p>Default off for every class. A policy that is on still verifies the candidate and runs a canary before promoting.</p></div>
+          <div><span class="lbl">Canary verdict</span><span class="val">Pass, fail, or insufficient</span><p>Pass once the candidate has CANARY_MIN_CALLS calls, a failure rate under 10% and is no worse than the base. Promote publishes; abort keeps the base live.</p></div>
+          <div><span class="lbl">Rollback</span><span class="val">One step</span><p>The version is marked rolled_back and can never be published again. Its incident goes back to a person.</p></div>
+        </div>
+      </section>
+
+      <div class="next">
+        <span class="lbl">Next sheet</span>
+        <a href="console.html">The console, page by page</a>
+      </div>
+      </main>
+
+      <footer class="titleblock" id="title">
+        <div class="r">
+          <div><span class="lbl">Title</span><span class="val big">Self-writing integrations</span></div>
+          <div><span class="lbl">Status</span><span class="val">Developer preview. Milestones 1 to 3 built.</span></div>
+          <div><span class="lbl">Practice integrations</span><span class="val">BambooHR (API key), Gusto demo (OAuth 2.0)</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Drawn by</span><span class="val">The synthesis agent</span></div>
+          <div><span class="lbl">Checked by</span><span class="val">The verification harness</span></div>
+          <div><span class="lbl">Approved by</span><span class="val">You, or a policy per risk class</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Sheet</span><span class="val mono">2 of 5, How it works</span></div>
+          <div><span class="lbl">Rev</span><span class="val mono">0.4.0, 2026-10-04</span></div>
+          <div class="links"><span class="lbl">Sheets</span><span class="val"><a href="index.html">Overview</a><a href="console.html">Console</a><a href="docs.html">Docs</a><a href="changelog.html">Changelog</a><a href="https://github.com/23spakkerakari/self-writing-integrations">Source</a></span></div>
+        </div>
+        <p class="colophon">Python 3.11, FastAPI, React. Set in IBM Plex.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

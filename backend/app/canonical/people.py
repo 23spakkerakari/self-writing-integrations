@@ -65,3 +65,33 @@ def canonical_fields(object_name: str) -> set[str]:
 
 def canonical_schemas() -> dict[str, dict]:
     return {name: model.model_json_schema() for name, model in CANONICAL_OBJECTS.items()}
+
+
+def example_record(object_name: str, integration: str = "example") -> dict:
+    """A fully populated canonical record as JSON data. Mock verification sends it through every
+    write endpoint so a request mapping is exercised with every field it could receive."""
+    if object_name == "Employee":
+        record: CanonicalObject = Employee(
+            source_integration=integration,
+            source_id="1000",
+            first_name="Ada",
+            last_name="Lovelace",
+            display_name="Ada Lovelace",
+            work_email="ada.lovelace@example.com",
+            personal_email="ada@example.org",
+            job_title="Engineer",
+            department="Engineering",
+            division="Product",
+            location="London",
+            manager_source_id="1001",
+            manager_display_name="Grace Hopper",
+            hire_date=date(2020, 1, 15),
+            employment_status="active",
+            work_phone="+1-555-0100",
+            mobile_phone="+1-555-0101",
+        )
+    elif object_name == "Department":
+        record = Department(source_integration=integration, source_id="10", name="Engineering", parent_source_id="1")
+    else:
+        raise KeyError(f"unknown canonical object '{object_name}'")
+    return record.model_dump(mode="json")

@@ -23,6 +23,8 @@ The architecture, decisions, and milestone plan live in [docs/ARCHITECTURE.md](d
   verification reports, a call console, tenant connections with the consent screen, drift incidents and
   change requests behind the approval gate, per-integration approval policies, rollback, the activity
   feed and the canonical model reference. Runs against the API in mock or live mode.
+- **Public site, built.** A static site under `site/` (no build step): overview, how it works, console tour,
+  docs, changelog and a 404, sharing one stylesheet. See [site/README.md](site/README.md).
 - Next: milestone 4, the traffic-first ingester.
 
 ```

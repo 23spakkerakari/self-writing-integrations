@@ -78,18 +78,20 @@ export function IncidentPage() {
             {kindLabel(record.kind)} on <span className="font-mono font-medium">{record.endpoint_id}</span>
           </>
         }
-        meta={
-          <>
-            <Status tone={status.tone}>{status.label}</Status>
-            <Link className="hover:underline" to={`/integrations/${record.integration}`}>
-              {display} {record.version}
-            </Link>
-            <span>
-              Seen {record.count} {record.count === 1 ? "time" : "times"}, first {formatDateTime(record.first_seen)}, last{" "}
-              {formatDateTime(record.last_seen)}
-            </span>
-          </>
-        }
+        block={[
+          { label: "Status", value: <Status tone={status.tone}>{status.label}</Status> },
+          {
+            label: "Integration",
+            value: (
+              <Link className="hover:underline" to={`/integrations/${record.integration}`}>
+                {display} {record.version}
+              </Link>
+            ),
+          },
+          { label: "Seen", value: `${record.count} ${record.count === 1 ? "time" : "times"}` },
+          { label: "First seen", value: formatDateTime(record.first_seen) },
+          { label: "Last seen", value: formatDateTime(record.last_seen) },
+        ]}
         actions={
           closed ? null : (
             <>

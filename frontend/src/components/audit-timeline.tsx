@@ -14,7 +14,7 @@ export function AuditTimeline({
   if (!events.length) return <p className="text-sm text-ink-3">No events yet.</p>;
   const ordered = [...events].sort((a, b) => b.id - a.id);
   return (
-    <ol className="divide-y divide-line rounded-lg border border-line bg-surface">
+    <ol className="divide-y divide-line border-t-[1.5px] border-t-ink">
       {ordered.map((event) => (
         <li key={event.id} className="grid gap-x-6 gap-y-1 px-4 py-3 sm:grid-cols-[11rem_minmax(0,1fr)]">
           <time dateTime={event.at} className="font-mono text-xs text-ink-3 tabular-nums">

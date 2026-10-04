@@ -72,18 +72,22 @@ export function IntegrationPage() {
       <PageHeader
         back={{ to: "/integrations", label: "Integrations" }}
         title={manifest.display_name}
-        meta={
-          <>
-            <Mono>{name}</Mono>
-            <span>{authLabel(manifest.auth)}</span>
-            {published ? (
-              <Status tone="ok">Published {published.version}</Status>
+        block={[
+          { label: "Name", value: <Mono>{name}</Mono> },
+          { label: "Auth", value: authLabel(manifest.auth) },
+          {
+            label: "Published",
+            value: published ? (
+              <Status tone="ok">
+                <Mono>{published.version}</Mono>
+              </Status>
             ) : (
-              <Status tone="idle">Nothing published</Status>
-            )}
-            {manifest.description ? <span className="basis-full">{manifest.description}</span> : null}
-          </>
-        }
+              <Status tone="idle">None</Status>
+            ),
+          },
+          { label: "Endpoints", value: manifest.endpoints.length },
+          ...(manifest.description ? [{ label: "Description", value: manifest.description, grow: true }] : []),
+        ]}
         actions={
           <>
             {isMock ? (

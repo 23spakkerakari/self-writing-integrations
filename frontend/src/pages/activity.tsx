@@ -101,7 +101,7 @@ export function ActivityPage() {
                   checked={unreadOnly}
                   onChange={(event) => setUnreadOnly(event.target.checked)}
                 />
-                <ol className="divide-y divide-line rounded-lg border border-line bg-surface">
+                <ol className="divide-y divide-line border-t-[1.5px] border-t-ink">
                   {shown.map((note) => (
                     <li key={note.id} className="flex flex-wrap items-start gap-x-6 gap-y-2 px-4 py-3">
                       <time dateTime={note.created_at} className="w-44 shrink-0 font-mono text-xs text-ink-3 tabular-nums">

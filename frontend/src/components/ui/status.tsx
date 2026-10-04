@@ -2,7 +2,7 @@ import type * as React from "react";
 import { cn } from "@/lib/cn";
 import type { Tone } from "@/lib/format";
 
-const dot: Record<Tone, string> = {
+const marker: Record<Tone, string> = {
   ok: "bg-ok",
   warn: "bg-warn",
   bad: "bg-bad",
@@ -10,7 +10,7 @@ const dot: Record<Tone, string> = {
   neutral: "bg-line-strong",
 };
 
-/** A state readout: a small coloured dot and a plain-language label. Colour is reserved for state. */
+/** A state readout: a small coloured square and a plain-language label. Colour is reserved for state. */
 export function Status({
   tone,
   children,
@@ -24,7 +24,7 @@ export function Status({
 }) {
   return (
     <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)} title={title}>
-      <span aria-hidden className={cn("inline-block size-1.5 shrink-0 rounded-full", dot[tone])} />
+      <span aria-hidden className={cn("inline-block size-1.5 shrink-0 rounded-none", marker[tone])} />
       {children}
     </span>
   );

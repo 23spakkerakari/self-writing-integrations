@@ -1,30 +1,39 @@
 import type * as React from "react";
 import { cn } from "@/lib/cn";
 
+/** A ruled table: a heavy rule under the header, hairlines between rows, no box around it. */
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="w-full overflow-x-auto rounded-lg border border-line bg-surface">
+    <div className="w-full overflow-x-auto">
       <table className={cn("w-full text-sm", className)} {...props} />
     </div>
   );
 }
 
 export function THead({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn("bg-surface-2", className)} {...props} />;
+  return (
+    <thead
+      className={cn("[&_tr]:border-b-[1.5px] [&_tr]:border-ink [&_tr:hover]:bg-transparent", className)}
+      {...props}
+    />
+  );
 }
 
 export function TBody({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <tbody className={cn("[&_tr:last-child]:border-b-0", className)} {...props} />;
+  return <tbody className={className} {...props} />;
 }
 
 export function TR({ className, ...props }: React.HTMLAttributes<HTMLTableRowElement>) {
-  return <tr className={cn("border-b border-line", className)} {...props} />;
+  return <tr className={cn("border-b border-line hover:bg-canvas/60", className)} {...props} />;
 }
 
 export function TH({ className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
-      className={cn("h-9 whitespace-nowrap px-3 text-left align-middle text-xs font-medium text-ink-2", className)}
+      className={cn(
+        "h-9 whitespace-nowrap px-3 text-left align-middle font-display text-[13px] font-medium text-ink-2",
+        className,
+      )}
       {...props}
     />
   );

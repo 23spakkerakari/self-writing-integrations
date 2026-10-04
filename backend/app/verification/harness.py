@@ -14,7 +14,7 @@ from typing import Any, Callable, Literal
 import httpx
 from pydantic import BaseModel, Field
 
-from app.canonical.people import CANONICAL_OBJECTS, Employee
+from app.canonical.people import CANONICAL_OBJECTS, Employee, example_record
 from app.manifest.schema import Endpoint, IntegrationManifest
 from app.runtime.gateway import Connection, Gateway, GatewayError
 from app.runtime.secrets import DictSecretsProvider, SecretsProvider
@@ -77,7 +77,10 @@ def verify(
         # List-style endpoints first so their ids can feed the path parameters of detail endpoints.
         ordered = sorted(manifest.endpoints, key=lambda e: (e.path.count("{"), e.items_path is None))
         for endpoint in ordered:
-            checks.append(_check_endpoint(gateway, manifest, endpoint, known_ids, mode))
+            if manifest.request_mapping_for(endpoint.id) is not None or endpoint.method != "GET":
+                checks.append(_check_write(gateway, manifest, endpoint, mode))
+            else:
+                checks.append(_check_endpoint(gateway, manifest, endpoint, known_ids, mode))
     finished = datetime.now(timezone.utc)
     return VerificationReport(
         integration=manifest.name,
@@ -97,6 +100,40 @@ def _sample_params(endpoint: Endpoint, known_ids: list[str]) -> dict[str, Any]:
             looks_like_id = "id" in p.name.lower()
             params[p.name] = known_ids[0] if (looks_like_id and known_ids) else "1"
     return params
+
+
+def _check_write(gateway: Gateway, manifest: IntegrationManifest, endpoint: Endpoint, mode: Mode) -> EndpointCheck:
+    """Verification never changes data in a real system. Against the mock, a fully populated
+    canonical record goes through the request mapping and the request schema; against a live API
+    the endpoint is reported as not exercised."""
+    check = EndpointCheck(endpoint_id=endpoint.id, passed=True)
+    mapping = manifest.request_mapping_for(endpoint.id)
+    if mode == "live":
+        check.warnings.append(f"{endpoint.method} endpoint is not exercised against a live API; verification never writes")
+        return check
+    if mapping is None:
+        check.warnings.append(f"{endpoint.method} endpoint has no request mapping; flows cannot write to it")
+        return check
+    record = example_record(mapping.canonical_object, manifest.name)
+    try:
+        result = gateway.write(endpoint.id, record, _sample_params(endpoint, []))
+    except GatewayError as exc:
+        check.passed = False
+        check.errors.append(str(exc))
+        return check
+    check.status_code = result.status_code
+    check.records = 1
+    check.errors.extend(f"request: {e}" for e in result.request_errors)
+    check.errors.extend(f"{event.kind}: {event.detail}" for event in result.drift_events)
+    if not result.ok and not check.errors:
+        check.errors.append(result.error or "write failed")
+    if mapping.response_id_path and result.ok and result.destination_id is None:
+        check.errors.append(f"response has nothing at response_id_path '{mapping.response_id_path}'")
+    if endpoint.request_schema is None:
+        check.warnings.append("no request schema declared; request bodies are sent unchecked")
+    if check.errors:
+        check.passed = False
+    return check
 
 
 def _check_endpoint(

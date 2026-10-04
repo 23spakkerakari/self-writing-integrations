@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A tour of the developer console: integrations, versions, connections, drift, approval policy and the canonical model.">
+<meta name="theme-color" content="#5A3BB0">
+<meta property="og:title" content="Console, Self-writing integrations">
+<meta property="og:description" content="The console is a drawing office. Every record opens with a title block, tables are ruled, colour only ever means state.">
+<meta property="og:type" content="website">
+<title>Console, Self-writing integrations</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="sub">
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+  <ol class="zones" style="--zones: 6" aria-label="Sections">
+    <li><a href="#a"><b>A</b><span>Integrations</span></a></li>
+    <li><a href="#b"><b>B</b><span>Versions</span></a></li>
+    <li><a href="#c"><b>C</b><span>Connections</span></a></li>
+    <li><a href="#d"><b>D</b><span>Drift</span></a></li>
+    <li><a href="#e"><b>E</b><span>Policy</span></a></li>
+    <li><a href="#f"><b>F</b><span>Model</span></a></li>
+  </ol>
+
+  <div class="gutter">
+    <div class="wrap">
+      <header class="mast">
+        <a class="brand" href="index.html">Self-writing integrations</a>
+        <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+        <nav class="nav" id="nav" aria-label="Site">
+          <a href="index.html">Home</a>
+          <a href="how-it-works.html">How it works</a>
+          <a href="console.html" aria-current="page">Console</a>
+          <a href="docs.html">Docs</a>
+          <a href="changelog.html">Changelog</a>
+          <a class="btn sm primary" href="/integrations">Open the console</a>
+        </nav>
+      </header>
+
+      <main id="main">
+      <section class="intro">
+        <h1>The console is a drawing office.</h1>
+        <p class="lede">Every record opens with a title block, tables are ruled, and colour only ever means state. Here is what each page lets you do.</p>
+        <div class="cta">
+          <a class="btn primary" href="/integrations">Open the console</a>
+        </div>
+      </section>
+
+      <!-- Zone A -->
+      <section class="zone first" id="a">
+        <header class="zhead">
+          <a class="zmark" href="#a" aria-label="Zone A">A</a>
+          <span class="zname">Integrations</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Every integration in the registry, at a glance.</h2>
+        <p class="lede">One row per integration: auth scheme, the published version, the latest version, endpoint count and the last verification.</p>
+        <figure class="figure">
+          <img src="assets/console-integrations.png" width="2880" height="1920" alt="The Integrations page listing BambooHR with its auth scheme, published and latest version, endpoint count and last verification" loading="lazy">
+          <figcaption><b>Integrations.</b> BambooHR in the registry: basic auth, version 0.1.0 published, two endpoints, verification passed on mock.</figcaption>
+        </figure>
+        <div class="spec">
+          <div><span class="lbl">Import a manifest</span><span class="val">Load a manifest you already have</span><p>The reference manifests in the repository work as a first import.</p></div>
+          <div><span class="lbl">Synthesize from a spec</span><span class="val">Hand the agent an API spec</span><p>It writes a manifest constrained to the schema and verifies it on the mock.</p></div>
+          <div><span class="lbl">Verify on mock</span><span class="val">Run every endpoint against the spec-derived mock</span><p>Status, validation, mapping and identity completeness are graded per endpoint.</p></div>
+          <div><span class="lbl">Publish</span><span class="val">Make a verified version the one the gateway serves</span><p>The previous published version is superseded, never deleted.</p></div>
+        </div>
+      </section>
+
+      <!-- Zone B -->
+      <section class="zone" id="b">
+        <header class="zhead">
+          <a class="zmark" href="#b" aria-label="Zone B">B</a>
+          <span class="zname">Versions</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>A version is a record: status, provenance, verification.</h2>
+        <p class="lede">The title block records what a reviewer checks before acting. The tabs beneath hold the report, the manifest and its raw JSON.</p>
+        <figure class="figure">
+          <img src="assets/console-version.png" width="2880" height="1920" alt="Version 0.1.0 of BambooHR, published, with its verification report showing both endpoints passed" loading="lazy">
+          <figcaption><b>A version.</b> Status, provenance, created and published in the title block; the verification report lists each endpoint with its HTTP status, pages, records and canonical count.</figcaption>
+        </figure>
+        <figure class="figure">
+          <img src="assets/console-integration.png" width="2880" height="1920" alt="The BambooHR integration page with its title block and the ruled versions table" loading="lazy">
+          <figcaption><b>An integration.</b> Name, auth, published version, endpoint count and description in the title block; versions, endpoints, drift, approval policy and the call console in the tabs.</figcaption>
+        </figure>
+        <div class="spec">
+          <div><span class="lbl">Version tabs</span><span class="val">Verification, Manifest, Raw JSON</span><p>The report, the structured manifest view and the exact document the gateway interprets.</p></div>
+          <div><span class="lbl">Integration tabs</span><span class="val">Versions, Endpoints, Drift, Approval policy, Call</span><p>Each tab is a ruled table or a form. Nothing is hidden behind a card.</p></div>
+          <div><span class="lbl">Actions</span><span class="val">Verify on mock, Publish, Roll back</span><p>Roll back appears once a superseded version exists. It re-publishes the previous version in one step.</p></div>
+          <div><span class="lbl">Call console</span><span class="val">Call an endpoint with your own config and secrets</span><p>API-key integrations are called directly. OAuth integrations are called through a tenant connection, so tokens come from the vault.</p></div>
+          <div><span class="lbl">Mock mode</span><span class="val">Simulate drift</span><p>Inject a scenario into the mock provider and watch the gateway open an incident. Restore the provider clears it.</p></div>
+        </div>
+      </section>
+
+      <!-- Zone C -->
+      <section class="zone" id="c">
+        <header class="zhead">
+          <a class="zmark" href="#c" aria-label="Zone C">C</a>
+          <span class="zname">Connections</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Consent is a person's job. Refresh is not.</h2>
+        <p class="lede">A tenant owns connections, credentials and audit history, each under its own vault key. The console registers one OAuth app per integration and creates connections for it.</p>
+        <div class="two-7-5">
+          <div class="prose">
+            <p>The consent screen lists every requested scope and why: required by every endpoint, or needed by the named endpoints that use it. Then it hands the person to the provider. Nothing is granted without that step.</p>
+            <p>After consent, tokens refresh on their own. A refresh the provider rejects flips the connection to needs re-consent, destroys its credentials and notifies the tenant. The audit timeline on each connection lists consent, refreshes, failures and revocations. The Activity page shows the same audit log and the notifications for the selected tenant.</p>
+          </div>
+          <div class="spec">
+            <div><span class="lbl">Status</span><span class="val st st-warn">Waiting for consent</span><p>Created, consent not yet granted.</p></div>
+            <div><span class="lbl">Status</span><span class="val st st-ok">Active</span><p>Tokens in the vault, refreshing on schedule.</p></div>
+            <div><span class="lbl">Status</span><span class="val st st-bad">Needs re-consent</span><p>The provider withdrew access. A person has to approve again.</p></div>
+            <div><span class="lbl">Status</span><span class="val st">Revoked</span><p>Revoked here or at the provider.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Zone D -->
+      <section class="zone" id="d">
+        <header class="zhead">
+          <a class="zmark" href="#d" aria-label="Zone D">D</a>
+          <span class="zname">Drift</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Incidents, change requests, and the worker tick.</h2>
+        <p class="lede">Anything the gateway notices opens an incident. A repair becomes a change request. Both wait here until a person or a policy decides.</p>
+        <div class="two-7-5">
+          <div class="prose">
+            <p>The incidents table shows the incident kind, integration, endpoint, class, risk, status, how many times it was seen, when it was last seen and the change request it produced. An incident is Open, Triaged, In repair, Needs a person, Repair failed, Resolved or Dismissed.</p>
+            <p>The change requests table shows the base and candidate versions, class, risk, whether the candidate verified, its status, when it was created and who decided. A reviewer can approve, reject, start a canary, promote or abort, each with a reason.</p>
+            <p>Run worker tick runs one pass of triage, repair, canary checks and promotion. In mock mode, Simulate drift injects a scenario into the provider and Restore the provider clears it.</p>
+          </div>
+          <div class="spec">
+            <div><span class="lbl">Change status</span><span class="val st st-warn">Waiting for approval</span></div>
+            <div><span class="lbl">Change status</span><span class="val st st-ok">Approved</span></div>
+            <div><span class="lbl">Change status</span><span class="val st st-warn">In canary</span></div>
+            <div><span class="lbl">Change status</span><span class="val st st-ok">Promoted</span></div>
+            <div><span class="lbl">Change status</span><span class="val st st-bad">Canary aborted</span></div>
+            <div><span class="lbl">Change status</span><span class="val st">Rejected</span></div>
+            <div><span class="lbl">Change status</span><span class="val st st-bad">Failed</span></div>
+            <div><span class="lbl">Change status</span><span class="val st">Rolled back</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Zone E -->
+      <section class="zone" id="e">
+        <header class="zhead">
+          <a class="zmark" href="#e" aria-label="Zone E">E</a>
+          <span class="zname">Policy</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Autonomy, one risk class at a time.</h2>
+        <p class="lede">Every repair waits for a person by default. Per integration, a checkbox per risk class lets the drift worker approve on its own.</p>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr><th>Risk class</th><th>For example</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr class="b-low">
+                <td class="rev">low</td>
+                <td>An optional response field appears, or a rate limit changes.</td>
+                <td><span class="st st-warn">Held for a person</span></td>
+              </tr>
+              <tr class="b-medium">
+                <td class="rev">medium</td>
+                <td>Behaviour changes that do not touch identity or auth, such as pagination or retry policy.</td>
+                <td><span class="st st-warn">Held for a person</span></td>
+              </tr>
+              <tr class="b-high">
+                <td class="rev">high</td>
+                <td>Anything touching auth, removed fields or canonical mappings.</td>
+                <td><span class="st st-warn">Held for a person</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">Ticking Approve automatically for a class does not skip the checks. The worker still verifies the candidate and runs a canary before promoting.</p>
+      </section>
+
+      <!-- Zone F -->
+      <section class="zone" id="f">
+        <header class="zhead">
+          <a class="zmark" href="#f" aria-label="Zone F">F</a>
+          <span class="zname">Model</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>The canonical model, with every source around it.</h2>
+        <p class="lede">Employee and Department, field by field, with type, required flag and description. The model grows by addition only.</p>
+        <figure class="figure">
+          <img src="assets/console-canonical.png" width="2880" height="1920" alt="The Canonical model page with the integration card showing six sources around the Employee object, and the Employee field table beneath" loading="lazy">
+          <figcaption><b>Canonical model.</b> The integration card shows six sources mapping onto Employee. Below it, each field with its type, whether it is required, and what it means.</figcaption>
+        </figure>
+      </section>
+
+      <div class="next">
+        <span class="lbl">Next sheet</span>
+        <a href="docs.html">Run it locally</a>
+      </div>
+      </main>
+
+      <footer class="titleblock" id="title">
+        <div class="r">
+          <div><span class="lbl">Title</span><span class="val big">Self-writing integrations</span></div>
+          <div><span class="lbl">Status</span><span class="val">Developer preview. Milestones 1 to 3 built.</span></div>
+          <div><span class="lbl">Practice integrations</span><span class="val">BambooHR (API key), Gusto demo (OAuth 2.0)</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Drawn by</span><span class="val">The synthesis agent</span></div>
+          <div><span class="lbl">Checked by</span><span class="val">The verification harness</span></div>
+          <div><span class="lbl">Approved by</span><span class="val">You, or a policy per risk class</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Sheet</span><span class="val mono">3 of 5, Console</span></div>
+          <div><span class="lbl">Rev</span><span class="val mono">0.4.0, 2026-10-04</span></div>
+          <div class="links"><span class="lbl">Sheets</span><span class="val"><a href="index.html">Overview</a><a href="how-it-works.html">How it works</a><a href="docs.html">Docs</a><a href="changelog.html">Changelog</a><a href="https://github.com/23spakkerakari/self-writing-integrations">Source</a></span></div>
+        </div>
+        <p class="colophon">Python 3.11, FastAPI, React. Set in IBM Plex.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

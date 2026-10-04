@@ -115,6 +115,11 @@ class Vault:
         value = self._open(self._tenant_cipher(tenant_id), blob, f"{tenant_id}:{connection_id}:{kind}".encode())
         return value, expires_at
 
+    def credential_kinds(self, connection_id: str) -> list[str]:
+        """Which credentials exist for a connection, without decrypting any of them."""
+        with self.db.session() as s:
+            return list(s.scalars(select(CredentialRow.kind).where(CredentialRow.connection_id == connection_id)))
+
     def delete_credentials(self, connection_id: str) -> int:
         with self.db.session() as s:
             rows = list(s.scalars(select(CredentialRow).where(CredentialRow.connection_id == connection_id)))

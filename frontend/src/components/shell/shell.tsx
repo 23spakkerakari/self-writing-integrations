@@ -22,7 +22,7 @@ const nav = [
 
 export function Shell() {
   return (
-    <div className="min-h-dvh bg-surface lg:grid lg:grid-cols-[232px_minmax(0,1fr)]">
+    <div className="min-h-dvh bg-surface lg:grid lg:grid-cols-[220px_minmax(0,1fr)]">
       <Sidebar />
       <main className="min-w-0 px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         <div className="mx-auto w-full max-w-[1200px]">
@@ -37,7 +37,7 @@ function Sidebar() {
   return (
     <aside className="flex h-14 items-center gap-6 overflow-x-auto border-b border-line bg-canvas px-4 lg:sticky lg:top-0 lg:h-dvh lg:flex-col lg:items-stretch lg:gap-0 lg:overflow-visible lg:border-r lg:border-b-0 lg:px-4 lg:py-5">
       <div className="shrink-0">
-        <div className="text-sm leading-tight font-medium">
+        <div className="font-display text-[15px] leading-5 font-semibold">
           Self-writing
           <br className="hidden lg:block" /> integrations
         </div>
@@ -50,8 +50,8 @@ function Sidebar() {
             to={item.to}
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm whitespace-nowrap",
-                isActive ? "bg-ink/6 font-medium text-ink" : "text-ink-2 hover:bg-ink/4 hover:text-ink",
+                "flex items-center gap-2 border-l-2 py-1.5 pr-2 pl-[10px] font-display text-sm font-medium whitespace-nowrap",
+                isActive ? "border-ink text-ink" : "border-transparent text-ink-2 hover:text-ink",
               )
             }
           >

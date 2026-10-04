@@ -4,6 +4,10 @@ Consent is the only human step: the tenant is shown the requested scopes and app
 provider. Everything after that is autonomous: code exchange, storage in the vault, refresh ahead
 of expiry, and detection of revoked grants (which flips the connection to needs_reconsent and
 notifies the tenant). Every credential event is appended to the audit log.
+
+Connections to integrations that use a static credential (API key, bearer token, basic auth)
+keep that credential in the same vault, so unattended work such as flows and scheduled probes
+never needs a caller to supply it.
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ from app.runtime.secrets import SecretNotFound
 log = logging.getLogger(__name__)
 
 CONSENT_TTL = timedelta(minutes=10)
+_SECRET_KIND = "secret:"  # vault credential kind prefix for static secrets, e.g. 'secret:api_key'
 TransportFactory = Callable[[IntegrationManifest], httpx.BaseTransport | None]
 NotifyHook = Callable[["Notification"], None]
 
@@ -74,18 +79,17 @@ class TokenSet(BaseModel):
 
 
 class BrokerSecrets:
-    """SecretsProvider for a connection. Resolving 'access_token' refreshes it if it is about to
-    expire; refresh() is what the gateway calls after a 401."""
+    """SecretsProvider for a connection. On an OAuth connection, resolving 'access_token' refreshes
+    it if it is about to expire and refresh() is what the gateway calls after a 401. On any other
+    connection the secret refs of the manifest resolve to the values stored in the vault."""
 
     def __init__(self, broker: "OAuthBroker", connection_id: str) -> None:
         self._broker = broker
         self._connection_id = connection_id
 
     def get(self, ref: str) -> str:
-        if ref != "access_token":
-            raise SecretNotFound(f"OAuth connections only expose 'access_token', not '{ref}'")
         try:
-            return self._broker.ensure_fresh(self._connection_id)
+            return self._broker.resolve_secret(self._connection_id, ref)
         except OAuthError as exc:
             raise SecretNotFound(str(exc)) from exc
 
@@ -369,6 +373,52 @@ class OAuthBroker:
 
     def secrets_for(self, connection_id: str) -> BrokerSecrets:
         return BrokerSecrets(self, connection_id)
+
+    # --- static credentials -----------------------------------------------------------------
+
+    def store_secrets(self, connection_id: str, secrets_by_ref: dict[str, str], actor: str = "tenant") -> list[str]:
+        """Put the static credentials of a non-OAuth connection in the vault. Values are write-only:
+        nothing returns them, and the audit log records which refs were stored, never the values."""
+        conn = self.get_connection(connection_id)
+        manifest = self.manifest_for(conn.integration_name)
+        if isinstance(manifest.auth, OAuth2Auth):
+            raise OAuthError("OAuth connections receive their tokens through consent; there is nothing to store")
+        if conn.status == "revoked":
+            raise OAuthError("connection is revoked")
+        allowed = manifest.secret_refs()
+        unknown = sorted(set(secrets_by_ref) - set(allowed))
+        if unknown:
+            raise OAuthError(f"'{conn.integration_name}' has no secret refs {unknown}; expected {allowed}")
+        empty = sorted(ref for ref, value in secrets_by_ref.items() if not value)
+        if empty:
+            raise OAuthError(f"secret values for {empty} are empty")
+        for ref, value in secrets_by_ref.items():
+            self.vault.put_credential(conn.tenant_id, connection_id, _SECRET_KIND + ref, value)
+        self._audit(conn.tenant_id, connection_id, "secrets_stored", actor=actor, detail="refs=" + ",".join(sorted(secrets_by_ref)))
+        return self.stored_secret_refs(connection_id)
+
+    def stored_secret_refs(self, connection_id: str) -> list[str]:
+        self.get_connection(connection_id)
+        kinds = self.vault.credential_kinds(connection_id)
+        return sorted(kind[len(_SECRET_KIND) :] for kind in kinds if kind.startswith(_SECRET_KIND))
+
+    def resolve_secret(self, connection_id: str, ref: str) -> str:
+        conn = self.get_connection(connection_id)
+        manifest = self.manifest_for(conn.integration_name)
+        if isinstance(manifest.auth, OAuth2Auth):
+            if ref != "access_token":
+                raise SecretNotFound(f"OAuth connections only expose 'access_token', not '{ref}'")
+            return self.ensure_fresh(connection_id)
+        if conn.status != "active":
+            raise SecretNotFound(f"connection is {conn.status}")
+        stored = self.vault.get_credential(conn.tenant_id, connection_id, _SECRET_KIND + ref)
+        if stored is None:
+            raise SecretNotFound(f"connection {connection_id[:8]} has no stored secret '{ref}'; store it before running unattended work")
+        return stored[0]
+
+    def notify(self, tenant_id: str, connection_id: str | None, kind: str, message: str) -> None:
+        """Tenant-facing notification for platform events outside the auth lifecycle (flows)."""
+        self._notify(tenant_id, connection_id, kind, message)
 
     # --- audit and notifications ----------------------------------------------------------
 

@@ -70,7 +70,15 @@ def _request(client: anthropic.Anthropic, model: str, system: str, messages: lis
         kwargs["output_config"] = {
             "format": {"type": "json_schema", "schema": IntegrationManifest.model_json_schema()}
         }
-    response = client.messages.create(**kwargs)
+    try:
+        response = client.messages.create(**kwargs)
+    except anthropic.BadRequestError:
+        raise  # the caller falls back to unstructured output
+    except anthropic.APIError as exc:
+        raise SynthesisError(f"the model request failed: {exc}") from exc
+    except TypeError as exc:
+        # The SDK raises TypeError when no credentials can be resolved.
+        raise SynthesisError(f"no Anthropic credentials are configured: {exc}") from exc
     if response.stop_reason == "refusal":
         raise SynthesisError("the model declined the request")
     if response.stop_reason == "max_tokens":

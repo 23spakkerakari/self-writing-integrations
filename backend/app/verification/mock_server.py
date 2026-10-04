@@ -16,6 +16,7 @@ import re
 from typing import Any, Callable
 
 import httpx
+from jsonschema import Draft202012Validator
 
 from app.manifest.schema import ApiKeyAuth, BasicAuth, BearerAuth, Endpoint, IntegrationManifest, OAuth2Auth
 from app.runtime.paths import get_path, set_path
@@ -153,6 +154,8 @@ class MockServer:
         self.list_size = list_size
         self.bearer_validator = bearer_validator
         self.requests: list[httpx.Request] = []
+        # (endpoint_id, request body) for every write the mock accepted, oldest first.
+        self.writes: list[tuple[str, Any]] = []
         # Literal routes first so '/employees/directory' beats '/employees/{id}'.
         ordered = sorted(manifest.endpoints, key=lambda e: e.path.count("{"))
         self._routes = [(e, self.compile_path(e.path)) for e in ordered]
@@ -173,13 +176,21 @@ class MockServer:
             return httpx.Response(404, json={"error": f"no mock route for {request.method} {request.url.path}"})
         if not self._authorized(request):
             return httpx.Response(401, json={"error": "missing or malformed credentials"})
-        body = self._body(endpoint, request)
+        status = 200
+        if endpoint.method in ("POST", "PUT", "PATCH"):
+            written = self._write(endpoint, request)
+            if isinstance(written, httpx.Response):
+                return written
+            body = written
+            status = 201 if endpoint.method == "POST" else 200
+        else:
+            body = self._body(endpoint, request)
         if self.hook is not None:
             replaced = self.hook(endpoint.id, request, body)
             if isinstance(replaced, httpx.Response):
                 return replaced
             body = replaced
-        return httpx.Response(200, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
+        return httpx.Response(status, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
 
     def match(self, request: httpx.Request) -> Endpoint | None:
         for endpoint, pattern in self._routes:
@@ -202,6 +213,30 @@ class MockServer:
         if isinstance(auth, BasicAuth):
             return request.headers.get("Authorization", "").startswith("Basic ")
         return True
+
+    def _write(self, endpoint: Endpoint, request: httpx.Request) -> Any:
+        """Accept a write the way a strict API would: the body must be JSON and match the request
+        schema. The response is the generated example with the submitted fields echoed back, and
+        each accepted write gets the next generated id."""
+        try:
+            payload = json.loads(request.read().decode("utf-8") or "null")
+        except ValueError:
+            return httpx.Response(400, json={"error": "request body is not JSON"})
+        if endpoint.request_schema is not None:
+            problems = [
+                f"{'/'.join(str(p) for p in err.absolute_path) or '$'}: {err.message}"
+                for err in Draft202012Validator(endpoint.request_schema).iter_errors(payload)
+            ]
+            if problems:
+                return httpx.Response(422, json={"error": "request body rejected", "details": problems[:10]})
+        index = len(self.writes)
+        self.writes.append((endpoint.id, payload))
+        if endpoint.response_schema is None:
+            return payload if payload is not None else {}
+        body = SchemaExampleGenerator(endpoint.response_schema, self.list_size).generate(index=index)
+        if isinstance(body, dict) and isinstance(payload, dict):
+            body.update({key: value for key, value in payload.items() if key in body})
+        return body
 
     def _body(self, endpoint: Endpoint, request: httpx.Request) -> Any:
         if endpoint.response_schema is None:

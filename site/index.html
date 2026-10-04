@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="An agent drafts API integrations as declarative manifests, a validating gateway catches drift, and repairs wait for your approval.">
+<meta name="theme-color" content="#5A3BB0">
+<meta property="og:title" content="Self-writing integrations">
+<meta property="og:description" content="The API changed overnight. A verified patch is waiting for you.">
+<meta property="og:type" content="website">
+<title>Self-writing integrations</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+  <ol class="zones" aria-label="Sections">
+    <li><a href="#a"><b>A</b><span>Overview</span></a></li>
+    <li><a href="#b"><b>B</b><span>Manifest</span></a></li>
+    <li><a href="#c"><b>C</b><span>Loop</span></a></li>
+    <li><a href="#d"><b>D</b><span>Repairs</span></a></li>
+    <li><a href="#e"><b>E</b><span>Model</span></a></li>
+    <li><a href="#f"><b>F</b><span>Title block</span></a></li>
+  </ol>
+
+  <div class="gutter">
+    <div class="wrap">
+      <header class="mast">
+        <a class="brand" href="index.html">Self-writing integrations</a>
+        <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+        <nav class="nav" id="nav" aria-label="Site">
+          <a href="index.html" aria-current="page">Home</a>
+          <a href="how-it-works.html">How it works</a>
+          <a href="console.html">Console</a>
+          <a href="docs.html">Docs</a>
+          <a href="changelog.html">Changelog</a>
+          <a class="btn sm primary" href="/integrations">Open the console</a>
+        </nav>
+      </header>
+
+      <main id="main">
+      <!-- Zone A -->
+      <section class="zone hero" id="a">
+        <header class="zhead">
+          <a class="zmark" href="#a" aria-label="Zone A">A</a>
+          <span class="zname">Overview</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h1>The API changed overnight. A verified patch is waiting for you.</h1>
+        <p class="lede">An agent writes the integration as a manifest. A gateway validates every call. When the API changes, a verified repair waits for your approval.</p>
+        <div class="cta">
+          <a class="btn primary" href="/integrations">Open the console</a>
+          <a class="btn" href="how-it-works.html">See how it works</a>
+        </div>
+
+        <div class="exhibit inset" id="demo" aria-label="A drift incident and its repair">
+          <div class="tblock">
+            <div><span class="lbl">Incident</span><span class="val big">14</span></div>
+            <div><span class="lbl">Integration</span><span class="val">BambooHR <span class="mono">list_employees</span></span></div>
+            <div><span class="lbl">Kind</span><span class="val">Schema violation</span></div>
+            <div><span class="lbl">Class</span><span class="val">schema</span></div>
+            <div><span class="lbl">Risk</span><span class="val st st-bad">high</span></div>
+            <div class="grow"><span class="lbl">Seen</span><span class="val"><span class="big">312</span> times since 02:14</span></div>
+          </div>
+          <div class="panels">
+            <section class="panel" aria-labelledby="p1">
+              <h3 id="p1">What the API returned</h3>
+<pre class="code"><span class="l">{</span>
+<span class="l">  "employees": [</span>
+<span class="l">    {</span>
+<span class="l">      "id": "40421",</span>
+<span class="l">      "displayName": "Amara Ortiz",</span>
+<span class="l">      "jobTitle": "Payroll analyst",</span>
+<span class="l flag">      "work_email": "a.ortiz@acme.example",</span>
+<span class="l">      "department": "Finance"</span>
+<span class="l">    }</span>
+<span class="l">  ]</span>
+<span class="l">}</span></pre>
+              <p class="note"><code>work_email</code> is not in the schema. <code>workEmail</code>, a mapped source, is gone.</p>
+            </section>
+            <section class="panel" aria-labelledby="p2">
+              <h3 id="p2">What the gateway did</h3>
+              <dl class="facts">
+                <dt>Validation</dt>
+                <dd>Failed against the 0.1.1 schema.</dd>
+                <dt>Triage</dt>
+                <dd>schema, high risk, repairable. A mapped field changed, so a person decides.</dd>
+                <dt>Patch</dt>
+                <dd>Mechanical rename, <code>workEmail</code> to <code>work_email</code>.</dd>
+                <dt>Consumers</dt>
+                <dd>Held at 0.1.1. Nothing malformed got through.</dd>
+              </dl>
+            </section>
+            <section class="panel" aria-labelledby="p3">
+              <h3 id="p3">What the agent proposed</h3>
+<pre class="code"><span class="l c">response_schema.properties:</span>
+<span class="l minus">  workEmail: { type: [string, "null"] }</span>
+<span class="l plus">  work_email: { type: [string, "null"] }</span>
+<span class="l c">mappings.fields:</span>
+<span class="l minus">  { target: work_email, source: workEmail }</span>
+<span class="l plus">  { target: work_email, source: work_email }</span></pre>
+              <p class="note"><span class="checked">Verified on live: passed.</span> 2 endpoints, 312 records, 0 warnings.</p>
+              <div class="cr">
+                <div class="row">
+                  <span class="st st-warn" id="cr-status">Change 9: waiting for approval</span>
+                  <div class="actions">
+                    <button class="btn sm primary" id="approve" type="button">Approve</button>
+                    <button class="btn sm" id="reject" type="button">Reject</button>
+                  </div>
+                </div>
+                <ol id="cr-log" aria-live="polite"></ol>
+                <button class="reset" id="reset" type="button" hidden>Reset the example</button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <!-- Zone B -->
+      <section class="zone" id="b">
+        <header class="zhead">
+          <a class="zmark" href="#b" aria-label="Zone B">B</a>
+          <span class="zname">Manifest</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>An integration is a document, not a codebase.</h2>
+        <p class="lede">Auth, endpoints, schemas, pagination, mappings: one versioned manifest that a generic runtime interprets. Every change is a reviewable diff.</p>
+
+        <div class="split">
+<pre class="code numbered" id="manifest" aria-label="Excerpt of the BambooHR manifest"><span class="l">name: bamboohr</span>
+<span class="l">version: 0.1.1</span>
+<span class="l">base_url: "https://api.bamboohr.com/api/gateway.php/{company_domain}/v1"</span>
+<span class="l">config_vars: [company_domain]</span>
+<span class="l" data-ref="auth">auth:</span>
+<span class="l" data-ref="auth">  type: basic</span>
+<span class="l" data-ref="auth">  username_secret_ref: api_key</span>
+<span class="l" data-ref="auth">  password_literal: x</span>
+<span class="l" data-ref="policy">rate_limit: { requests_per_second: 5, burst: 10 }</span>
+<span class="l" data-ref="policy">retry: { max_attempts: 3, backoff_seconds: 0.5, retry_on_status: [429, 502, 503] }</span>
+<span class="l">endpoints:</span>
+<span class="l">  - id: list_employees</span>
+<span class="l">    method: GET</span>
+<span class="l">    path: /employees/directory</span>
+<span class="l">    items_path: employees</span>
+<span class="l" data-ref="schema">    response_schema:</span>
+<span class="l" data-ref="schema">      type: object</span>
+<span class="l" data-ref="schema">      required: [employees]</span>
+<span class="l" data-ref="schema">      properties:</span>
+<span class="l" data-ref="schema">        employees:</span>
+<span class="l" data-ref="schema">          type: array</span>
+<span class="l" data-ref="schema">          items:</span>
+<span class="l" data-ref="schema">            type: object</span>
+<span class="l" data-ref="schema">            required: [id, displayName]</span>
+<span class="l" data-ref="schema">            properties:</span>
+<span class="l" data-ref="schema">              id: { type: string }</span>
+<span class="l" data-ref="schema">              displayName: { type: [string, "null"] }</span>
+<span class="l" data-ref="schema">              work_email: { type: [string, "null"], format: email }</span>
+<span class="l" data-ref="schema">              jobTitle: { type: [string, "null"] }</span>
+<span class="l" data-ref="map">mappings:</span>
+<span class="l" data-ref="map">  - endpoint_id: list_employees</span>
+<span class="l" data-ref="map">    canonical_object: Employee</span>
+<span class="l" data-ref="map">    fields:</span>
+<span class="l" data-ref="map">      - { target: source_id, source: id }</span>
+<span class="l" data-ref="map">      - { target: display_name, source: displayName }</span>
+<span class="l" data-ref="map">      - { target: work_email, source: work_email }</span>
+<span class="l" data-ref="map">      - { target: job_title, source: jobTitle }</span>
+<span class="l" data-ref="map">      - { target: employment_status, transform: const, args: { value: active } }</span></pre>
+          <ul class="callouts">
+            <li><button class="callout" type="button" data-for="auth"><span class="ref">5 to 8</span><h3>Auth is declared, never implemented</h3><p>The gateway injects credentials from the vault. The agent never sees a secret.</p></button></li>
+            <li><button class="callout" type="button" data-for="policy"><span class="ref">9 to 10</span><h3>Rate limits and retries are policy</h3><p>A tightened limit is a number to change, not code to rewrite.</p></button></li>
+            <li><button class="callout" type="button" data-for="schema"><span class="ref">16 to 29</span><h3>Every live response is validated</h3><p>A renamed field becomes a drift event, not a silent bad row.</p></button></li>
+            <li><button class="callout" type="button" data-for="map"><span class="ref">30 to 38</span><h3>Mappings use a closed set of transforms</h3><p>The agent picks from a registry. No arbitrary code enters a manifest.</p></button></li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Zone C -->
+      <section class="zone" id="c">
+        <header class="zhead">
+          <a class="zmark" href="#c" aria-label="Zone C">C</a>
+          <span class="zname">The loop</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Discover, synthesize, verify, publish, watch, repair.</h2>
+        <p class="lede">One loop writes the first version and every repair after it. Each stage is described in full on the <a href="how-it-works.html">how it works</a> sheet.</p>
+
+        <ol class="loop">
+          <li><span class="n">Stage 1</span><h3><a href="how-it-works.html#a">Discover</a></h3><p>Specs, docs, Postman collections or captured traffic.</p></li>
+          <li><span class="n">Stage 2</span><h3><a href="how-it-works.html#b">Synthesize</a></h3><p>The agent drafts a manifest constrained to the schema.</p></li>
+          <li><span class="n">Stage 3</span><h3><a href="how-it-works.html#c">Verify</a></h3><p>Every endpoint, on a mock and then live.</p></li>
+          <li><span class="n">Stage 4</span><h3><a href="how-it-works.html#d">Publish</a></h3><p>Versioned and immutable. Rollback is one step.</p></li>
+          <li><span class="n">Stage 5</span><h3><a href="how-it-works.html#e">Watch</a></h3><p>Validate responses. Watch status codes, headers, pagination.</p></li>
+          <li><span class="n">Stage 6</span><h3><a href="how-it-works.html#f">Repair</a></h3><p>Triage, patch, verify, approval gate, canary, promote.</p></li>
+        </ol>
+        <div class="loopback" aria-hidden="true"><div><span>A repair re-enters at Verify</span></div></div>
+      </section>
+
+      <!-- Zone D -->
+      <section class="zone" id="d">
+        <header class="zhead">
+          <a class="zmark" href="#d" aria-label="Zone D">D</a>
+          <span class="zname">Repairs</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>Every change is drawn, checked and signed.</h2>
+        <p class="lede">A version history that reads like a revision table: who drafted it, how it was checked, who approved it.</p>
+
+        <div class="tablewrap">
+          <table class="revtable">
+            <thead>
+              <tr><th>Rev</th><th>Change</th><th>Class</th><th>Risk</th><th>Drawn by</th><th>Checked</th><th>Approved by</th><th>Date</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="rev">0.1.0</td>
+                <td>First manifest from the OpenAPI spec</td>
+                <td class="dim">none</td>
+                <td class="dim">none</td>
+                <td>Synthesis agent</td>
+                <td class="chk"><span class="checked">Mock, passed</span></td>
+                <td>Reviewer</td>
+                <td class="date">2026-09-27</td>
+              </tr>
+              <tr class="b-high">
+                <td class="rev">0.1.1</td>
+                <td><code>workEmail</code> renamed to <code>work_email</code></td>
+                <td>schema</td>
+                <td><span class="st st-bad">high</span></td>
+                <td>Mechanical patch</td>
+                <td class="chk"><span class="checked">Live, passed</span></td>
+                <td>Reviewer, after canary</td>
+                <td class="date">2026-09-30</td>
+              </tr>
+              <tr class="b-low">
+                <td class="rev">0.1.2</td>
+                <td>Rate limit lowered, 5 to 3 per second</td>
+                <td>behavioral</td>
+                <td><span class="st st-ok">low</span></td>
+                <td>Mechanical patch</td>
+                <td class="chk"><span class="checked">Live, passed</span></td>
+                <td>Policy, low risk</td>
+                <td class="date">2026-10-01</td>
+              </tr>
+              <tr class="b-medium">
+                <td class="rev">0.1.3</td>
+                <td>Sunset header on <code>get_employee</code></td>
+                <td>deprecation</td>
+                <td><span class="st st-warn">medium</span></td>
+                <td class="dim">Nobody yet</td>
+                <td class="dim">Not run</td>
+                <td><span class="st st-warn">Waiting for a person</span></td>
+                <td class="date">2026-10-02</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <dl class="terms">
+          <dt>Triage is deterministic</dt>
+          <dd>Rules assign class and risk. The model only proposes patches.</dd>
+          <dt>Repairs are tested against reality</dt>
+          <dd>Verified against the API as it behaves now, never against a mock of the candidate.</dd>
+          <dt>Autonomy is rationed by you</dt>
+          <dd>Everything waits for a person until you unlock a risk class. Canary and rollback stay on.</dd>
+        </dl>
+      </section>
+
+      <!-- Zone E -->
+      <section class="zone" id="e">
+        <header class="zhead">
+          <a class="zmark" href="#e" aria-label="Zone E">E</a>
+          <span class="zname">Model</span>
+          <span class="zrule" aria-hidden="true"></span>
+        </header>
+        <h2>One people model. Keys held properly.</h2>
+        <p class="lede">Every source maps onto one canonical shape. The model grows by addition only.</p>
+
+        <div class="inset card-inset">
+          <div class="cardgrid">
+            <div class="hub" role="img" aria-label="Six sources, BambooHR, Gusto, Workday, Rippling, Personio and an internal API, connected by leader lines to the canonical Employee object">
+              <div class="dots" aria-hidden="true"></div>
+              <svg viewBox="0 0 564 410" fill="none" aria-hidden="true">
+                <g class="base">
+                  <path d="M 270 205 V 105 Q 270 90 255 90 H 110"/>
+                  <path d="M 294 205 V 85 Q 294 70 309 70 H 360"/>
+                  <path d="M 250 205 H 160"/>
+                  <path d="M 314 205 H 480"/>
+                  <path d="M 282 205 V 360"/>
+                  <path d="M 314 215 V 325 Q 314 340 329 340 H 460"/>
+                </g>
+                <g class="pulses">
+                  <path style="--d:0s" d="M 270 205 V 105 Q 270 90 255 90 H 110"/>
+                  <path style="--d:-1.3s" d="M 294 205 V 85 Q 294 70 309 70 H 360"/>
+                  <path style="--d:-2.1s" d="M 250 205 H 160"/>
+                  <path style="--d:-0.6s" d="M 314 205 H 480"/>
+                  <path style="--d:-2.8s" d="M 282 205 V 360"/>
+                  <path style="--d:-3.4s" d="M 314 215 V 325 Q 314 340 329 340 H 460"/>
+                </g>
+              </svg>
+              <div class="node" style="left:19.5%;top:22%">BambooHR</div>
+              <div class="node" style="left:63.8%;top:17.1%">Gusto</div>
+              <div class="node" style="left:26%;top:50%">Workday</div>
+              <div class="node" style="left:87%;top:50%">Rippling</div>
+              <div class="node" style="left:50%;top:87.8%">Personio</div>
+              <div class="node" style="left:81.6%;top:82.9%">Internal API</div>
+              <div class="node center" style="left:50%;top:50%"><span class="ring" aria-hidden="true"></span>Employee<small>canonical object</small></div>
+            </div>
+            <div class="cardtext">
+              <h3>Every source, one shape</h3>
+              <p>Each integration's mapping turns raw records into canonical Employee and Department objects. Consumers, human or agent, read one shape whatever the source.</p>
+              <dl class="model" aria-label="Canonical model">
+                <div class="grp"><dt>Identity</dt><dd>source_id, display_name, first_name, last_name, work_email, personal_email</dd></div>
+                <div class="grp"><dt>Position</dt><dd>job_title, department, division, location, manager_source_id, employment_status <i>(active, on_leave, terminated, unknown)</i></dd></div>
+                <div class="grp"><dt>Dates, contact</dt><dd>hire_date, termination_date, work_phone, mobile_phone</dd></div>
+                <div class="grp"><dt>Department</dt><dd>source_id, name, parent_source_id</dd></div>
+              </dl>
+              <a class="btn" href="console.html#f">See the model in the console</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="tenancy">
+          <div>
+            <h3>Tenancy</h3>
+            <p>Each tenant's tokens sit in an encrypted vault under its own key. Refresh runs on its own. Consent never does: a person sees every scope and why. Every credential event is audited.</p>
+          </div>
+          <ul class="scopes" aria-label="Example consent screen">
+            <li><code>companies:read</code><span>Required by every endpoint</span></li>
+            <li><code>employees:read</code><span>Needed by list_employees</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <div class="next">
+        <span class="lbl">Next sheet</span>
+        <a href="how-it-works.html">How it works, stage by stage</a>
+      </div>
+      </main>
+
+      <!-- Zone F -->
+      <footer class="titleblock" id="f">
+        <div class="r">
+          <div><span class="lbl">Title</span><span class="val big">Self-writing integrations</span></div>
+          <div><span class="lbl">Status</span><span class="val">Developer preview. Milestones 1 to 3 built.</span></div>
+          <div><span class="lbl">Practice integrations</span><span class="val">BambooHR (API key), Gusto demo (OAuth 2.0)</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Drawn by</span><span class="val">The synthesis agent</span></div>
+          <div><span class="lbl">Checked by</span><span class="val">The verification harness</span></div>
+          <div><span class="lbl">Approved by</span><span class="val">You, or a policy per risk class</span></div>
+        </div>
+        <div class="r">
+          <div><span class="lbl">Sheet</span><span class="val mono">1 of 5, Overview</span></div>
+          <div><span class="lbl">Rev</span><span class="val mono">0.4.0, 2026-10-04</span></div>
+          <div class="links"><span class="lbl">Sheets</span><span class="val"><a href="how-it-works.html">How it works</a><a href="console.html">Console</a><a href="docs.html">Docs</a><a href="changelog.html">Changelog</a><a href="https://github.com/23spakkerakari/self-writing-integrations">Source</a></span></div>
+        </div>
+        <p class="colophon">Python 3.11, FastAPI, React. Set in IBM Plex.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

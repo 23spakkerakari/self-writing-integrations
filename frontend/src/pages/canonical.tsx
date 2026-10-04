@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Integration, IntegrationCard } from "@/components/ui/integration-card";
 import { ErrorState, Loading } from "@/components/ui/loading";
 import { PageHeader } from "@/components/ui/page-header";
 import { Section } from "@/components/ui/section";
@@ -30,6 +31,13 @@ export function CanonicalPage() {
         }
       />
       <div className="space-y-10">
+        <IntegrationCard
+          visual={<Integration />}
+          title="Every source, one shape"
+          description="Each integration maps raw records onto these objects, so a consumer reads one shape whether the source is BambooHR, Gusto or an internal API nobody documented."
+          url="/integrations/new"
+          cta="Add integration"
+        />
         {objects.map(([name, schema]) => (
           <Section
             key={name}

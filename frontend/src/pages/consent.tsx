@@ -80,7 +80,7 @@ export function ConsentPage() {
     body = (
       <>
         <h2 className="mt-8 text-sm font-medium">Permissions requested</h2>
-        <ul className="mt-2 divide-y divide-line rounded-md border border-line">
+        <ul className="mt-2 divide-y divide-line border-t-[1.5px] border-t-ink border-b border-b-line">
           {rows.map((row) => (
             <li key={row.scope} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 py-2.5">
               <Mono className="font-medium">{row.scope}</Mono>

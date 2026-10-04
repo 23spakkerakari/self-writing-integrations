@@ -251,11 +251,99 @@ reference manifest, and the confidence scores correlate with correctness.
 **Exit criteria.** An Employee created in the source appears in the destination within one schedule tick.
 A simulated drift on the source pauses the flow and opens a change request, and an agent reports it.
 
+### Milestone 6: Codebase integrations (designed)
+
+**Goal.** Drop the platform into any folder of a codebase. It reads the code, produces a manifest for the
+API that code serves (routes, headers, request and response types, status codes), registers it as an
+integration, and observes the service's live traffic through the same gateway, monitor and repair loop
+as every other integration. Code becomes the third discovery source next to specs and captured traffic.
+
+**Where it runs.**
+
+| Place | What lives there |
+|---|---|
+| The target repo | A `.swi/` folder written by `codebase init`: the manifest draft, a lockfile pinning manifest version to commit hash, and a tap config listing the observed routes. One folder is one service, so a monorepo yields one integration per folder. |
+| The platform | The registry, gateway, drift monitor and approval gate already built, plus a per-call ledger and a served-endpoint inspector. |
+| CI | `codebase check` re-runs the extractor on every push and diffs against the published manifest. A diff opens a change request before any traffic shows it. |
+
+**Architecture.**
+
+| Component | Module | Responsibility |
+|---|---|---|
+| Manifest additions | `backend/app/manifest/schema.py` | `types`: named JSON Schemas referenced from endpoints as `#/$defs/<Name>`, so a type used by several routes is stored once and diffs once. Per endpoint: `direction` (`called`: the platform is the client, today's behaviour; `served`: the codebase is the server and the platform observes), `responses` keyed by status code for error shapes, `response_headers`. `resolve()` inlines type references for the validator and the mock. |
+| Framework detection | `backend/app/codebase/detect.py` | Finds the frameworks in a folder from manifests (`pyproject.toml`, `package.json`, `go.mod`) and imports, and locates the application object. |
+| Deterministic extractor | `backend/app/codebase/openapi.py`, `fastapi_app.py`, `ast_python.py` | Tier one. Where the framework can describe itself (FastAPI, NestJS, Spring) the extractor loads the app in a subprocess and converts its OpenAPI output to a served manifest with a deterministic converter. Where it cannot, a Python AST pass reads route decorators, handler signatures and return annotations. Exact types, no model calls. |
+| Agent extractor | `backend/app/codebase/agent.py` | Tier two, for what tier one left blank: untyped handlers, dynamic routing, headers set by middleware, error shapes. The synthesis agent gets read-only code tools and is constrained to the manifest JSON Schema. Every inferred field carries a confidence and the source line that justified it. Source leaves the machine only here; an offline mode stops after tier one. |
+| Lockfile | `backend/app/codebase/lock.py` | `.swi/lock.json`: integration name, manifest version, commit, folder, framework, extractor tier, content hash of the extraction. |
+| Code snapshots | `backend/app/registry/store.py` | Extractions are stored like spec snapshots, with provenance `codebase:<repo>@<commit>` on the version they produced. |
+| Call ledger | `backend/app/ledger/models.py`, `store.py` | One row per gateway call and per tapped exchange: tenant, integration, version, endpoint, direction, status, latency, validation outcome, drift kinds, trace and span ids. The observability promise in section 6 lands here. Bodies are not in the ledger; sampled bodies stay in `traffic_samples`. |
+| Shared validation | `backend/app/runtime/validate.py` | Request and response validation factored out of the gateway so the inspector reuses it. |
+| Inspector | `backend/app/runtime/inspector.py` | Matches a tapped exchange to a served endpoint by method and path template, validates the request against `request_schema` and the response against `response_schema` or `responses[status]`, emits DriftEvents and writes a ledger row. New kinds: `request_invalid` (client payload failed the schema), `handler_error` (served endpoint returned 5xx), `code_changed` (extraction differs from the published manifest). |
+| Tap | `backend/app/tap/asgi.py`, `shipper.py`, `trace.py` | ASGI middleware installed with one line. Records each exchange, redacts with the capture rules, reads or mints a W3C `traceparent`, and ships batches to the platform asynchronously. Observe-only by default. `enforce` per route makes it inline: an invalid request is rejected with 422 before the handler runs. The recording transport forwards the trace id on outbound calls. |
+| Flow graph | `backend/app/api/codebase_routes.py` | Edges derived from the ledger: an inbound record and the outbound records sharing its trace id. Milestone 5 flows become the case where the platform itself initiates the movement. |
+| Benchmark | `backend/app/codebase/score.py` | Run the extractor on a repo whose framework can emit OpenAPI, hide that output, and score endpoints, parameters, types, required flags and status codes against it. This repo's own backend is the first target. |
+| Control plane and CLI | `backend/app/api/codebase_routes.py`, `backend/app/cli.py` | Extraction upload, drift check, tap ingest, ledger queries, flow graph. CLI: `codebase init`, `codebase extract`, `codebase check`. |
+
+**Data model.**
+
+```
+code_snapshots(id, integration, repo, commit, folder, framework, tier, report_json, content_hash, extracted_at)
+call_records(id, tenant_id, integration, version, endpoint_id, direction, method, path, status, latency_ms,
+             validation, drift_kinds, trace_id, span_id, parent_span_id, source, at)
+```
+
+**Interfaces.**
+
+```
+POST /codebase/extract            upload an extraction; stores a code snapshot and a draft version
+POST /codebase/check              diff an extraction against the published manifest; opens code_changed
+POST /tap/exchanges               batch of redacted exchanges from a tap
+GET  /ledger/calls?integration=&endpoint_id=&trace_id=&since=
+GET  /flows/graph?integration=
+CLI: codebase init <folder>  codebase extract <folder>  codebase check <folder>
+```
+
+**How traffic reaches the platform.** Two directions, two answers. Outbound from the service is the
+recording transport generalised into a thin SDK; those calls go through the gateway and are validated and
+recorded there. Inbound to the service is the tap. It mirrors each exchange asynchronously, so the platform
+is never an availability dependency and adds no latency; the inline `enforce` mode is opted into per route
+where rejecting bad requests is worth the coupling. Both produce the same redacted exchange record, so the
+discovery, inspection and monitoring code does not know which one produced it.
+
+**Exit criteria.** The extractor run on this repo's own backend with the generated OpenAPI hidden reaches
+an agreed score against it on endpoints, parameters, types and status codes. With the backend tapped under
+the test client, every call appears in the ledger with a trace id, a malformed request opens a
+`request_invalid` incident, an injected 500 opens a `handler_error` incident, and renaming a route in code
+opens a `code_changed` change request before any traffic reflects it. A tapped inbound call that triggers an
+outbound gateway call appears as one edge in the flow graph.
+
+**Decisions.**
+
+- Observe-only tap by default; inline enforcement is per route and opt-in. Being in the request path is a cost
+  the service owner chooses, not a default.
+- Code is a discovery source, not a separate pipeline. The extractor emits the same report object as the
+  traffic ingester, and the two converge on one manifest. Code gives the intended contract, traffic gives the
+  actual behaviour, and disagreement between them is a drift signal neither can produce alone.
+- Triage stays deterministic. `request_invalid` is behavioural and low risk (a client fault, or a request
+  schema that is too strict). `handler_error` is behavioural, medium, not repairable by a manifest patch.
+  `code_changed` is schema drift, high when it touches a mapped field or a removed route, medium otherwise.
+- Served traffic carries customer data. Bodies are sampled and redacted at the tap; the ledger holds metadata
+  only; retention is a per-tenant setting.
+- The deterministic tier must stand alone. Source code is sent to a model only in tier two, and only when the
+  operator has not chosen offline mode.
+
+**Build steps.** 1 manifest additions (types, direction, responses, response headers, `resolve()`).
+2 call ledger and a gateway hook. 3 shared validation and the served-endpoint inspector. 4 tap middleware,
+shipper, trace ids and the ingest route. 5 deterministic OpenAPI converter and FastAPI introspection, code
+snapshots, `codebase extract`. 6 Python AST fallback and the scoring harness. 7 agent tier. 8 `codebase check`
+and the `code_changed` gate. 9 flow graph and trace forwarding on the recording transport. 10 inline enforce
+mode and the console pages.
+
 ## 6. Cross-cutting
 
 - **Safety.** Generated code, when it exists, runs sandboxed with network access limited to the target API. Credentials never reach agents. Synthesis and repair runs have token budgets and attempt caps. Every change is a versioned artifact with rollback.
 - **Approval defaults.** On for everything; loosened per integration and per risk class once trust is earned.
-- **Observability.** Every gateway call records status, latency, validation outcome, and drift events per tenant, integration, version, and endpoint.
+- **Observability.** Every gateway call and every tapped exchange records status, latency, validation outcome, trace id and drift events per tenant, integration, version, and endpoint in the call ledger (milestone 6). Bodies are sampled and redacted; the ledger holds metadata only.
 - **Tenancy.** Connections, credentials, flows, and audit events are tenant-scoped from milestone 2 onward.
 
 ## 7. Repository layout
@@ -265,13 +353,17 @@ backend/
   app/
     canonical/     people.py            canonical objects
     manifest/      schema.py            manifest model and validation
-    runtime/       gateway.py mapping.py transforms.py paths.py secrets.py
+    runtime/       gateway.py mapping.py transforms.py paths.py secrets.py validate.py inspector.py
     registry/      store.py             versioned storage
     oauth/         models.py vault.py broker.py scheduler.py   tenancy and OAuth broker
     synthesis/     agent.py pipeline.py Claude synthesis and repair loop
     drift/         models.py monitor.py triage.py patches.py repair.py changes.py worker.py diff.py
     verification/  mock_server.py mock_oauth.py harness.py drift_scenarios.py
-    api/           routes.py oauth_routes.py drift_routes.py mock_routes.py common.py   FastAPI control plane
+    discovery/     models.py capture.py cluster.py infer.py semantic.py   traffic capture, clustering, inference, mapping proposals (milestone 4)
+    codebase/      detect.py openapi.py fastapi_app.py ast_python.py agent.py lock.py score.py   code extraction (milestone 6, designed)
+    tap/           asgi.py shipper.py trace.py   inbound tap for served APIs (milestone 6, designed)
+    ledger/        models.py store.py            per-call ledger (milestone 6, designed)
+    api/           routes.py oauth_routes.py drift_routes.py mock_routes.py codebase_routes.py common.py   FastAPI control plane
     db.py cli.py main.py config.py
   manifests/       bamboohr.yaml gusto.yaml   reference manifests
   specs/           bamboohr-employees.openapi.yaml   practice spec

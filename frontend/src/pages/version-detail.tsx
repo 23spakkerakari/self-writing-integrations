@@ -68,14 +68,12 @@ export function VersionPage() {
             {record.manifest.display_name} <span className="font-mono font-medium">{version}</span>
           </>
         }
-        meta={
-          <>
-            <Status tone={status.tone}>{status.label}</Status>
-            <span>Provenance {record.provenance}</span>
-            <span>Created {formatDateTime(record.created_at)}</span>
-            {record.published_at ? <span>Published {formatDateTime(record.published_at)}</span> : null}
-          </>
-        }
+        block={[
+          { label: "Status", value: <Status tone={status.tone}>{status.label}</Status> },
+          { label: "Provenance", value: record.provenance },
+          { label: "Created", value: formatDateTime(record.created_at) },
+          { label: "Published", value: record.published_at ? formatDateTime(record.published_at) : null },
+        ]}
         actions={
           <>
             {record.status !== "published" && record.status !== "superseded" ? (

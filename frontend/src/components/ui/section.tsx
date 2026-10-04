@@ -16,9 +16,9 @@ export function Section({
 }) {
   return (
     <section className={cn("space-y-3", className)}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line pb-2">
         <div>
-          <h2 className="text-base font-medium">{title}</h2>
+          <h2 className="font-display text-[17px] font-semibold">{title}</h2>
           {description ? <p className="text-xs text-ink-3">{description}</p> : null}
         </div>
         {actions}

@@ -40,6 +40,16 @@ class ConnectionCreate(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class SecretsStore(BaseModel):
+    secrets: dict[str, str] = Field(description="secret_ref -> value. Stored encrypted; never returned.")
+    actor: str = "tenant"
+
+
+class SecretsStatus(BaseModel):
+    required: list[str]
+    stored: list[str]
+
+
 class ConsentStart(BaseModel):
     endpoint_ids: list[str] | None = Field(default=None, description="Limit scopes to these endpoints")
 
@@ -92,6 +102,31 @@ def get_connection(connection_id: str, broker: OAuthBroker = Depends(get_broker)
         return broker.get_connection(connection_id)
     except NotFound as exc:
         raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/connections/{connection_id}/secrets", response_model=SecretsStatus)
+def secrets_status(connection_id: str, broker: OAuthBroker = Depends(get_broker)) -> SecretsStatus:
+    """Which static credentials the integration needs and which are in the vault. Names only."""
+    try:
+        conn = broker.get_connection(connection_id)
+        return SecretsStatus(
+            required=broker.manifest_for(conn.integration_name).secret_refs(), stored=broker.stored_secret_refs(connection_id)
+        )
+    except NotFound as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.post("/connections/{connection_id}/secrets", response_model=SecretsStatus)
+def store_secrets(connection_id: str, body: SecretsStore, broker: OAuthBroker = Depends(get_broker)) -> SecretsStatus:
+    """Store an API key or token for a non-OAuth connection so flows and probes can run unattended."""
+    try:
+        stored = broker.store_secrets(connection_id, body.secrets, actor=body.actor)
+        conn = broker.get_connection(connection_id)
+    except NotFound as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    except OAuthError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    return SecretsStatus(required=broker.manifest_for(conn.integration_name).secret_refs(), stored=stored)
 
 
 @router.post("/connections/{connection_id}/consent", response_model=ConsentRequest)
