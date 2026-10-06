@@ -1,0 +1,18 @@
+# Normalize all text to LF in the repository and the working tree (ADR 0007).
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zst binary
+*.gz binary
+*.zip binary
+*.pdf binary
+
+# Generated but reviewable
+uv.lock linguist-generated=true

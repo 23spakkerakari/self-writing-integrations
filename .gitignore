@@ -1,8 +1,41 @@
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
 *.egg-info/
 .venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Node (legacy frontend today, web/ from M2)
+node_modules/
+
+# Local state and secrets (never committed; secrets only via secret_ref)
 *.db
 .env
-node_modules/
+.env.*
+!.env.example
+
+# Generated data: simulator output, eval reports, offline bundles
+sim-out/
+eval/reports/
+*.carto/
+
+# Security tool outputs
+sbom*.json
+*.sigstore.json
+*.sarif
+requirements-export.txt
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

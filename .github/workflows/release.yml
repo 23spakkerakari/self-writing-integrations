@@ -1,0 +1,50 @@
+# On main: software bill of materials (CycloneDX via Syft) signed with cosign keyless through
+# GitHub OIDC (spec Section 14.8). Container images and their signatures and SLSA provenance
+# join this workflow with the first service image in M1.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sbom:
+    name: SBOM and signature
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --locked --all-packages
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the SBOM (keyless)
+        run: cosign sign-blob --yes --bundle sbom.cdx.json.sigstore.json sbom.cdx.json
+      - name: Verify the signature
+        run: |
+          cosign verify-blob \
+            --bundle sbom.cdx.json.sigstore.json \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom.cdx.json
+            sbom.cdx.json.sigstore.json
+          if-no-files-found: error

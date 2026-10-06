@@ -1,0 +1,12 @@
+# Founder review is required for security-critical paths (spec Section 14.8, ADR 0008 for the
+# path mapping). Everything else is also owned by the founder while the team is one person.
+*                                                   @23spakkerakari
+
+/edge/carto_edge/pipeline/tokenize*                 @23spakkerakari
+/edge/carto_edge/connectors/                        @23spakkerakari
+/packages/carto-common/carto_common/crypto*         @23spakkerakari
+/core/carto_core/api/auth*                          @23spakkerakari
+/core/carto_core/llm_gateway/                       @23spakkerakari
+/deploy/                                            @23spakkerakari
+/.github/                                           @23spakkerakari
+/.semgrep/                                          @23spakkerakari

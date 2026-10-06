@@ -1,0 +1,16 @@
+[project]
+name = "carto-core"
+version = "0.1.0"
+description = "carto core: ingest, profiler, linker, assembler, detector, notifier, api, llm-gateway (spec Sections 9 to 12). Services land from M1."
+requires-python = ">=3.12"
+dependencies = [
+  "carto-schema",
+  "carto-common",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["carto_core"]

@@ -1,0 +1,49 @@
+# Spec 8.1: "A Semgrep rule fails CI if connector modules import or call known mutating APIs
+# (SQL DML/DDL execution outside the read-only path, SFTP put/remove/rename/mkdir, HTTP methods
+# other than GET/HEAD on source APIs, except Splunk's documented search export POST)."
+#
+# CI runs this rule over the whole repository; connector modules live under
+# edge/carto_edge/connectors/ (ADR 0008). The self-test next to this file is required by 18.3.
+rules:
+  - id: carto-connector-read-only
+    message: >-
+      Connector code must be read-only toward customer systems (spec 2.3.1 and 8.1). This call
+      can write, delete, move or create data in a source system. If this is the documented Splunk
+      search export POST (spec 8.1.3), isolate it in the Splunk connector's export helper with a
+      nosemgrep comment that cites the spec section.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      spec: ["2.3.1", "8.1", "18.3"]
+    pattern-either:
+      # SFTP and filesystem mutation (asyncssh SFTPClient, paramiko, pathlib, os, shutil)
+      - pattern: $C.put(...)
+      - pattern: $C.remove(...)
+      - pattern: $C.rename(...)
+      - pattern: $C.posix_rename(...)
+      - pattern: $C.mkdir(...)
+      - pattern: $C.makedirs(...)
+      - pattern: $C.rmdir(...)
+      - pattern: $C.unlink(...)
+      - pattern: $C.rmtree(...)
+      - pattern: $C.chmod(...)
+      - pattern: $C.chown(...)
+      - pattern: $C.truncate(...)
+      - pattern: $C.symlink(...)
+      - pattern: $C.link(...)
+      - pattern: $C.write_text(...)
+      - pattern: $C.write_bytes(...)
+      # HTTP methods other than GET and HEAD toward source APIs
+      - pattern: $C.post(...)
+      - pattern: $C.patch(...)
+      - pattern: $C.delete(...)
+      - pattern: $C.request("POST", ...)
+      - pattern: $C.request("PUT", ...)
+      - pattern: $C.request("PATCH", ...)
+      - pattern: $C.request("DELETE", ...)
+      # SQL DML and DDL
+      - pattern: $C.execute("=~/(?i)^\s*(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke|replace|call|exec)\b/", ...)
+      - pattern: $C.executemany(...)
+      - pattern: $C.copy(...)
+      - pattern: $C.copy_expert(...)

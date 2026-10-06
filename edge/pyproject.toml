@@ -1,0 +1,19 @@
+[project]
+name = "carto-edge"
+version = "0.1.0"
+description = "carto edge: connectors, parsing, classification, redaction, tokenization, gateway and the offline analyzer (spec Section 8). Implemented in M1."
+requires-python = ">=3.12"
+dependencies = [
+  "carto-schema",
+  "carto-common",
+]
+
+[project.scripts]
+carto-edge = "carto_edge.cli.main:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["carto_edge"]

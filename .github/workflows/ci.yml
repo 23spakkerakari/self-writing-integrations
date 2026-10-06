@@ -1,0 +1,145 @@
+# CI for carto (spec Section 6 "Security CI", Section 14.8, Section 20).
+# Every job runs on pull requests and on pushes to main. Scanners fail the build on high and
+# critical findings; exceptions with an expiry go in docs/security-exceptions.md.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  python:
+    name: lint, types, tests, schema, simulator, eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install workspace
+        run: uv sync --locked --all-packages
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: Types (mypy --strict)
+        run: uv run mypy
+      - name: Tests
+        run: uv run pytest --cov --cov-report=xml --cov-report=term
+      - name: JSON Schema drift check
+        run: uv run carto-schema check --dir packages/carto-schema/schemas
+      - name: Simulator scenario A (14 days)
+        run: make sim SCENARIO=shop DAYS=14 SEED=1
+      - name: Eval harness
+        run: make eval SCENARIO=shop DAYS=14 SEED=1
+      - name: Simulator output summary
+        run: |
+          echo "## Simulator output" >> "$GITHUB_STEP_SUMMARY"
+          du -sh sim-out/shop >> "$GITHUB_STEP_SUMMARY"
+          find sim-out/shop -type f | wc -l | xargs -I{} echo "{} files" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Eval report" >> "$GITHUB_STEP_SUMMARY"
+          cat eval/reports/shop.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval/reports/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
+
+  bandit:
+    name: bandit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --locked --all-packages
+      - run: uv run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
+
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --locked --all-packages
+      - name: Export locked requirements (all members, dev included)
+        run: uv export --all-packages --no-emit-workspace --no-hashes --format requirements-txt -o requirements-export.txt
+      - run: uv run pip-audit -r requirements-export.txt --strict --desc on
+
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rule self-tests (spec 18.3)
+        run: semgrep --test --metrics=off .semgrep
+      - name: Scan
+        run: semgrep scan --config .semgrep --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude .semgrep .
+
+  osv-scanner:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan the lockfile
+        run: |
+          docker run --rm -v "$PWD:/src" ghcr.io/google/osv-scanner:latest scan source --lockfile /src/uv.lock
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy:
+    name: trivy (filesystem)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          skip-dirs: legacy
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

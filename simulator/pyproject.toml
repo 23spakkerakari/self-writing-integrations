@@ -1,0 +1,18 @@
+[project]
+name = "carto-simulator"
+version = "0.1.0"
+description = "carto simulator: multi-system synthetic data with ground truth, deterministic by seed (spec Section 19)"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.9",
+]
+
+[project.scripts]
+carto-sim = "carto_simulator.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["carto_simulator"]
