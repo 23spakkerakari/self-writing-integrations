@@ -5,6 +5,7 @@ description = "carto simulator: multi-system synthetic data with ground truth, d
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.9",
+  "tzdata>=2025.2",
 ]
 
 [project.scripts]

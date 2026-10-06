@@ -39,4 +39,5 @@ import, lint or test it.
 
 ## Milestone status
 
-- M0 Foundations: in progress on branch `m0-foundations` (docs/plans/M0.md).
+- M0 Foundations: built on branch `m0-foundations` on 2026-10-06 (docs/plans/M0.md); merge
+  after CI is green. Next: M1 edge pipeline and offline analyzer (write docs/plans/M1.md first).

@@ -12,7 +12,8 @@ from or extend it are in [`docs/adr/`](docs/adr/). Milestone plans are in
 
 ## Status
 
-M0 (foundations) in progress. See [`docs/plans/M0.md`](docs/plans/M0.md).
+M0 (foundations) built on 2026-10-06; see [`docs/plans/M0.md`](docs/plans/M0.md). M1 (edge
+pipeline and offline analyzer) is next.
 
 ## Layout
 

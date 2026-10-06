@@ -1,0 +1,266 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "description": "Tokenized user or service identifier (spec 7.1 ``actor``).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ActorKind"
+        },
+        "token": {
+          "pattern": "^t[1-9][0-9]{0,3}\\.[A-Za-z0-9_-]{22}$",
+          "title": "Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "token",
+        "kind"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "ActorKind": {
+      "description": "Who or what performed the action (spec 7.1 ``actor.kind``).",
+      "enum": [
+        "human",
+        "service",
+        "unknown"
+      ],
+      "title": "ActorKind",
+      "type": "string"
+    },
+    "EventKind": {
+      "description": "What the edge observed (spec 7.1 ``kind``).",
+      "enum": [
+        "log",
+        "row_change",
+        "file_arrived",
+        "file_removed",
+        "http_access",
+        "webhook"
+      ],
+      "title": "EventKind",
+      "type": "string"
+    },
+    "Identifier": {
+      "additionalProperties": false,
+      "description": "One form of one identifier-class field, tokenized (spec 7.1, 8.4).\n\n``shape`` and ``len`` describe the form value the token was computed from, not the raw\nrecord value, so a ``digits.0`` entry of ``SO-0004471`` has shape ``9999`` and length 4.\n``shape`` must be what :func:`carto_schema.forms.shape` returns, so a raw value cannot travel\nin the shape slot (spec 2.3 invariant 2); ``len`` is a strict integer (no booleans, no\nnumeric strings), as in the exported schema.",
+      "properties": {
+        "field": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "form": {
+          "pattern": "^(?:raw|norm|alnum|date|amount|digits\\.[0-2]|phonetic\\.[0-7])$",
+          "title": "Form",
+          "type": "string"
+        },
+        "len": {
+          "minimum": 1,
+          "title": "Len",
+          "type": "integer"
+        },
+        "shape": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Shape",
+          "type": "string"
+        },
+        "token": {
+          "pattern": "^t[1-9][0-9]{0,3}\\.[A-Za-z0-9_-]{22}$",
+          "title": "Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "form",
+        "token",
+        "shape",
+        "len"
+      ],
+      "title": "Identifier",
+      "type": "object"
+    },
+    "ObservedAtQuality": {
+      "description": "Where ``observed_at`` came from (spec 7.1).",
+      "enum": [
+        "source",
+        "ingest",
+        "inferred"
+      ],
+      "title": "ObservedAtQuality",
+      "type": "string"
+    },
+    "Redaction": {
+      "additionalProperties": false,
+      "description": "Which field policy produced the event and how much Presidio masked (spec 7.1, 8.3).",
+      "properties": {
+        "entities_masked": {
+          "minimum": 0,
+          "title": "Entities Masked",
+          "type": "integer"
+        },
+        "policy_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Policy Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "entities_masked"
+      ],
+      "title": "Redaction",
+      "type": "object"
+    },
+    "Severity": {
+      "description": "Log severity, when the source has one (spec 7.1 ``severity``).",
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "fatal"
+      ],
+      "title": "Severity",
+      "type": "string"
+    }
+  },
+  "$id": "urn:carto:schema:canonical_event:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The canonical event the edge sends to core (spec 7.1).\n\nField order matches the JSON in the spec so ``model_dump_json()`` reproduces it key for key.\n``template_text`` must contain constants only; that is enforced at the edge (spec 8.3 rule 7),\nnot by this model, which can only bound its length.",
+  "properties": {
+    "actor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Actor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "attributes": {
+      "additionalProperties": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "maxProperties": 256,
+      "propertyNames": {
+        "maxLength": 128,
+        "minLength": 1
+      },
+      "title": "Attributes",
+      "type": "object"
+    },
+    "dropped_fields": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 1024,
+      "title": "Dropped Fields",
+      "type": "array"
+    },
+    "event_id": {
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "identifiers": {
+      "items": {
+        "$ref": "#/$defs/Identifier"
+      },
+      "maxItems": 64,
+      "title": "Identifiers",
+      "type": "array"
+    },
+    "ingested_at": {
+      "format": "date-time",
+      "title": "Ingested At",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EventKind"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "observed_at_quality": {
+      "$ref": "#/$defs/ObservedAtQuality"
+    },
+    "redaction": {
+      "$ref": "#/$defs/Redaction"
+    },
+    "schema_version": {
+      "const": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "severity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Severity"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "source_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "system_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "title": "System Id",
+      "type": "string"
+    },
+    "template_id": {
+      "pattern": "^[A-Za-z0-9_.:-]{1,64}$",
+      "title": "Template Id",
+      "type": "string"
+    },
+    "template_text": {
+      "maxLength": 4096,
+      "title": "Template Text",
+      "type": "string"
+    },
+    "tenant_id": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "title": "Tenant Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "tenant_id",
+    "source_id",
+    "system_id",
+    "kind",
+    "observed_at",
+    "ingested_at",
+    "observed_at_quality",
+    "template_id",
+    "template_text",
+    "attributes",
+    "identifiers",
+    "redaction"
+  ],
+  "title": "carto canonical event (schema version 1)",
+  "type": "object"
+}

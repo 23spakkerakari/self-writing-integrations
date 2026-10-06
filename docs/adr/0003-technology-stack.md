@@ -33,6 +33,7 @@ Dependencies added in M0, with license and reason:
 | ruff, mypy | MIT | lint, format, strict types |
 | bandit, pip-audit | Apache-2.0 | security CI (Section 6) |
 | jsonschema | MIT | validate exported JSON Schemas and examples in tests |
+| tzdata | Apache-2.0 | IANA time zone database for `zoneinfo`; Windows and minimal container images ship none, and calendars (spec 10.1) and the simulator need America/New_York with DST |
 
 ## Alternatives
 
