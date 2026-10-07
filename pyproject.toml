@@ -48,7 +48,7 @@ carto-ctl = { workspace = true }
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["legacy", "sim-out", ".semgrep", "*.md"]
+extend-exclude = ["legacy", "sim-out", "tools/semgrep", "*.md"]
 
 [tool.ruff.lint]
 select = [
@@ -170,5 +170,5 @@ fail_under = 0
 # bandit (Section 6). B311 (random) is covered by ruff S311 outside the simulator.
 # ---------------------------------------------------------------------------------------------
 [tool.bandit]
-exclude_dirs = ["legacy", ".venv", "tests", "sim-out", ".semgrep"]
+exclude_dirs = ["legacy", ".venv", "tests", "sim-out", "tools/semgrep"]
 skips = ["B311"]

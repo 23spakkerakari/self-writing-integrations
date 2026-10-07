@@ -1,5 +1,5 @@
 # Semgrep self-test fixture for connector-read-only.yaml (spec 18.3: "Semgrep rule self-test").
-# `semgrep --test .semgrep` checks that every `ruleid:` line matches and every `ok:` line does not.
+# `semgrep --test tools/semgrep` checks that every `ruleid:` line matches and every `ok:` line does not.
 # This file is excluded from ruff, mypy, bandit and the real Semgrep scan.
 
 

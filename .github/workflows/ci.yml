@@ -101,9 +101,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rule self-tests (spec 18.3)
-        run: semgrep --test --metrics=off .semgrep
-      - name: Scan
-        run: semgrep scan --config .semgrep --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude .semgrep .
+        run: semgrep --test --metrics=off tools/semgrep
+      - name: Read-only connector rule over connector modules (spec 8.1, ADR 0008)
+        run: semgrep scan --config tools/semgrep --error --metrics=off edge/carto_edge/connectors
+      - name: Registry rulesets over the repository
+        run: semgrep scan --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude tools/semgrep .
 
   osv-scanner:
     name: osv-scanner
@@ -133,7 +135,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .

@@ -2,8 +2,9 @@
 # (SQL DML/DDL execution outside the read-only path, SFTP put/remove/rename/mkdir, HTTP methods
 # other than GET/HEAD on source APIs, except Splunk's documented search export POST)."
 #
-# CI runs this rule over the whole repository; connector modules live under
-# edge/carto_edge/connectors/ (ADR 0008). The self-test next to this file is required by 18.3.
+# CI runs this rule over edge/carto_edge/connectors/ only (ADR 0008 for the path): writing a
+# local output file is normal elsewhere (the simulator, the schema export CLI, the eval reports)
+# and forbidden inside a connector. The self-test next to this file is required by 18.3.
 rules:
   - id: carto-connector-read-only
     message: >-
@@ -43,7 +44,9 @@ rules:
       - pattern: $C.request("PATCH", ...)
       - pattern: $C.request("DELETE", ...)
       # SQL DML and DDL
-      - pattern: $C.execute("=~/(?i)^\s*(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke|replace|call|exec)\b/", ...)
+      # Semgrep regex strings have no \b, so the keyword boundary is spelled out (updated_at in a
+      # SELECT must not match).
+      - pattern: $C.execute("=~/(?i)^\s*(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke|replace|call|exec)([^a-z0-9_]|$)/", ...)
       - pattern: $C.executemany(...)
       - pattern: $C.copy(...)
       - pattern: $C.copy_expert(...)

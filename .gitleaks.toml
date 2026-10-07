@@ -1,0 +1,26 @@
+# gitleaks configuration (spec Section 6 "Security CI", 14.8). The default rule set applies;
+# the allowlist below names the only places where secret-shaped strings are expected by design.
+# Every entry must stay explainable to a security reviewer.
+title = "carto"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic values that look like secrets but are not"
+regexes = [
+  # carto tokens are HMAC outputs with a key-version prefix (spec 8.4), not credentials. The
+  # ones in this repository are hand-written examples in the schema package and its tests.
+  '''t[1-9][0-9]{0,3}\.[A-Za-z0-9_-]{22}''',
+]
+paths = [
+  # Redaction tests plant fake secrets (JWTs, AWS key ids, PEM blocks, password= text) to prove
+  # the logging processor removes them (spec 14.12, ADR 0010).
+  '''packages/carto-common/tests/.*''',
+  # Schema round-trip tests and the Semgrep rule fixture carry synthetic example values.
+  '''packages/carto-schema/tests/.*''',
+  '''tools/semgrep/.*''',
+  # The previous product kept under legacy/ (ADR 0005) is frozen reference code with mock
+  # OAuth fixtures; it predates carto and is not built or shipped.
+  '''legacy/.*''',
+]

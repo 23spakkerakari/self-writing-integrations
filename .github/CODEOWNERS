@@ -9,4 +9,4 @@
 /core/carto_core/llm_gateway/                       @23spakkerakari
 /deploy/                                            @23spakkerakari
 /.github/                                           @23spakkerakari
-/.semgrep/                                          @23spakkerakari
+/tools/semgrep/                                     @23spakkerakari

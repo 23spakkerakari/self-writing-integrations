@@ -57,7 +57,7 @@ sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 > $(UV) run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
 > $(UV) export --all-packages --no-emit-workspace --no-hashes --format requirements-txt -o requirements-export.txt
 > $(UV) run pip-audit -r requirements-export.txt --strict --desc on
-> @command -v semgrep >/dev/null 2>&1 && semgrep scan --config .semgrep --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude .semgrep . || echo "semgrep: not installed locally, runs in CI"
+> @command -v semgrep >/dev/null 2>&1 && semgrep --test --metrics=off tools/semgrep && semgrep scan --config tools/semgrep --error --metrics=off edge/carto_edge/connectors && semgrep scan --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude tools/semgrep . || echo "semgrep: not installed locally, runs in CI"
 > @command -v gitleaks >/dev/null 2>&1 && gitleaks git --no-banner --redact . || echo "gitleaks: not installed locally, runs in CI"
 > @command -v trivy >/dev/null 2>&1 && trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --skip-dirs legacy . || echo "trivy: not installed locally, runs in CI"
 > @command -v osv-scanner >/dev/null 2>&1 && osv-scanner scan source --lockfile uv.lock || echo "osv-scanner: not installed locally, runs in CI"
