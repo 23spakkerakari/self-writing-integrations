@@ -1,11 +1,33 @@
 [project]
 name = "carto-edge"
 version = "0.1.0"
-description = "carto edge: connectors, parsing, classification, redaction, tokenization, gateway and the offline analyzer (spec Section 8). Implemented in M1."
+description = "carto edge: connectors, parsing, classification, redaction, tokenization, gateway and the offline analyzer (spec Section 8)"
 requires-python = ">=3.12"
 dependencies = [
   "carto-schema",
   "carto-common",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "httpx>=0.28",
+  "drain3>=0.9.11",
+  "presidio-analyzer>=2.2.355",
+  "spacy>=3.8",
+  "en-core-web-sm",
+  "google-re2>=1.1",
+  "defusedxml>=0.7",
+  "datasketch>=1.6",
+  "cryptography>=43",
+  "asyncssh>=2.18",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "pyodbc>=5.2",
+  "pymysql>=1.1",
+  "sqlglot>=26",
+  "zstandard>=0.23",
+  "opentelemetry-proto>=1.28",
+  "protobuf>=5",
+  "pyyaml>=6.0",
+  "metaphone>=0.6",
 ]
 
 [project.scripts]

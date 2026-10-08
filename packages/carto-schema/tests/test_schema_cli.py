@@ -27,6 +27,8 @@ from carto_schema.event import CanonicalEvent
 
 SCHEMAS_DIR = Path(__file__).resolve().parents[1] / "schemas"
 FILE_NAMES = [
+    "bundle_manifest.v1.schema.json",
+    "bundle_signature.v1.schema.json",
     "canonical_event.v1.schema.json",
     "ingest_batch.v1.schema.json",
     "source_heartbeat.v1.schema.json",
@@ -71,6 +73,8 @@ def test_committed_files_are_byte_identical_to_rendered_schemas() -> None:
 def test_schema_names_ids_and_headers() -> None:
     assert [spec.file_name for spec in SCHEMAS] == FILE_NAMES
     assert [spec.schema_id for spec in SCHEMAS] == [
+        "urn:carto:schema:bundle_manifest:v1",
+        "urn:carto:schema:bundle_signature:v1",
         "urn:carto:schema:canonical_event:v1",
         "urn:carto:schema:ingest_batch:v1",
         "urn:carto:schema:source_heartbeat:v1",
@@ -105,12 +109,12 @@ def test_export_then_check_passes(tmp_path: Path, capsys: pytest.CaptureFixture[
     out = tmp_path / "nested" / "schemas"
     assert main(["export", "--out", str(out)]) == 0
     assert sorted(path.name for path in out.iterdir()) == FILE_NAMES
-    assert capsys.readouterr().out.count("wrote ") == 3
+    assert capsys.readouterr().out.count("wrote ") == len(FILE_NAMES)
     for name in FILE_NAMES:
         assert b"\r\n" not in (out / name).read_bytes()
     assert main(["check", "--dir", str(out)]) == 0
     captured = capsys.readouterr()
-    assert captured.out.startswith("ok: 3 schema files")
+    assert captured.out.startswith(f"ok: {len(FILE_NAMES)} schema files")
     assert captured.err == ""
 
 
@@ -145,7 +149,7 @@ def test_missing_dir_fails_check(tmp_path: Path, capsys: pytest.CaptureFixture[s
     missing = tmp_path / "does-not-exist"
     assert main(["check", "--dir", str(missing)]) == 1
     captured = capsys.readouterr()
-    assert captured.err.count("missing:") == 3
+    assert captured.err.count("missing:") == len(FILE_NAMES)
     assert captured.out == ""
 
 
@@ -187,8 +191,8 @@ def test_paths_outside_the_stdout_encoding_do_not_crash(
     assert main(["check", "--dir", str(out)]) == 0
     sys.stdout.flush()
     text = raw.getvalue().decode("cp1252")
-    assert text.count("wrote ") == 3
-    assert "ok: 3 schema files" in text
+    assert text.count("wrote ") == len(FILE_NAMES)
+    assert f"ok: {len(FILE_NAMES)} schema files" in text
     assert "\\u65e5\\u672c\\u8a9e" in text
 
 

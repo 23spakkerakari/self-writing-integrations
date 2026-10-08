@@ -1,12 +1,23 @@
 [project]
 name = "carto-core"
 version = "0.1.0"
-description = "carto core: ingest, profiler, linker, assembler, detector, notifier, api, llm-gateway (spec Sections 9 to 12). Services land from M1."
+description = "carto core: ingest, profiler, linker, assembler, detector, notifier, api, llm-gateway (spec Sections 9 to 12). ingest-api, migrations and the bundle loader land in M1."
 requires-python = ">=3.12"
 dependencies = [
   "carto-schema",
   "carto-common",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "clickhouse-connect>=0.8",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.14",
+  "zstandard>=0.23",
+  "cryptography>=43",
 ]
+
+[project.scripts]
+carto-core = "carto_core.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]

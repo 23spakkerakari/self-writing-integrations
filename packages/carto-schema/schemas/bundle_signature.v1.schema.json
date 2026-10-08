@@ -1,0 +1,50 @@
+{
+  "$id": "urn:carto:schema:bundle_signature:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "``signature.json``: Ed25519 over the exact bytes of ``manifest.json``.",
+  "properties": {
+    "algorithm": {
+      "const": "ed25519",
+      "title": "Algorithm",
+      "type": "string"
+    },
+    "key_id": {
+      "pattern": "^[0-9a-f]{16}$",
+      "title": "Key Id",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "public_key": {
+      "maxLength": 43,
+      "minLength": 43,
+      "title": "Public Key",
+      "type": "string"
+    },
+    "signature": {
+      "maxLength": 86,
+      "minLength": 86,
+      "title": "Signature",
+      "type": "string"
+    },
+    "signed_at": {
+      "format": "date-time",
+      "title": "Signed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "algorithm",
+    "key_id",
+    "public_key",
+    "signature",
+    "signed_at",
+    "manifest_sha256"
+  ],
+  "title": "carto offline bundle signature (version 1)",
+  "type": "object"
+}

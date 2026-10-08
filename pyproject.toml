@@ -18,6 +18,11 @@ dev = [
   "mypy>=1.13",
   "bandit>=1.8",
   "pip-audit>=2.7",
+  "pytest-asyncio>=0.24",
+  "testcontainers>=4.9",
+  "types-pyyaml>=6.0",
+  "types-protobuf>=5",
+  "types-pymysql>=1.1",
 ]
 
 [tool.uv]
@@ -34,6 +39,7 @@ members = [
 ]
 
 [tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 carto-schema = { workspace = true }
 carto-common = { workspace = true }
 carto-edge = { workspace = true }
@@ -125,6 +131,23 @@ files = [
 ]
 exclude = ["^legacy/", "/build/", "/dist/"]
 
+[[tool.mypy.overrides]]
+module = [
+  "drain3.*",
+  "datasketch.*",
+  "presidio_analyzer.*",
+  "metaphone.*",
+  "re2.*",
+  "testcontainers.*",
+  "asyncssh.*",
+  "clickhouse_connect.*",
+  "pyodbc.*",
+  "spacy.*",
+  "opentelemetry.*",
+  "google.protobuf.*",
+]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_forbid_extra = true
 init_typed = true
@@ -145,6 +168,8 @@ testpaths = [
   "tools/carto-ctl/tests",
 ]
 addopts = "-q --import-mode=importlib --strict-markers --strict-config"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 xfail_strict = true
 filterwarnings = ["error"]
 markers = [

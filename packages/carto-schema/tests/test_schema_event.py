@@ -265,6 +265,22 @@ def test_duplicate_field_and_form_is_rejected() -> None:
     assert errors_of(info) == [("value_error", ("identifiers",))]
 
 
+def test_same_field_and_form_under_two_key_versions_is_accepted() -> None:
+    # Spec 8.4 rotation: the edge dual-tokenizes, one token per live key version (ADR 0023).
+    data = example_dict()
+    second = {**identifier_dict(1), "token": "t2." + make_token(2).partition(".")[2]}
+    data["identifiers"] = [identifier_dict(1), second]
+    assert len(CanonicalEvent.model_validate(data).identifiers) == 2
+
+
+def test_same_field_form_and_key_version_is_rejected() -> None:
+    data = example_dict()
+    data["identifiers"] = [identifier_dict(1), {**identifier_dict(2), "field": "field_1"}]
+    with pytest.raises(ValidationError, match="key version") as info:
+        CanonicalEvent.model_validate(data)
+    assert errors_of(info) == [("value_error", ("identifiers",))]
+
+
 def test_same_field_with_different_forms_is_accepted() -> None:
     data = example_dict()
     data["identifiers"] = [

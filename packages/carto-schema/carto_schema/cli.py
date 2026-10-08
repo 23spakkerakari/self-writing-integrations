@@ -17,6 +17,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
+from carto_schema.bundle import BundleManifest, BundleSignature
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat
 
@@ -44,6 +45,8 @@ class SchemaSpec:
 
 
 SCHEMAS: Final[tuple[SchemaSpec, ...]] = (
+    SchemaSpec("bundle_manifest", BundleManifest, "carto offline bundle manifest (version 1)"),
+    SchemaSpec("bundle_signature", BundleSignature, "carto offline bundle signature (version 1)"),
     SchemaSpec("canonical_event", CanonicalEvent, "carto canonical event (schema version 1)"),
     SchemaSpec("ingest_batch", IngestBatch, "carto ingest batch (schema version 1)"),
     SchemaSpec("source_heartbeat", SourceHeartbeat, "carto source heartbeat (schema version 1)"),

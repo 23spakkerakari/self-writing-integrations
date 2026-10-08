@@ -1,0 +1,281 @@
+{
+  "$defs": {
+    "BundleCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "minimum": 0,
+          "title": "Events",
+          "type": "integer"
+        },
+        "fields_dropped": {
+          "minimum": 0,
+          "title": "Fields Dropped",
+          "type": "integer"
+        },
+        "fields_kept": {
+          "minimum": 0,
+          "title": "Fields Kept",
+          "type": "integer"
+        },
+        "fields_tokenized": {
+          "minimum": 0,
+          "title": "Fields Tokenized",
+          "type": "integer"
+        },
+        "identifiers": {
+          "minimum": 0,
+          "title": "Identifiers",
+          "type": "integer"
+        },
+        "parse_errors": {
+          "minimum": 0,
+          "title": "Parse Errors",
+          "type": "integer"
+        },
+        "records_dropped": {
+          "minimum": 0,
+          "title": "Records Dropped",
+          "type": "integer"
+        },
+        "records_read": {
+          "minimum": 0,
+          "title": "Records Read",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "records_read",
+        "events",
+        "records_dropped",
+        "parse_errors",
+        "identifiers",
+        "fields_kept",
+        "fields_tokenized",
+        "fields_dropped"
+      ],
+      "title": "BundleCounts",
+      "type": "object"
+    },
+    "BundleSourceSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "connector_type": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Connector Type",
+          "type": "string"
+        },
+        "events_written": {
+          "minimum": 0,
+          "title": "Events Written",
+          "type": "integer"
+        },
+        "first_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Observed At"
+        },
+        "last_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Observed At"
+        },
+        "parse_errors": {
+          "minimum": 0,
+          "title": "Parse Errors",
+          "type": "integer"
+        },
+        "records_dropped": {
+          "minimum": 0,
+          "title": "Records Dropped",
+          "type": "integer"
+        },
+        "records_read": {
+          "minimum": 0,
+          "title": "Records Read",
+          "type": "integer"
+        },
+        "source_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "system_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "system_id",
+        "connector_type",
+        "records_read",
+        "events_written",
+        "records_dropped",
+        "parse_errors"
+      ],
+      "title": "BundleSourceSummary",
+      "type": "object"
+    },
+    "FileDigest": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "bytes"
+      ],
+      "title": "FileDigest",
+      "type": "object"
+    }
+  },
+  "$id": "urn:carto:schema:bundle_manifest:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "``manifest.json``. Field order is the file order.",
+  "properties": {
+    "bundle_id": {
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "title": "Bundle Id",
+      "type": "string"
+    },
+    "bundle_version": {
+      "const": "1",
+      "title": "Bundle Version",
+      "type": "string"
+    },
+    "counts": {
+      "$ref": "#/$defs/BundleCounts"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "files": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileDigest"
+      },
+      "title": "Files",
+      "type": "object"
+    },
+    "first_observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "First Observed At"
+    },
+    "key_versions": {
+      "items": {
+        "maximum": 9999,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Key Versions",
+      "type": "array"
+    },
+    "last_observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Observed At"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Notes",
+      "type": "array"
+    },
+    "policy_version": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "producer": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Producer",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/BundleSourceSummary"
+      },
+      "maxItems": 1024,
+      "title": "Sources",
+      "type": "array"
+    },
+    "tenant_id": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "title": "Tenant Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "bundle_version",
+    "schema_version",
+    "bundle_id",
+    "tenant_id",
+    "created_at",
+    "producer",
+    "key_versions",
+    "policy_version",
+    "sources",
+    "counts",
+    "files"
+  ],
+  "title": "carto offline bundle manifest (version 1)",
+  "type": "object"
+}

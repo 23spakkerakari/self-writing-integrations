@@ -209,15 +209,24 @@ class CanonicalEvent(ContractModel):
 
     @field_validator("identifiers")
     @classmethod
-    def _unique_field_and_form(cls, identifiers: list[Identifier]) -> list[Identifier]:
-        """Reject two entries for the same ``(field, form)``: one token per form per field."""
-        seen: set[tuple[str, str]] = set()
+    def _unique_field_form_and_key_version(cls, identifiers: list[Identifier]) -> list[Identifier]:
+        """Reject two entries for the same ``(field, form, key version)``.
+
+        One token per form per field per key version: during a key rotation the edge
+        dual-tokenizes (spec 8.4), so one field and form may carry a ``t1.`` and a ``t2.``
+        token side by side, never two tokens under the same key version (ADR 0023).
+        """
+        seen: set[tuple[str, str, str]] = set()
         for identifier in identifiers:
-            pair = (identifier.field, identifier.form)
-            if pair in seen:
-                msg = f"duplicate identifier for field {pair[0]!r} and form {pair[1]!r}"
+            version = identifier.token.partition(".")[0]
+            triple = (identifier.field, identifier.form, version)
+            if triple in seen:
+                msg = (
+                    f"duplicate identifier for field {triple[0]!r}, form {triple[1]!r} and key "
+                    f"version {triple[2]!r}"
+                )
                 raise ValueError(msg)
-            seen.add(pair)
+            seen.add(triple)
         return identifiers
 
     @classmethod
