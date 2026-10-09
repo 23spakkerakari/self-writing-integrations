@@ -1,0 +1,113 @@
+# OpenTelemetry Collector Contrib configuration template for carto (spec 8.1.2, 5.3).
+#
+# Upstream build, configuration only, no custom code. The collector tails log files, receives
+# syslog, Splunk HEC and OTLP, keeps a persistent queue on disk, and forwards OTLP/HTTP logs to
+# edge-gateway over mutual TLS. Every receiver sets the `carto.source_id` resource attribute so
+# edge-gateway knows which configured source a record belongs to (the id must match a source of
+# type `otlp` in sources.yaml).
+#
+# Replace the values marked REPLACE. Keep the collector on the same host or network segment as
+# the log files; it is part of the edge trust zone (spec 5.2).
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage # REPLACE: persistent queue directory (owned by the collector user)
+    timeout: 10s
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/storage
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+receivers:
+  # Application log files (spec 8.1.2 filelog with multiline support). One receiver per source.
+  filelog/orders:
+    include:
+      - /var/log/order-svc/*.log # REPLACE
+    start_at: end
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    multiline:
+      line_start_pattern: '^\d{4}-\d{2}-\d{2}|^ts=|^\{' # a new record starts with a timestamp, ts=, or {
+    resource:
+      carto.source_id: src_orders_log # REPLACE: matches sources.yaml
+    operators: [] # keep records raw; edge-gateway parses (spec 8.2)
+
+  # Syslog (RFC 5424 over TCP; use rfc3164 for older senders).
+  syslog:
+    tcp:
+      listen_address: 0.0.0.0:5140
+    protocol: rfc5424
+    storage: file_storage
+    resource:
+      carto.source_id: src_syslog # REPLACE
+
+  # Splunk HEC push from systems that already speak HEC.
+  splunk_hec:
+    endpoint: 0.0.0.0:8088
+    tls:
+      cert_file: /etc/carto/pki/otel-collector.crt # REPLACE
+      key_file: /etc/carto/pki/otel-collector.key # REPLACE
+    resource:
+      carto.source_id: src_hec # REPLACE
+
+  # OTLP from applications already instrumented with OpenTelemetry (logs only, spec 2.2).
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 1000
+    send_batch_max_size: 2000
+    timeout: 2s
+  # Records that arrive through the OTLP receiver must declare their source themselves; drop
+  # anything without a carto.source_id so edge-gateway never guesses (spec 2.3 invariant 3).
+  filter/require_source:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'resource.attributes["carto.source_id"] == nil'
+
+exporters:
+  otlphttp/edge:
+    endpoint: https://edge-gateway:8443 # REPLACE: edge-gateway internal address; path /v1/logs is appended
+    tls:
+      ca_file: /etc/carto/pki/ca.crt # REPLACE: carto-ctl pki init output
+      cert_file: /etc/carto/pki/otel-collector.crt
+      key_file: /etc/carto/pki/otel-collector.key
+      min_version: "1.2"
+    compression: zstd
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 60s
+      max_elapsed_time: 0 # retry forever; the persistent queue holds data (spec 8.5 backpressure: 429/503 keep data here)
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      num_consumers: 4
+      queue_size: 10000
+
+service:
+  extensions: [file_storage, health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: basic
+      address: 127.0.0.1:8888
+  pipelines:
+    logs:
+      receivers: [filelog/orders, syslog, splunk_hec, otlp]
+      processors: [memory_limiter, filter/require_source, batch]
+      exporters: [otlphttp/edge]
