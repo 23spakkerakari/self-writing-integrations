@@ -31,7 +31,7 @@ from carto_core.ingest.health import InMemorySourceHealthStore
 from carto_core.ingest.ledger import InMemoryBatchLedger, LedgerEntry, LedgerError
 from carto_core.settings import CoreSettings, IngestListenerSettings
 from carto_schema.event import CanonicalEvent
-from carto_schema.ingest import IngestBatch, SourceHeartbeat
+from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
 
 NOW = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
 KIB = 1024
@@ -114,7 +114,7 @@ def _heartbeat(**overrides: Any) -> dict[str, Any]:
         tenant_id="default",
         source_id="src_wms_db",
         sent_at=NOW,
-        status="degraded",
+        status=SourceStatus.DEGRADED,
         last_success_at=NOW,
         lag_seconds=12.5,
         error_count=2,

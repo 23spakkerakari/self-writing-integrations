@@ -10,15 +10,15 @@ from typing import Final
 
 __all__ = ["EXIT_FAILURE", "EXIT_NOT_IMPLEMENTED", "EXIT_OK", "EXIT_USAGE"]
 
-EXIT_OK: Final = 0
+EXIT_OK: Final[int] = 0
 """The command did what it says, or ``--help`` was printed."""
 
-EXIT_FAILURE: Final = 1
+EXIT_FAILURE: Final[int] = 1
 """The command ran and failed (a refusal to overwrite, an unreachable KMS, an I/O error)."""
 
-EXIT_USAGE: Final = 2
+EXIT_USAGE: Final[int] = 2
 """Usage error, missing subcommand, or unknown command (argparse's own convention)."""
 
-EXIT_NOT_IMPLEMENTED: Final = 2
+EXIT_NOT_IMPLEMENTED: Final[int] = 2
 """A command this build does not implement yet. Never 0: a script must not mistake a stub for
 success."""

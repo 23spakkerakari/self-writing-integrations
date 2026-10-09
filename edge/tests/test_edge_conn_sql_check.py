@@ -122,7 +122,7 @@ def test_statement_length_limit() -> None:
 # connection helpers
 # ---------------------------------------------------------------------------------------------
 
-CREDS = Credentials("carto_ro", "p}w;d")  # noqa: S105
+CREDS = Credentials("carto_ro", "p}w;d")
 
 
 def test_postgres_pins_hostaddr_and_keeps_host_for_verify_full() -> None:
@@ -143,7 +143,7 @@ def test_postgres_pins_hostaddr_and_keeps_host_for_verify_full() -> None:
     assert kwargs["sslrootcert"] == "/etc/carto/ca.pem"
     assert "default_transaction_read_only=on" in kwargs["options"]
     assert "statement_timeout=30000" in kwargs["options"]
-    assert kwargs["password"] == "p}w;d"
+    assert kwargs["password"] == "p}w;d"  # noqa: S105
 
 
 def test_mysql_kwargs_and_session() -> None:

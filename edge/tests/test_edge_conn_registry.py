@@ -100,7 +100,7 @@ def test_builds_every_connector_type(type_name: str) -> None:
     source = SourceConfig(
         id=f"src_{type_name}",
         system="sys_orders",
-        type=type_name,
+        type=SourceType(type_name),
         config=config,
         secret_ref=secret_ref,
     )

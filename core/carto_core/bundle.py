@@ -36,7 +36,6 @@ from carto_common.ids import derive_ulid
 from carto_common.logging import get_logger
 from carto_core.ingest.ledger import LedgerEntry
 from carto_schema.bundle import (
-    BUNDLE_VERSION,
     DATA_FILES,
     EVENTS_FILE,
     MANIFEST_FILE,
@@ -162,9 +161,7 @@ def verify_bundle(path: Path) -> VerifiedBundle:
     except ValidationError as exc:
         msg = f"{MANIFEST_FILE} is not a bundle manifest"
         raise BundleError(msg) from exc
-    if manifest.bundle_version != BUNDLE_VERSION:
-        msg = f"bundle version {manifest.bundle_version!r} is not supported"
-        raise BundleError(msg)
+    # bundle_version is pinned to "1" by the model itself (Literal), so no check is needed here.
     unknown = sorted(set(manifest.files) - set(DATA_FILES))
     if unknown:
         msg = f"manifest lists files that are not bundle data files: {', '.join(unknown)}"

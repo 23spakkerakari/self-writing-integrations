@@ -62,7 +62,12 @@ def postgres() -> Iterator[dict[str, Any]]:
             username="admin",
             password="admin-pw",  # noqa: S106 dbname="wms", driver=None
         )
-        container.start()
+        try:
+            container.start()
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The daemon answered ping but cannot start a container (seen after a network
+            # outage on Docker Desktop): the environment is unusable, not the connector.
+            pytest.skip(f"Docker could not start the PostgreSQL container: {type(exc).__name__}")
     try:
         host = container.get_container_host_ip()
         port = int(container.get_exposed_port(5432))

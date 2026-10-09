@@ -64,7 +64,12 @@ def mysql() -> Iterator[dict[str, Any]]:
             dbname="wms",
             root_password=ROOT_PASSWORD,
         )
-        container.start()
+        try:
+            container.start()
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The daemon answered ping but cannot start a container (seen after a network
+            # outage on Docker Desktop): the environment is unusable, not the connector.
+            pytest.skip(f"Docker could not start the MySQL container: {type(exc).__name__}")
     try:
         host = container.get_container_host_ip()
         port = int(container.get_exposed_port(3306))

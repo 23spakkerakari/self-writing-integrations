@@ -3,6 +3,7 @@ writer against a fake client (column-oriented inserts, error wrapping, readiness
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -39,8 +40,8 @@ class FakeClient:
     def insert(
         self,
         table: str,
-        data: list[list[Any]],
-        column_names: list[str],
+        data: Sequence[Sequence[Any]],
+        column_names: Sequence[str],
         *,
         column_oriented: bool = False,
     ) -> None:

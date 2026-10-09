@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,9 @@ class FakeClickHouse:
         msg = f"unexpected query: {query}"
         raise AssertionError(msg)
 
-    def insert(self, table: str, data: list[list[Any]], column_names: list[str], **_: Any) -> None:
+    def insert(
+        self, table: str, data: Sequence[Sequence[Any]], column_names: Sequence[str]
+    ) -> None:
         assert table == MIGRATION_TABLE
         assert list(column_names) == ["name", "applied_at", "checksum"]
         for row in data:

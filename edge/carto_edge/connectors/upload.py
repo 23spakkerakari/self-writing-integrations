@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, ClassVar, Final, Literal
+from typing import IO, Any, ClassVar, Final, Literal, Protocol
 
 from pydantic import Field, field_validator, model_validator
 
@@ -163,7 +163,9 @@ def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
     return mode == stat.S_IFLNK
 
 
-def check_zip(archive: zipfile.ZipFile, *, max_file_bytes: int = MAX_FILE_BYTES) -> list[zipfile.ZipInfo]:
+def check_zip(
+    archive: zipfile.ZipFile, *, max_file_bytes: int = MAX_FILE_BYTES
+) -> list[zipfile.ZipInfo]:
     """Validate an archive against spec 8.1.1 and return its readable entries."""
     infos = archive.infolist()
     if len(infos) > MAX_ZIP_ENTRIES:
@@ -201,11 +203,15 @@ def check_zip(archive: zipfile.ZipFile, *, max_file_bytes: int = MAX_FILE_BYTES)
     return entries
 
 
+class _Reads(Protocol):
+    def read(self, size: int = ..., /) -> bytes: ...
+
+
 class _BoundedReader(io.RawIOBase):
     """Counts bytes read from a stream and stops at a limit (a lying zip header or a gzip
     bomb cannot expand past the per-file limit)."""
 
-    def __init__(self, inner: IO[bytes], limit: int, what: str) -> None:
+    def __init__(self, inner: _Reads, limit: int, what: str) -> None:
         super().__init__()
         self._inner = inner
         self._limit = limit
@@ -215,7 +221,7 @@ class _BoundedReader(io.RawIOBase):
     def readable(self) -> bool:
         return True
 
-    def readinto(self, buffer: Any) -> int:  # noqa: ANN401 - RawIOBase signature
+    def readinto(self, buffer: Any) -> int:
         chunk = self._inner.read(len(buffer))
         self.consumed += len(chunk)
         if self.consumed > self._limit:
@@ -271,13 +277,14 @@ class UploadConnector:
             raw = Path(entry)
             target = raw if raw.is_absolute() else self._base / raw
             if _GLOB_MAGIC.search(str(target)):
-                matches = [Path(match) for match in glob.glob(str(target), recursive=True)]
+                # glob.glob: the pattern is absolute and may hold ** (Path.glob needs relative)
+                matches = [Path(m) for m in glob.glob(str(target), recursive=True)]  # noqa: PTH207
                 if not matches:
                     problems.append(f"pattern {entry!r} matched no file")
                 for match in matches:
                     self._add(found, match)
             elif target.is_symlink():
-                problems.append(f"path {entry!r} is a symlink and symlinks are not followed")
+                problems.append(f"path {entry!r} is a symlink; symlinks are not followed")
             elif target.is_dir():
                 for root, directories, files in os.walk(target, followlinks=False):
                     directories.sort()
@@ -289,7 +296,9 @@ class UploadConnector:
                 problems.append(f"path {entry!r} does not exist")
         inputs = [found[key] for key in sorted(found)]
         if self.config.kind != "files":
-            inputs = [item for item in inputs if item.suffix in ACCEPTED_SUFFIXES | ARCHIVE_SUFFIXES]
+            inputs = [
+                item for item in inputs if item.suffix in ACCEPTED_SUFFIXES | ARCHIVE_SUFFIXES
+            ]
         return inputs, problems
 
     def _add(self, found: dict[str, _Input], path: Path) -> None:
@@ -323,21 +332,37 @@ class UploadConnector:
                 except OSError:
                     problems.append(f"{item.path.name} is not readable")
         if total > self.config.max_upload_bytes:
-            problems.append(f"the upload totals {total} bytes; the limit is {self.config.max_upload_bytes}")
+            problems.append(
+                f"the upload totals {total} bytes; the limit is {self.config.max_upload_bytes}"
+            )
         return problems
 
     # -- interface --------------------------------------------------------------------------------
 
     async def test(self) -> TestResult:
         inputs, problems = self._candidates()
-        checks = [TestCheck("paths", not problems, "; ".join(problems) if problems else f"{len(inputs)} files")]
+        checks = [
+            TestCheck(
+                "paths", not problems, "; ".join(problems) if problems else f"{len(inputs)} files"
+            )
+        ]
         if not inputs:
             problems.append("no readable input files")
         limit_problems = self._check_limits(inputs)
-        checks.append(TestCheck("limits", not limit_problems, "; ".join(limit_problems) if limit_problems else "within spec 8.1.1"))
+        checks.append(
+            TestCheck(
+                "limits",
+                not limit_problems,
+                "; ".join(limit_problems) if limit_problems else "within spec 8.1.1",
+            )
+        )
         problems.extend(limit_problems)
         unreadable = [item.path.name for item in inputs if not os.access(item.path, os.R_OK)]
-        checks.append(TestCheck("readable", not unreadable, "; ".join(unreadable) if unreadable else "all readable"))
+        checks.append(
+            TestCheck(
+                "readable", not unreadable, "; ".join(unreadable) if unreadable else "all readable"
+            )
+        )
         problems.extend(f"{name} is not readable" for name in unreadable)
         checks.append(TestCheck("read_only", True, "local files are opened for reading only"))
         return TestResult(
@@ -373,7 +398,12 @@ class UploadConnector:
                 if sequence % YIELD_EVERY == 0:
                     await asyncio.sleep(0)
             skip_file, skip_line = "", 0
-        logger.info("upload read complete source_id=%s files=%d records=%d", self.source.id, len(inputs), sequence)
+        logger.info(
+            "upload read complete source_id=%s files=%d records=%d",
+            self.source.id,
+            len(inputs),
+            sequence,
+        )
 
     async def backfill(self, start: datetime, end: datetime) -> AsyncIterator[RawRecord]:
         async for record in self.read(None):
@@ -384,10 +414,11 @@ class UploadConnector:
     async def close(self) -> None:
         return None
 
-    # -- record production --------------------------------------------------------------------------
+    # -- record production ----------------------------------------------------------------------
 
     def _unit_keys(self, item: _Input) -> set[str]:
-        """Cursor ``file`` values this input can produce (its path, or ``path!entry`` per zip entry)."""
+        """Cursor ``file`` values this input can produce: its path, or ``path!entry`` per zip
+        entry."""
         if item.suffix == ".zip" and self.config.kind != "files":
             try:
                 with zipfile.ZipFile(item.path) as archive:
@@ -419,7 +450,9 @@ class UploadConnector:
                         after = 0
                     with archive.open(info) as raw:
                         bounded = io.BufferedReader(
-                            _BoundedReader(raw, min(info.file_size, self.config.max_file_bytes), entry_name)
+                            _BoundedReader(
+                                raw, min(info.file_size, self.config.max_file_bytes), entry_name
+                            )
                         )
                         yield from self._content_records(bounded, entry_name, key, after)
             return
@@ -441,7 +474,9 @@ class UploadConnector:
         else:
             yield from self._line_records(stream, name, key, after)
 
-    def _line_records(self, stream: IO[bytes], name: str, key: str, after: int) -> Iterator[RawRecord]:
+    def _line_records(
+        self, stream: IO[bytes], name: str, key: str, after: int
+    ) -> Iterator[RawRecord]:
         now = datetime.now(UTC)
         for number, text, size in _iter_lines(stream, self.config.encoding):
             if number <= after:
@@ -458,11 +493,15 @@ class UploadConnector:
                 size_bytes=size,
             )
 
-    def _row_records(self, stream: IO[bytes], name: str, key: str, after: int) -> Iterator[RawRecord]:
+    def _row_records(
+        self, stream: IO[bytes], name: str, key: str, after: int
+    ) -> Iterator[RawRecord]:
         table = self.config.table or name
         primary_key = self.config.primary_key or "id"
         now = datetime.now(UTC)
-        text_stream = io.TextIOWrapper(stream, encoding=self.config.encoding, errors="replace", newline="")
+        text_stream = io.TextIOWrapper(
+            stream, encoding=self.config.encoding, errors="replace", newline=""
+        )
         try:
             reader = csv.DictReader(text_stream)
             if not reader.fieldnames:
@@ -474,7 +513,11 @@ class UploadConnector:
             for number, row in enumerate(reader, start=1):
                 if number <= after:
                     continue
-                fields = {column: value for column, value in row.items() if column is not None and value is not None}
+                fields = {
+                    column: value
+                    for column, value in row.items()
+                    if column is not None and value is not None
+                }
                 pk = fields.get(primary_key, "")
                 locator = f"{table}:row:{pk}" if pk else f"{table}:row:line:{number}"
                 yield RawRecord(

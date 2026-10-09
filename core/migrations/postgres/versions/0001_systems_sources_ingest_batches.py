@@ -16,6 +16,7 @@ the bundle loader: a ``(tenant_id, batch_id)`` already present is acknowledged, 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,7 +28,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-def _audit_columns() -> list[sa.Column[sa.types.DateTime]]:
+def _audit_columns() -> list[sa.Column[Any]]:
     return [
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()

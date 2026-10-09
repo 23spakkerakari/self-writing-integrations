@@ -152,20 +152,18 @@ class RequestIdMiddleware:
 
 def decompress_capped(data: bytes, limit: int) -> bytes:
     """zstd-decompress ``data``; a result above ``limit`` bytes is a 413, a bad frame a 400."""
-    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data))
     out = bytearray()
     try:
-        while True:
-            chunk = reader.read(_DECOMPRESS_CHUNK)
-            if not chunk:
-                break
-            out += chunk
-            if len(out) > limit:
-                raise Problem(413, "payload too large", "decompressed body exceeds the cap")
+        with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+            while True:
+                chunk = reader.read(_DECOMPRESS_CHUNK)
+                if not chunk:
+                    break
+                out += chunk
+                if len(out) > limit:
+                    raise Problem(413, "payload too large", "decompressed body exceeds the cap")
     except zstandard.ZstdError as exc:
         raise Problem(400, "bad request", "malformed zstd body") from exc
-    finally:
-        reader.close()
     return bytes(out)
 
 

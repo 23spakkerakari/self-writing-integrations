@@ -175,9 +175,9 @@ def test_listener_caps_are_bounded_and_consistent() -> None:
 
 
 def test_log_level_is_case_insensitive_and_bounded() -> None:
-    assert CoreSettings(log_level="Warning").log_level == "warning"
+    assert CoreSettings.model_validate({"log_level": "Warning"}).log_level == "warning"
     with pytest.raises(ValidationError):
-        CoreSettings(log_level="loud")
+        CoreSettings.model_validate({"log_level": "loud"})
 
 
 def test_settings_are_frozen_and_reject_unknown_keys() -> None:

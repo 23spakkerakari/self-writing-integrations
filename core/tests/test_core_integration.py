@@ -6,18 +6,20 @@ upserts, and a bundle loads idempotently. Skipped when Docker is unreachable."""
 from __future__ import annotations
 
 import hashlib
+import os
 import warnings
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-import docker
+import docker  # type: ignore[import-untyped]
 import pytest
 import sqlalchemy
 import zstandard
 from clickhouse_connect.driver.client import Client
 from testcontainers.community.clickhouse import ClickHouseContainer
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.config import testcontainers_config
 
 from carto_common.crypto import SigningKey, b64url_encode
 from carto_common.ids import derive_ulid, new_ulid
@@ -49,15 +51,18 @@ from carto_schema.bundle import (
     FileDigest,
 )
 from carto_schema.event import CanonicalEvent
-from carto_schema.ingest import IngestBatch, SourceHeartbeat
+from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
 
 with warnings.catch_warnings():
     # starlette 1.7 deprecates httpx (vs httpx2) under its TestClient at import time.
     warnings.simplefilter("ignore")
     from fastapi.testclient import TestClient
 
-CLICKHOUSE_IMAGE = "clickhouse/clickhouse-server:24.8"
-POSTGRES_IMAGE = "postgres:16-alpine"
+# Pinned defaults; CARTO_TEST_*_IMAGE lets a developer or CI point at an image already present.
+CLICKHOUSE_IMAGE = os.environ.get(
+    "CARTO_TEST_CLICKHOUSE_IMAGE", "clickhouse/clickhouse-server:24.8"
+)
+POSTGRES_IMAGE = os.environ.get("CARTO_TEST_POSTGRES_IMAGE", "postgres:16-alpine")
 DB_USER = "carto_test"
 DB_PASSWORD = "carto_test"  # noqa: S105 - throwaway container credential
 DB_NAME = "carto_test"
@@ -86,6 +91,14 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::ResourceWarning"),
     pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning"),
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _no_ryuk_on_windows() -> None:
+    # Docker Desktop's named-pipe transport stalls on starting the Ryuk reaper; the ``with``
+    # blocks below stop and remove the containers themselves. Linux CI keeps Ryuk.
+    if os.name == "nt":
+        testcontainers_config.ryuk_disabled = True
 
 
 @pytest.fixture(scope="module")
@@ -309,7 +322,7 @@ def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
         tenant_id="default",
         source_id="src_wms_db",
         sent_at=datetime.now(UTC),
-        status="degraded",
+        status=SourceStatus.DEGRADED,
         last_success_at=datetime.now(UTC),
         lag_seconds=12.5,
         error_count=2,

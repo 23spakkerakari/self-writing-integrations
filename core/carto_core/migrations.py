@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,7 +91,7 @@ class ClickHouseClientLike(Protocol):
     def query(self, query: str, parameters: dict[str, Any] | None = None) -> _QueryResult: ...
 
     def insert(
-        self, table: str, data: list[list[Any]], column_names: list[str], **kwargs: Any
+        self, table: str, data: Sequence[Sequence[Any]], column_names: Sequence[str]
     ) -> Any: ...
 
 

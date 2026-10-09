@@ -436,11 +436,8 @@ async def test_local_directory_variant(outbound: Path) -> None:
         "file:SHIP_20261006_2112.csv",
         "file:SHIP_20261007_2115.csv",
     ]
-    assert (
-        records[0].fields is not None
-        and records[0].fields["directory"] == str(outbound).replace("\\", "/")
-        or records[0].fields["directory"]
-    )
+    assert records[0].fields is not None
+    assert Path(records[0].fields["directory"]) == outbound
     result = await connector.test()
     assert result.ok and result.read_only is ReadOnlyStatus.NOT_VERIFIABLE
     cursor = dict(records[-1].commit_cursor or {})

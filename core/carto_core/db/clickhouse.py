@@ -37,6 +37,7 @@ __all__ = [
     "EventRow",
     "EventWriter",
     "IdentifierRow",
+    "InsertClient",
     "WriteResult",
     "WriterError",
     "columns_of",
@@ -120,6 +121,21 @@ class EventWriter(Protocol):
     def ping(self) -> bool: ...
 
 
+class InsertClient(Protocol):
+    """The two clickhouse-connect calls the writer uses (a fake stands in for tests)."""
+
+    def insert(
+        self,
+        table: str,
+        data: Sequence[Sequence[Any]],
+        column_names: Sequence[str],
+        *,
+        column_oriented: bool = False,
+    ) -> Any: ...
+
+    def ping(self) -> bool: ...
+
+
 def field_ref(system_id: str, template_id: str, field: str) -> str:
     """``system_id/template_id/field`` (spec 7.2 comment on ``field_ref``, ADR 0016)."""
     return f"{system_id}/{template_id}/{field}"
@@ -176,7 +192,7 @@ class ClickHouseWriter:
 
     __slots__ = ("_client",)
 
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: InsertClient) -> None:
         self._client = client
 
     def write_events(self, events: Sequence[CanonicalEvent]) -> WriteResult:

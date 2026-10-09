@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from carto_edge.config import SourceConfig, SourceType
+from carto_edge.connectors import upload as upload_module
 from carto_edge.connectors.base import (
     ConnectorContext,
     ConnectorError,
@@ -22,7 +23,6 @@ from carto_edge.connectors.base import (
     ReadOnlyStatus,
     ResolvedHost,
 )
-from carto_edge.connectors import upload as upload_module
 from carto_edge.connectors.upload import (
     MAX_ZIP_ENTRIES,
     UploadConnector,
