@@ -26,6 +26,7 @@ from carto_common.crypto import (
     Keyring,
     LocalKms,
     SigningKey,
+    TokenDomain,
     TokenKey,
     VaultTransitKms,
     VerifyKey,
@@ -43,6 +44,7 @@ from carto_common.crypto import (
 TOKEN_PATTERN = re.compile(r"^t[1-9][0-9]{0,3}\.[A-Za-z0-9_-]{22}$")
 KEY_A = bytes(range(32))
 KEY_B = bytes(range(1, 33))
+DOMAINS: tuple[TokenDomain, ...] = ("id", "date", "amt", "ph")
 
 
 # -- tokens ---------------------------------------------------------------------------------------
@@ -62,7 +64,7 @@ def test_token_key_version_prefix_and_range() -> None:
     with pytest.raises(CryptoError):
         token(KEY_A, 10000, "id", "x")
     with pytest.raises(CryptoError):
-        token(KEY_A, True, "id", "x")  # type: ignore[arg-type]
+        token(KEY_A, True, "id", "x")
 
 
 def test_token_rejects_wrong_key_length() -> None:
@@ -71,17 +73,17 @@ def test_token_rejects_wrong_key_length() -> None:
 
 
 @settings(max_examples=200)
-@given(st.text(min_size=1, max_size=64), st.sampled_from(["id", "date", "amt", "ph"]))
+@given(st.text(min_size=1, max_size=64), st.sampled_from(DOMAINS))
 def test_tokens_are_deterministic_and_differ_across_versions_and_domains(
-    value: str, domain: str
+    value: str, domain: TokenDomain
 ) -> None:
-    first = token(KEY_A, 1, domain, value)  # type: ignore[arg-type]
-    assert first == token(KEY_A, 1, domain, value)  # type: ignore[arg-type]
+    first = token(KEY_A, 1, domain, value)
+    assert first == token(KEY_A, 1, domain, value)
     assert TOKEN_PATTERN.fullmatch(first)
-    assert first != token(KEY_A, 2, domain, value)  # type: ignore[arg-type]
+    assert first != token(KEY_A, 2, domain, value)
     assert first.partition(".")[2] != token(KEY_B, 1, domain, value).partition(".")[2]
-    other_domain = "amt" if domain != "amt" else "id"
-    assert first != token(KEY_A, 1, other_domain, value)  # type: ignore[arg-type]
+    other_domain: TokenDomain = "amt" if domain != "amt" else "id"
+    assert first != token(KEY_A, 1, other_domain, value)
 
 
 def test_same_form_value_from_different_forms_share_the_id_domain() -> None:
@@ -196,7 +198,8 @@ def test_wrapped_key_file_round_trip(tmp_path: Path) -> None:
 
 
 def _fake_vault(
-    material_store: dict[str, bytes], token_value: str = "s.token"  # noqa: S107
+    material_store: dict[str, bytes],
+    token_value: str = "s.token",  # noqa: S107
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-Vault-Token"] == token_value
