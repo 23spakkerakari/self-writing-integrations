@@ -14,7 +14,7 @@ SEED ?= 1
 SIM_OUT ?= sim-out
 EVAL_OUT ?= eval/reports
 
-.PHONY: help setup lint fmt type test cov check schema schema-check sim eval sec sbom dev release clean
+.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench analyze sec sbom images dev dev-down release clean
 
 help: ## Show targets
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -33,8 +33,14 @@ fmt: ## Apply ruff formatting and safe fixes
 type: ## mypy --strict over every member
 > $(UV) run mypy
 
-test: ## Unit and property tests
+test: ## Unit, property and (when Docker is reachable) integration tests
 > $(UV) run pytest
+
+test-unit: ## Everything except the Docker-backed integration tests
+> $(UV) run pytest -m "not integration"
+
+test-integration: ## Only the Docker-backed integration tests (testcontainers)
+> $(UV) run pytest -m integration
 
 cov: ## Tests with coverage (terminal and XML)
 > $(UV) run pytest --cov --cov-report=term-missing --cov-report=xml
@@ -53,6 +59,15 @@ sim: ## Generate simulator data: make sim SCENARIO=shop DAYS=14 SEED=1
 eval: ## Score engine output (or the empty prediction) against ground truth: make eval SCENARIO=shop
 > $(UV) run carto-eval run --scenario $(SCENARIO) --days $(DAYS) --seed $(SEED) --sim-out $(SIM_OUT)/$(SCENARIO) --out $(EVAL_OUT)
 
+analyze: ## Offline analyzer over the simulator output: make analyze SCENARIO=shop (writes $(SIM_OUT)/$(SCENARIO).carto)
+> $(UV) run carto-edge analyze --config simulator/analyze.$(SCENARIO).yaml --input $(SIM_OUT)/$(SCENARIO) --out $(SIM_OUT)/$(SCENARIO).carto --state-dir $(SIM_OUT)/$(SCENARIO).edge-state --locator-map
+
+leak: ## Spec 18.3 leak test over scenario $(SCENARIO): bundle, forwarded batches, logs, ClickHouse rows
+> $(UV) run pytest edge/tests/test_edge_leak.py -q -m "not integration" --scenario $(SCENARIO)
+
+bench: ## Edge pipeline throughput benchmark (spec 17, M1 acceptance: 2,000 events/s sustained)
+> $(UV) run carto-edge bench --input $(SIM_OUT)/$(SCENARIO) --config simulator/analyze.$(SCENARIO).yaml --seconds 30
+
 sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 > $(UV) run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
 > $(UV) export --all-packages --no-emit-workspace --no-hashes --format requirements-txt -o requirements-export.txt
@@ -65,11 +80,22 @@ sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 sbom: ## CycloneDX SBOM of the workspace (syft)
 > @command -v syft >/dev/null 2>&1 && syft scan dir:. --exclude ./legacy -o cyclonedx-json=sbom.cdx.json || echo "syft: not installed locally, runs in CI"
 
-dev: ## Compose stack + simulator live mode (arrives in M1)
-> @echo "make dev: the Compose stack and simulator live mode arrive in M1 (see docs/plans/M1.md when it exists)."
+images: ## Build the service images (edge, core, ctl, simulator) from deploy/docker/base.Dockerfile
+> docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=edge --build-arg ENTRY=carto-edge -t carto-edge:dev .
+> docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=core --build-arg ENTRY=carto-core -t carto-core:dev .
+> docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=ctl --build-arg ENTRY=carto-ctl -t carto-ctl:dev .
+> docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=simulator --build-arg ENTRY=carto-sim -t carto-simulator:dev .
 
-release: ## Build, sign and publish images (arrives with the first service image in M1)
-> @echo "make release: image build, SBOM and cosign signing of images wire up in M1; release.yml already signs the SBOM on main."
+dev: images ## Compose stack + simulator live mode (spec Section 20)
+> @test -s deploy/compose/secrets/pg_password || openssl rand -hex 24 > deploy/compose/secrets/pg_password
+> @test -s deploy/compose/secrets/ch_password || openssl rand -hex 24 > deploy/compose/secrets/ch_password
+> docker compose -f deploy/compose/compose.yaml --profile dev up --remove-orphans
+
+dev-down: ## Stop the Compose stack and remove its volumes
+> docker compose -f deploy/compose/compose.yaml --profile dev down -v --remove-orphans
+
+release: ## Build, sign and publish images (cosign signing of images and provenance wire up in M6; release.yml signs the SBOM on main)
+> @echo "make release: build images with 'make images'; registry push, cosign image signatures and SLSA provenance arrive in M6 (docs/plans/M1.md, Deferred)."
 
 clean: ## Remove generated data and caches
-> rm -rf $(SIM_OUT) $(EVAL_OUT) .pytest_cache .mypy_cache .ruff_cache .hypothesis coverage.xml .coverage requirements-export.txt sbom.cdx.json
+> rm -rf $(SIM_OUT) $(EVAL_OUT) *.carto .pytest_cache .mypy_cache .ruff_cache .hypothesis coverage.xml .coverage requirements-export.txt sbom.cdx.json

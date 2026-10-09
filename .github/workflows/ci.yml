@@ -38,8 +38,8 @@ jobs:
         run: uv run ruff format --check .
       - name: Types (mypy --strict)
         run: uv run mypy
-      - name: Tests
-        run: uv run pytest --cov --cov-report=xml --cov-report=term
+      - name: Tests (unit and property; integration tests run in their own job)
+        run: uv run pytest -m "not integration" --cov --cov-report=xml --cov-report=term
       - name: JSON Schema drift check
         run: uv run carto-schema check --dir packages/carto-schema/schemas
       - name: Simulator scenario A (14 days)
@@ -63,6 +63,86 @@ jobs:
           name: coverage
           path: coverage.xml
           if-no-files-found: error
+
+  integration:
+    name: integration (testcontainers, leak test, analyzer, bundle round trip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install workspace
+        run: uv sync --locked --all-packages
+      - name: Simulator scenario A (14 days)
+        run: make sim SCENARIO=shop DAYS=14 SEED=1
+      - name: Docker-backed integration tests (PostgreSQL, MySQL, ClickHouse)
+        run: uv run pytest -m integration -q
+      - name: Offline analyzer over scenario A
+        run: make analyze SCENARIO=shop
+      - name: Leak test (spec 18.3)
+        run: make leak SCENARIO=shop
+      - name: Throughput benchmark (spec 17, informative on shared runners)
+        run: make bench SCENARIO=shop | tee bench.txt
+      - name: Benchmark summary
+        run: |
+          echo "## Edge benchmark" >> "$GITHUB_STEP_SUMMARY"
+          cat bench.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-manifest
+          path: |
+            sim-out/shop.carto/manifest.json
+            sim-out/shop.carto/MANIFEST.md
+          if-no-files-found: error
+
+  images:
+    name: service images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build carto-edge
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/base.Dockerfile
+          build-args: |
+            MEMBER=edge
+            ENTRY=carto-edge
+          push: false
+          load: true
+          tags: carto-edge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build carto-core
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/base.Dockerfile
+          build-args: |
+            MEMBER=core
+            ENTRY=carto-core
+          push: false
+          load: true
+          tags: carto-core:ci
+          cache-from: type=gha
+      - name: Smoke test the images (run as non-root, print version)
+        run: |
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges carto-edge:ci --help | head -5
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges carto-core:ci --help | head -5
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: carto-edge:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
   bandit:
     name: bandit
