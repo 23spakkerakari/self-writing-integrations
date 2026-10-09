@@ -16,8 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.etree.ElementTree import Element, ParseError  # nosec B405 - parsing is defused below
 
-from defusedxml import DefusedXmlException  # type: ignore[import-untyped]
-from defusedxml.ElementTree import fromstring  # type: ignore[import-untyped]
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring
 
 from carto_edge.pipeline.parse.common import (
     MAX_ARRAY_ITEMS,

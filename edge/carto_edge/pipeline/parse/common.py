@@ -120,6 +120,20 @@ def flatten(
     fields: dict[str, str] = {}
     notes: set[str] = set()
     top_keys = tuple(str(key) for key in value)
+    if len(value) <= max_fields and not any(
+        isinstance(child, Mapping | list | tuple) for child in value.values()
+    ):
+        # Fast path: a flat record of scalars (the common NDJSON and row shape).
+        for key, child in value.items():
+            text = stringify(child)
+            path = str(key)
+            if text is None or not path:
+                continue
+            if len(path) > MAX_KEY_LEN:
+                notes.add(NOTE_KEY_LIMIT)
+                continue
+            fields[path] = text
+        return Flattened(fields=fields, top_keys=top_keys, notes=tuple(sorted(notes)))
     stack: list[tuple[str, int, Any]] = [("", 0, value)]
     while stack:
         prefix, depth, current = stack.pop()

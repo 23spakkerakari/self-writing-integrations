@@ -21,6 +21,7 @@ from carto_edge.pipeline.classify import Classifier
 from carto_edge.pipeline.model import FieldClass, Policy, field_ref
 from carto_edge.pipeline.pii import RegexDetector
 from carto_edge.pipeline.stats import FieldStatsStore
+from carto_schema.forms import shape
 
 SYS = "sys_prop"
 TPL = "tpl_0000000000ff"
@@ -224,7 +225,8 @@ def test_policy_invariants(data: st.DataObject) -> None:
             FieldClass.FREE_TEXT,
         }
     # No value in the reason, the summary of a non-kept field, or any log line.
-    leaks = [value for value in values if len(value) >= 3]
+    # A value that is its own shape ("9999") legitimately appears as a shape (spec 8.3).
+    leaks = [value for value in values if len(value) >= 3 and shape(value) != value]
     assert not any(value in decision.reason for value in leaks)
     assert summary["sample_values"] == [] or decision.policy is Policy.KEEP
     if decision.policy is not Policy.KEEP:

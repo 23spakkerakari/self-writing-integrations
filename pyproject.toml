@@ -145,6 +145,7 @@ module = [
   "spacy.*",
   "opentelemetry.*",
   "google.protobuf.*",
+  "defusedxml.*",
 ]
 ignore_missing_imports = true
 
