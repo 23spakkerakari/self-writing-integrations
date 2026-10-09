@@ -1,0 +1,10 @@
+<!-- ClickHouse profile for the pilot stack (spec 14.4 per-service users; the INSERT-only
+     carto_ingest user is created by `carto-core migrate` in M6 with the other service users). -->
+<clickhouse>
+  <profiles>
+    <default>
+      <max_memory_usage>4000000000</max_memory_usage>
+      <max_execution_time>60</max_execution_time>
+    </default>
+  </profiles>
+</clickhouse>
