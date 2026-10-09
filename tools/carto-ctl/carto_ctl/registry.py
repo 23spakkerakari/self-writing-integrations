@@ -19,18 +19,28 @@ from types import MappingProxyType
 from typing import TextIO
 
 from carto_ctl import __version__
+from carto_ctl.exit_codes import EXIT_FAILURE, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_USAGE
+from carto_ctl.keyinit import configure_key_init, key_init
+from carto_ctl.pki import configure_pki_init, pki_init
+
+__all__ = [
+    "COMMANDS",
+    "EXIT_FAILURE",
+    "EXIT_NOT_IMPLEMENTED",
+    "EXIT_OK",
+    "EXIT_USAGE",
+    "GROUPS",
+    "PROG",
+    "RESERVED_DESTS",
+    "Command",
+    "Configure",
+    "Handler",
+    "Invocation",
+    "stub",
+    "version",
+]
 
 PROG = "carto-ctl"
-
-EXIT_OK = 0
-"""The command did what it says, or ``--help`` was printed."""
-
-EXIT_USAGE = 2
-"""Usage error, missing subcommand, or unknown command (argparse's own convention)."""
-
-EXIT_NOT_IMPLEMENTED = 2
-"""A command this build does not implement yet. Never 0: a script must not mistake a stub for
-success."""
 
 type Handler = Callable[[Invocation], int]
 """Runs one command and returns the process exit code."""
@@ -122,14 +132,16 @@ COMMANDS: tuple[Command, ...] = (
         help="Create the private CA for internal mutual TLS",
         milestone="M1",
         section="14.4",
-        handler=stub,
+        handler=pki_init,
+        configure=configure_pki_init,
     ),
     Command(
         path=("key", "init"),
         help="Generate the tenant tokenization key, wrapped by the customer KMS",
         milestone="M1",
         section="8.4",
-        handler=stub,
+        handler=key_init,
+        configure=configure_key_init,
     ),
     Command(
         path=("audit", "verify"),

@@ -146,28 +146,30 @@ class Endpoint(_Strict):
     )
     direction: Direction = Field(
         default="called",
-        description="'called': the platform is the client of this endpoint. " \
-        "'served': the platform is the server of this endpoint." \
-        "this proxy endpoint is inlined into the platform to observe APIs traffic and dataflows"
-
+        description="'called': the platform is the client of this endpoint. "
+        "'served': the instrumented codebase is the server of this endpoint and the platform observes "
+        "its traffic and data flows through the tap.",
     )
     responses: dict[str, dict[str, Any]] = Field(
-        default_factory = dict, 
-        description="JSON Schema per status code for bodies other than the success body" \
-        "For ex: {'404': {...}  }"
+        default_factory=dict,
+        description="JSON Schema per status code for bodies other than the success body. "
+        "For example: {'404': {...}}",
     )
     response_headers: list[ResponseHeader] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod
-    def _status_keys(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-          for code in v:
-              if not _STATUS.match(code):
-                  raise ValueError(f"responses key '{code}' is not a three-digit HTTP status code")
-          return v
     def _slug(cls, v: str) -> str:
         if not _SLUG.match(v):
             raise ValueError("endpoint id must be a lowercase slug")
+        return v
+
+    @field_validator("responses")
+    @classmethod
+    def _status_keys(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        for code in v:
+            if not _STATUS.match(code):
+                raise ValueError(f"responses key '{code}' is not a three-digit HTTP status code")
         return v
 
     @model_validator(mode="after")
@@ -319,12 +321,14 @@ def iter_refs(schema: Any) -> Iterator[str]:
         for val in schema:
             yield from iter_refs(val)
 
-def inline_types(schema: Any, types: dicts[str, dict[str, Any]], _stack: tuple[str, ...] = ()) -> Any:
-    ''' Now, we replace #/$defs/Name references with the type's named schema
-        Basically, any keywords written next to a $ref will be replaced with the actual type definition.
-        This function will recursively inline the types into the schema.
-        Func returns a modified schema with all $ref references inlined, allowing us to work with a self-contained schema without external references.
-        We're still 
+def inline_types(schema: Any, types: dict[str, dict[str, Any]], _stack: tuple[str, ...] = ()) -> Any:
+    ''' Now, we replace #/$defs/Name references with the type's named schema.
+        Any keywords written next to a $ref (a description, for example) are kept, and they win over the type's own.
+        This function recursively inlines the types into the schema.
+        It returns a new schema with the $ref references inlined, so we can work with a self-contained schema.
+        We're still left with a $ref when a type refers to itself (directly or through another type): once a type
+        is already being expanded (it is on _stack) its reference is left alone, and resolve() attaches $defs so
+        validators can still follow it.
     '''
     if isinstance(schema, dict):
         ref = schema.get("$ref")
@@ -367,18 +371,19 @@ class IntegrationManifest(_Strict):
 
     @field_validator("name")
     @classmethod
+    def _slug(cls, v: str) -> str:
+        if not _SLUG.match(v):
+            raise ValueError("name must be a lowercase slug")
+        return v
 
-    def _type_names(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]: # a quick typechecking function
+    @field_validator("types")
+    @classmethod
+    def _type_names(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:  # a quick typechecking function
         for name, schema in v.items():
             if not _TYPE_NAME.match(name):
                 raise ValueError(f"type name '{name}' must be an identifier")
             if not isinstance(schema, dict):
-                raise ValueError(f"type '{name}' must be a JSON schema typa object")
-        return v
-    
-    def _slug(cls, v: str) -> str:
-        if not _SLUG.match(v):
-            raise ValueError("name must be a lowercase slug")
+                raise ValueError(f"type '{name}' must be a JSON Schema object")
         return v
 
     @model_validator(mode="after")
@@ -412,25 +417,25 @@ class IntegrationManifest(_Strict):
             if var not in declared:
                 raise ValueError(f"base_url variable '{var}' must be listed in config_vars")
         for owner, schema in self._schemas():
-              for ref in iter_refs(schema):
-                  match = _LOCAL_REF.match(ref)
-                  if match is None:
-                      raise ValueError(f"{owner}: only local type references'#/$defs/<Name>' are allowed, got '{ref}'")
-                  if match.group(1) not in self.types:
-                      raise ValueError(f"{owner}: reference to unknown type'{match.group(1)}'; known: {sorted(self.types)}")
+            for ref in iter_refs(schema):
+                match = _LOCAL_REF.match(ref)
+                if match is None:
+                    raise ValueError(f"{owner}: only local type references '#/$defs/<Name>' are allowed, got '{ref}'")
+                if match.group(1) not in self.types:
+                    raise ValueError(f"{owner}: reference to unknown type '{match.group(1)}'; known: {sorted(self.types)}")
         return self
 
     def _schemas(self) -> Iterator[tuple[str, dict[str, Any]]]:
-          """Every JSON Schema in the manifest, with a label for error messages."""
-          for name, schema in self.types.items():
-              yield f"type '{name}'", schema
-          for e in self.endpoints:
-              if e.response_schema is not None:
-                  yield f"endpoint '{e.id}' response_schema", e.response_schema
-              if e.request_schema is not None:
-                  yield f"endpoint '{e.id}' request_schema", e.request_schema
-              for code, schema in e.responses.items():
-                  yield f"endpoint '{e.id}' responses[{code}]", schema
+        """Every JSON Schema in the manifest, with a label for error messages."""
+        for name, schema in self.types.items():
+            yield f"type '{name}'", schema
+        for e in self.endpoints:
+            if e.response_schema is not None:
+                yield f"endpoint '{e.id}' response_schema", e.response_schema
+            if e.request_schema is not None:
+                yield f"endpoint '{e.id}' request_schema", e.request_schema
+            for code, schema in e.responses.items():
+                yield f"endpoint '{e.id}' responses[{code}]", schema
 
     def resolve(self, schema: dict[str, Any] | None) -> dict[str, Any] | None:
         """A schema with every type reference inlined, ready for a validator or the mock.

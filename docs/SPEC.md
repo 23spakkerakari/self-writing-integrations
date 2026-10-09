@@ -1,4 +1,4 @@
-# [PRODUCT NAME] v1 Build Spec
+# Carto v1 Build Spec
 
 **Codename:** `carto` (short for cartographer; use it for repo, package and service names until the product is named)
 **Status:** v1 build spec, source of truth for implementation

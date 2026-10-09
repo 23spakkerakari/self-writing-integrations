@@ -177,3 +177,31 @@ def test_rate_limiter_sleeps_when_burst_exhausted(manifest_dict):
         gateway.call("list_employees")
         gateway.call("list_employees")
     assert slept and slept[0] > 0
+
+
+# --- milestone 6, step 1: the gateway and the mock both resolve type references -----------------
+
+
+def test_type_references_are_resolved_for_validation_and_mock(manifest_dict):
+    data = copy.deepcopy(manifest_dict)
+    data["types"] = {"Employee": data["endpoints"][1]["response_schema"]}
+    data["endpoints"][1]["response_schema"] = {"$ref": "#/$defs/Employee"}
+    manifest = load_manifest(data)
+
+    gateway, _ = make_gateway(manifest)
+    with gateway:
+        result = gateway.call("get_employee", {"id": "42"})
+    assert result.ok, result.drift_events
+    assert result.canonical[0]["source_id"]
+
+    def drop_id(endpoint_id, request, body):
+        if endpoint_id == "get_employee":
+            body.pop("id", None)
+        return body
+
+    gateway, _ = make_gateway(manifest, hook=drop_id)
+    with gateway:
+        result = gateway.call("get_employee", {"id": "42"})
+    assert not result.ok
+    assert "schema_violation" in {e.kind for e in result.drift_events}
+    assert any("'id' is a required property" in e.detail for e in result.drift_events)

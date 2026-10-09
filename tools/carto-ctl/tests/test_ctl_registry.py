@@ -63,7 +63,8 @@ def test_milestones_sections_and_help_are_well_formed() -> None:
         assert not command.help.endswith(".")
         assert command.summary == f"{command.help} (spec {command.section}, {command.milestone})"
         assert command.name == " ".join(command.path)
-        assert command.configure is None
+        if not command.implemented:
+            assert command.configure is None, "a stub takes no options"
 
 
 def test_implemented_means_not_the_stub() -> None:

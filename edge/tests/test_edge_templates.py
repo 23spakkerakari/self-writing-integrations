@@ -1,0 +1,271 @@
+"""Drain3 template store: mining, parameters, ids, persistence, registry (spec 8.2 item 6,
+ADR 0016)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from carto_edge.pipeline.templates import (
+    MASK,
+    TemplateStore,
+    compute_template_id,
+    generalize_name,
+)
+from carto_schema.event import MAX_TEMPLATE_TEXT_LEN, TEMPLATE_ID_PATTERN, EventKind
+
+SIM_DIR = Path(__file__).resolve().parents[2] / "sim-out" / "shop"
+needs_sim = pytest.mark.skipif(
+    not SIM_DIR.is_dir(), reason="sim-out/shop missing: run make sim SCENARIO=shop"
+)
+EXPORT_LINES = [
+    "PO export finished: 412 POs written to SHIP_20260923_2112.csv",
+    "PO export finished: 7 POs written to SHIP_20260924_2115.csv",
+    "SFTP upload complete: SHIP_20260923_2112.csv (23891 bytes)",
+    "SFTP upload failed: Permission denied (/outbound/shipping/SHIP_20261001_2113.csv)",
+    "export scheduler idle, next run 21:10",
+]
+T0 = datetime(2026, 9, 23, 21, 12, 41, tzinfo=UTC)
+
+
+def test_templates_export_log_templates_and_params_from_the_first_sighting() -> None:
+    store = TemplateStore()
+    text, params = store.mine("sys_warehouse", EXPORT_LINES[0])
+    assert text == "PO export finished: <*> POs written to <*>"
+    assert params == ["412", "SHIP_20260923_2112.csv"]
+    text, params = store.mine("sys_warehouse", EXPORT_LINES[1])
+    assert text == "PO export finished: <*> POs written to <*>"
+    assert params == ["7", "SHIP_20260924_2115.csv"]
+    text, params = store.mine("sys_warehouse", EXPORT_LINES[3])
+    assert text == "SFTP upload failed: Permission denied <*>"
+    assert params == ["(/outbound/shipping/SHIP_20261001_2113.csv)"]
+    text, params = store.mine("sys_warehouse", EXPORT_LINES[4])
+    assert text == "export scheduler idle, next run <*>"
+    assert params == ["21:10"]
+
+
+def test_templates_constant_messages_have_no_params() -> None:
+    store = TemplateStore()
+    assert store.mine("sys_webstore", "cart created") == ("cart created", [])
+    assert store.mine("sys_webstore", "checkout completed") == ("checkout completed", [])
+    assert store.mine("sys_orders", "order created from cart") == ("order created from cart", [])
+
+
+def test_templates_variable_words_become_params_after_a_second_sighting() -> None:
+    store = TemplateStore()
+    first, _ = store.mine("sys_x", "user alice logged in")
+    assert first == "user alice logged in"
+    second, params = store.mine("sys_x", "user bob logged in")
+    assert second == f"user {MASK} logged in"
+    assert params == ["bob"]
+    again, params = store.mine("sys_x", "user alice logged in")
+    assert again == second
+    assert params == ["alice"]
+
+
+def test_templates_emails_and_digit_tokens_are_masked_up_front() -> None:
+    store = TemplateStore()
+    text, params = store.mine("sys_x", "mail sent to jane.smith@example.com id 77")
+    assert text == f"mail sent to {MASK} id {MASK}"
+    assert params == ["jane.smith@example.com", "77"]
+
+
+def test_templates_are_per_system() -> None:
+    store = TemplateStore()
+    store.mine("sys_a", "user alice logged in")
+    store.mine("sys_a", "user bob logged in")
+    text, _ = store.mine("sys_b", "user carol logged in")
+    assert text == "user carol logged in"
+
+
+def test_templates_whitespace_is_normalised_and_long_messages_are_bounded() -> None:
+    store = TemplateStore()
+    assert store.mine("sys_x", "  a   b\t c ")[0] == "a b c"
+    text, params = store.mine("sys_x", " ".join(str(i) for i in range(5000)))
+    assert len(text) <= MAX_TEMPLATE_TEXT_LEN
+    assert len(params) <= 512
+    assert store.mine("sys_x", "")[0] == ""
+
+
+def test_templates_id_is_sha256_of_system_and_text() -> None:
+    expected = "tpl_" + hashlib.sha256(b"sys_warehouse\0cart created").hexdigest()[:12]
+    assert compute_template_id("sys_warehouse", "cart created") == expected
+    assert TemplateStore().template_id("sys_warehouse", "cart created") == expected
+    assert TEMPLATE_ID_PATTERN.match(expected)
+    assert compute_template_id("sys_a", "x") != compute_template_id("sys_b", "x")
+
+
+def test_templates_registry_counts_and_seen_range() -> None:
+    store = TemplateStore()
+    tid = store.template_id("sys_x", "cart created")
+    store.register("sys_x", tid, "cart created", EventKind.LOG, T0)
+    later = T0.replace(hour=22)
+    store.register("sys_x", tid, "cart created", EventKind.LOG, later)
+    earlier = T0.replace(hour=20)
+    store.register("sys_x", tid, "cart created", EventKind.LOG, earlier)
+    other = store.template_id("sys_y", "row_change purchase_orders")
+    store.register("sys_y", other, "row_change purchase_orders", EventKind.ROW_CHANGE, T0)
+    records = store.registry()
+    assert [(r.system_id, r.template_id) for r in records] == sorted(
+        (r.system_id, r.template_id) for r in records
+    )
+    by_id = {r.template_id: r for r in records}
+    assert by_id[tid].count == 3
+    assert by_id[tid].first_seen == earlier
+    assert by_id[tid].last_seen == later
+    assert by_id[tid].kind == EventKind.LOG
+    assert by_id[tid].system_id == "sys_x"
+    assert by_id[tid].template_text == "cart created"
+    assert by_id[other].kind == EventKind.ROW_CHANGE
+    assert by_id[other].count == 1
+
+
+def test_templates_persist_and_reload_with_the_same_ids(tmp_path: Path) -> None:
+    with TemplateStore(tmp_path) as store:
+        ids_before = {}
+        for line in EXPORT_LINES:
+            text, _ = store.mine("sys_warehouse", line)
+            ids_before[line] = store.template_id("sys_warehouse", text)
+        store.mine("sys_x", "user alice logged in")
+        store.mine("sys_x", "user bob logged in")
+        tid = store.template_id("sys_x", f"user {MASK} logged in")
+        store.register("sys_x", tid, f"user {MASK} logged in", EventKind.LOG, T0)
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["sys_warehouse.json", "sys_x.json"]
+    assert not list(tmp_path.glob("*.tmp"))
+    reloaded = TemplateStore(tmp_path)
+    for line in EXPORT_LINES:
+        text, _ = reloaded.mine("sys_warehouse", line)
+        assert reloaded.template_id("sys_warehouse", text) == ids_before[line]
+    text, params = reloaded.mine("sys_x", "user dave logged in")
+    assert text == f"user {MASK} logged in"
+    assert params == ["dave"]
+    assert reloaded.registry()[0].count == 1
+    reloaded.close()
+
+
+def test_templates_persistence_file_is_plain_json_without_pickle(tmp_path: Path) -> None:
+    with TemplateStore(tmp_path) as store:
+        store.mine("sys_x", "cart created 1")
+    raw = (tmp_path / "sys_x.json").read_bytes()
+    state = json.loads(raw)
+    assert state["version"] == 1
+    assert "py/object" not in raw.decode("utf-8")
+    assert state["clusters"][0]["tokens"] == ["cart", "created", MASK]
+
+
+def test_templates_corrupt_state_file_is_ignored_not_fatal(tmp_path: Path) -> None:
+    (tmp_path / "sys_x.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "sys_y.json").write_text(json.dumps({"version": 99}), encoding="utf-8")
+    (tmp_path / "sys_z.json").write_text(
+        json.dumps({"version": 1, "clusters": "nope", "tree": [], "counter": -1, "registry": 3}),
+        encoding="utf-8",
+    )
+    store = TemplateStore(tmp_path)
+    assert store.mine("sys_x", "a 1")[0] == f"a {MASK}"
+    assert store.mine("sys_y", "a 1")[0] == f"a {MASK}"
+    assert store.mine("sys_z", "a 1")[0] == f"a {MASK}"
+    store.flush()
+    assert json.loads((tmp_path / "sys_x.json").read_text(encoding="utf-8"))["version"] == 1
+
+
+def test_templates_oversized_state_file_is_ignored(tmp_path: Path) -> None:
+    big = tmp_path / "sys_x.json"
+    with big.open("wb") as handle:
+        handle.seek(70 * 1024 * 1024)
+        handle.write(b"\0")
+    store = TemplateStore(tmp_path)
+    assert store.mine("sys_x", "a")[0] == "a"
+
+
+def test_templates_flush_is_periodic_and_only_when_dirty(tmp_path: Path) -> None:
+    store = TemplateStore(tmp_path, flush_interval_seconds=0.0)
+    store.mine("sys_x", "a")
+    first = (tmp_path / "sys_x.json").stat().st_mtime_ns
+    store.flush()
+    assert (tmp_path / "sys_x.json").stat().st_mtime_ns == first
+    store.close()
+
+
+def test_templates_system_id_is_validated_before_it_names_a_file(tmp_path: Path) -> None:
+    store = TemplateStore(tmp_path)
+    with pytest.raises(ValueError, match="system_id"):
+        store.mine("../escape", "a")
+    with pytest.raises(ValueError, match="system_id"):
+        store.mine("Sys", "a")
+
+
+def test_templates_memory_is_bounded_by_max_clusters() -> None:
+    letters = "abcdefghijklmnopqrstuvwxyz"
+
+    def word(n: int) -> str:
+        return f"{letters[n % 26]}{letters[(n // 26) % 26]}x"
+
+    store = TemplateStore(max_clusters=50)
+    for i in range(500):
+        store.mine("sys_x", f"{word(i)} {word(i + 7)}q {word(i + 3)}z {word(i + 11)}w")
+    assert store.cluster_count("sys_x") <= 50
+
+
+def test_generalize_name_digit_runs_become_stars() -> None:
+    assert generalize_name("SHIP_20260923_2112.csv") == "SHIP_*_*.csv"
+    assert generalize_name("claims-2026-10-06.x12") == "claims-*-*-*.x*"
+    assert generalize_name("report.pdf") == "report.pdf"
+    assert generalize_name("") == ""
+    assert generalize_name("123") == "*"
+    assert generalize_name("a1b22c333") == "a*b*c*"
+
+
+def test_templates_file_arrived_template_text_pattern() -> None:
+    assert (
+        f"file_arrived {generalize_name('SHIP_20260923_2112.csv')}" == "file_arrived SHIP_*_*.csv"
+    )
+
+
+def test_templates_no_stray_output_on_construction() -> None:
+    code = (
+        "from carto_edge.pipeline.templates import TemplateStore\n"
+        "s = TemplateStore()\n"
+        "s.mine('sys_x', 'hello 1')\n"
+    )
+    result = subprocess.run(  # noqa: S603 - our own interpreter, fixed code
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=120
+    )
+    assert result.stdout == ""
+    assert "drain3.ini" not in result.stderr
+
+
+@needs_sim
+def test_templates_simulator_export_log_has_few_stable_templates() -> None:
+    store = TemplateStore()
+    lines = []
+    for path in sorted((SIM_DIR / "warehouse").glob("export-job-*.log")):
+        lines.extend(path.read_text(encoding="utf-8").splitlines())
+    texts = set()
+    for line in lines:
+        message = line.split(" ", 3)[3]
+        texts.add(store.mine("sys_warehouse", message)[0])
+    assert texts == {
+        "PO export finished: <*> POs written to <*>",
+        "SFTP upload complete: <*> <*> bytes)",
+        "SFTP upload failed: Permission denied <*>",
+        "export scheduler idle, next run <*>",
+    }
+
+
+@settings(max_examples=150, deadline=3000)
+@given(st.text(max_size=500))
+def test_templates_property_mine_never_raises_and_params_align(text: str) -> None:
+    store = TemplateStore()
+    template, params = store.mine("sys_x", text)
+    assert len(template) <= MAX_TEMPLATE_TEXT_LEN
+    assert all(isinstance(p, str) for p in params)
+    assert template.count(MASK) >= len(params) or len(template) == MAX_TEMPLATE_TEXT_LEN

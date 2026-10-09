@@ -268,7 +268,7 @@ class Gateway:
             return result
         result.request_body = body
         if endpoint.request_schema is not None:
-            for err in list(Draft202012Validator(endpoint.request_schema).iter_errors(body))[:20]:
+            for err in list(Draft202012Validator(self.manifest.resolve(endpoint.request_schema)).iter_errors(body))[:20]:
                 location = "/".join(str(p) for p in err.absolute_path) or "$"
                 result.request_errors.append(f"{location}: {err.message}")
             if result.request_errors:
@@ -485,7 +485,7 @@ class Gateway:
             return
         validator = self._validators.get(endpoint.id)
         if validator is None:
-            validator = Draft202012Validator(endpoint.response_schema)
+            validator = Draft202012Validator(self.manifest.resolve(endpoint.response_schema))
             self._validators[endpoint.id] = validator
         for err in list(validator.iter_errors(body))[:20]:
             location = "/".join(str(p) for p in err.absolute_path) or "$"

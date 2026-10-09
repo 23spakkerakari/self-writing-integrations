@@ -58,9 +58,10 @@ def test_registry_has_exactly_the_specified_commands() -> None:
     assert {command.path: (command.milestone, command.section) for command in COMMANDS} == expected
 
 
-def test_only_version_is_implemented_in_m0() -> None:
-    assert [command.name for command in COMMANDS if command.implemented] == ["version"]
-    assert len(STUBS) == len(COMMANDS) - 1
+def test_m1_implements_pki_init_key_init_and_version() -> None:
+    implemented = [command.name for command in COMMANDS if command.implemented]
+    assert implemented == ["pki init", "key init", "version"]
+    assert len(STUBS) == len(COMMANDS) - 3
 
 
 # --- stubs ------------------------------------------------------------------------------------
@@ -339,11 +340,14 @@ def test_configure_hook_adds_options_for_the_handler(capsys: pytest.CaptureFixtu
     assert "--since" in capsys.readouterr().err
 
 
-def test_reserved_dests_are_exactly_the_keys_the_parser_sets() -> None:
+def test_reserved_dests_are_the_keys_the_parser_sets_on_every_command() -> None:
     assert sorted(RESERVED_DESTS) == ["command", "help_parser"]
     for command in COMMANDS:
         args = build_parser().parse_args(list(command.path))
-        assert set(vars(args)) == RESERVED_DESTS, command.name
+        dests = set(vars(args))
+        assert dests >= RESERVED_DESTS, command.name
+        if command.configure is None:
+            assert dests == RESERVED_DESTS, command.name
 
 
 @pytest.mark.parametrize("dest", sorted(RESERVED_DESTS))

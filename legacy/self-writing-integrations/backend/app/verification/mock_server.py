@@ -225,7 +225,7 @@ class MockServer:
         if endpoint.request_schema is not None:
             problems = [
                 f"{'/'.join(str(p) for p in err.absolute_path) or '$'}: {err.message}"
-                for err in Draft202012Validator(endpoint.request_schema).iter_errors(payload)
+                for err in Draft202012Validator(self.manifest.resolve(endpoint.request_schema)).iter_errors(payload)
             ]
             if problems:
                 return httpx.Response(422, json={"error": "request body rejected", "details": problems[:10]})
@@ -233,7 +233,7 @@ class MockServer:
         self.writes.append((endpoint.id, payload))
         if endpoint.response_schema is None:
             return payload if payload is not None else {}
-        body = SchemaExampleGenerator(endpoint.response_schema, self.list_size).generate(index=index)
+        body = SchemaExampleGenerator(self.manifest.resolve(endpoint.response_schema), self.list_size).generate(index=index)
         if isinstance(body, dict) and isinstance(payload, dict):
             body.update({key: value for key, value in payload.items() if key in body})
         return body
@@ -241,7 +241,7 @@ class MockServer:
     def _body(self, endpoint: Endpoint, request: httpx.Request) -> Any:
         if endpoint.response_schema is None:
             return {}
-        body = SchemaExampleGenerator(endpoint.response_schema, self.list_size).generate()
+        body = SchemaExampleGenerator(self.manifest.resolve(endpoint.response_schema), self.list_size).generate()
         pg = endpoint.pagination
         params = request.url.params
         later_page = (
