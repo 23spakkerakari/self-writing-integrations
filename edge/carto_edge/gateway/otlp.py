@@ -12,7 +12,12 @@ an ``otlp`` source in the sources file. :func:`parse_logs_request` turns one req
 - A resource without a string ``carto.source_id``, or with one the sources file does not
   configure as an enabled ``otlp`` source, has its log records counted as rejected (the
   response's ``partial_success``). At most :data:`MAX_LOG_RECORDS` records per request are
-  accepted; the rest are rejected too.
+  accepted; the rest are rejected too. Before the protobuf is parsed, the wire format is walked
+  to count the log records, and a request with more than :data:`MAX_WIRE_RECORDS` is refused
+  (reason ``too_many``): two-byte empty records in a 4 MiB body would otherwise expand to
+  millions of parsed objects (spec 2.3 invariant 8).
+- ``size_bytes`` is the serialized size of the whole log record, attributes included, so the
+  parser's ``max_record_bytes`` applies to attributes as well as to the body.
 - A string body becomes ``text`` (a log line: the parser picks its format). A key-value body
   becomes ``fields``, converted to JSON-like Python with nesting capped at
   :data:`MAX_VALUE_DEPTH` and arrays at :data:`MAX_ARRAY_ITEMS`. Log record attributes other
@@ -38,7 +43,7 @@ import hashlib
 import io
 import math
 import zlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
@@ -61,17 +66,21 @@ __all__ = [
     "MAX_ARRAY_ITEMS",
     "MAX_LOG_RECORDS",
     "MAX_VALUE_DEPTH",
+    "MAX_WIRE_RECORDS",
     "OTLP_ENCODINGS",
     "SOURCE_ID_ATTRIBUTE",
     "OtlpBodyError",
     "OtlpRecords",
     "Reason",
+    "count_log_records",
     "parse_logs_request",
 ]
 
 SOURCE_ID_ATTRIBUTE: Final = "carto.source_id"
 IGNORED_ATTRIBUTE_PREFIX: Final = "log.file."
 MAX_LOG_RECORDS: Final = 10_000
+MAX_WIRE_RECORDS: Final = 4 * MAX_LOG_RECORDS
+"""Log records a request may carry on the wire before it is parsed at all."""
 MAX_VALUE_DEPTH: Final = 12
 MAX_ARRAY_ITEMS: Final = 20
 LOCATOR_DIGEST_LEN: Final = 16
@@ -89,7 +98,7 @@ _DECOMPRESS_CHUNK: Final = 64 * 1024
 _NANOS: Final = 1_000_000_000
 _MAX_UNIX_SECONDS: Final = 253_402_300_799  # 9999-12-31T23:59:59Z
 
-Reason = Literal["too_large", "bad_encoding", "bad_protobuf"]
+Reason = Literal["too_large", "too_many", "bad_encoding", "bad_protobuf"]
 
 
 class OtlpBodyError(ValueError):
@@ -286,9 +295,78 @@ def _record(
         text=text,
         fields=fields or None,
         sequence=sequence,
-        size_bytes=len(body_bytes),
+        size_bytes=log_record.ByteSize(),
         template_hint=None,
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Wire-format pre-scan
+# ---------------------------------------------------------------------------------------------
+
+_RESOURCE_LOGS: Final = logs_service_pb2.ExportLogsServiceRequest.DESCRIPTOR.fields_by_name[
+    "resource_logs"
+].number
+_SCOPE_LOGS: Final = logs_pb2.ResourceLogs.DESCRIPTOR.fields_by_name["scope_logs"].number
+_LOG_RECORDS: Final = logs_pb2.ScopeLogs.DESCRIPTOR.fields_by_name["log_records"].number
+_LEN: Final = 2
+_BAD_WIRE: Final = "body is not an OTLP ExportLogsServiceRequest"
+
+
+def _varint(data: bytes, pos: int, end: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while True:
+        if pos >= end or shift > 63:
+            raise OtlpBodyError("bad_protobuf", _BAD_WIRE)
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+
+
+def _fields(data: bytes, start: int, end: int) -> Iterator[tuple[int, int, int, int]]:
+    """``(field number, wire type, value start, value end)`` of one message's fields."""
+    pos = start
+    while pos < end:
+        key, pos = _varint(data, pos, end)
+        number, wire = key >> 3, key & 7
+        if wire == 0:
+            _ignored, after = _varint(data, pos, end)
+        elif wire == 1:
+            after = pos + 8
+        elif wire == _LEN:
+            length, pos = _varint(data, pos, end)
+            after = pos + length
+        elif wire == 5:
+            after = pos + 4
+        else:  # groups (3, 4) are not used by OTLP
+            raise OtlpBodyError("bad_protobuf", _BAD_WIRE)
+        if after > end:
+            raise OtlpBodyError("bad_protobuf", _BAD_WIRE)
+        yield number, wire, pos, after
+        pos = after
+
+
+def count_log_records(data: bytes, limit: int) -> int:
+    """Count the log records of a serialized request without parsing it; raise
+    :class:`OtlpBodyError` (``too_many``) as soon as the count passes ``limit``."""
+    total = 0
+    for number, wire, start, end in _fields(data, 0, len(data)):
+        if number != _RESOURCE_LOGS or wire != _LEN:
+            continue
+        for scope_number, scope_wire, scope_start, scope_end in _fields(data, start, end):
+            if scope_number != _SCOPE_LOGS or scope_wire != _LEN:
+                continue
+            for record_number, record_wire, _s, _e in _fields(data, scope_start, scope_end):
+                if record_number == _LOG_RECORDS and record_wire == _LEN:
+                    total += 1
+                    if total > limit:
+                        msg = f"more than {limit} log records in one request"
+                        raise OtlpBodyError("too_many", msg)
+    return total
 
 
 # ---------------------------------------------------------------------------------------------
@@ -308,6 +386,7 @@ def parse_logs_request(
     the enabled ``otlp`` source ids to their system ids; ``sequence`` is the record's position
     in the request."""
     data = _decode(body, content_encoding, max_bytes)
+    count_log_records(data, MAX_WIRE_RECORDS)
     request = logs_service_pb2.ExportLogsServiceRequest()
     try:
         request.ParseFromString(data)

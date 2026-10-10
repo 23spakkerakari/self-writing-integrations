@@ -22,8 +22,10 @@ from carto_edge.gateway.otlp import (
     MAX_ARRAY_ITEMS,
     MAX_LOG_RECORDS,
     MAX_VALUE_DEPTH,
+    MAX_WIRE_RECORDS,
     OtlpBodyError,
     OtlpRecords,
+    count_log_records,
     parse_logs_request,
 )
 from carto_edge.pipeline.severity import detect_severity
@@ -136,7 +138,7 @@ def test_string_body_becomes_text_and_file_attributes_are_ignored() -> None:
     assert record.received_at == NOW
     assert record.template_hint is None
     assert record.commit_cursor is None
-    assert record.size_bytes == len(record_pb.body.SerializeToString())
+    assert record.size_bytes == record_pb.ByteSize()  # the whole record, attributes included
 
 
 def test_kvlist_body_becomes_nested_fields_and_attributes_merge() -> None:
@@ -339,3 +341,35 @@ def test_records_per_request_are_capped() -> None:
     assert result.accepted == MAX_LOG_RECORDS
     assert result.rejected == extra
     assert len(result.records["src_orders_log"]) == MAX_LOG_RECORDS - 6000
+
+
+def test_the_wire_is_counted_before_parsing_and_floods_are_refused() -> None:
+    """Two-byte empty records would expand to millions of parsed objects (review finding)."""
+    body = body_of(resource("src_web_log", line("a"), line("b")), resource(None, line("c")))
+    assert count_log_records(body, 10) == 3
+    flood = logs_service_pb2.ExportLogsServiceRequest(
+        resource_logs=[
+            logs_pb2.ResourceLogs(
+                scope_logs=[
+                    logs_pb2.ScopeLogs(
+                        log_records=[logs_pb2.LogRecord() for _ in range(MAX_WIRE_RECORDS + 1)]
+                    )
+                ]
+            )
+        ]
+    ).SerializeToString()
+    assert len(flood) < CAP * 4
+    with pytest.raises(OtlpBodyError) as caught:
+        parse(flood, max_bytes=CAP * 4)
+    assert caught.value.reason == "too_many"
+    with pytest.raises(OtlpBodyError) as truncated:
+        count_log_records(body[:-3], 10)
+    assert truncated.value.reason == "bad_protobuf"
+
+
+def test_size_bytes_counts_attributes_too() -> None:
+    """The parser's max_record_bytes must apply to attributes, not only to the body."""
+    big = "x" * 50_000
+    records = parse(body_of(resource("src_web_log", line("", attributes={"big": string(big)}))))
+    record = records.records["src_web_log"][0]
+    assert record.size_bytes > len(big)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import zstandard
@@ -140,3 +141,38 @@ def test_decompress_is_bounded() -> None:
     assert decompress_batch(payload).source_id == "src_wms_db"
     with pytest.raises(zstandard.ZstdError):
         decompress_batch(b"not zstd")
+
+
+class _FailingCommit:
+    """Delegates to a real connection but fails every COMMIT."""
+
+    def __init__(self, inner: sqlite3.Connection) -> None:
+        self._inner = inner
+
+    def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+        if sql == "COMMIT":
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._inner.execute(sql, *args)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_a_failed_ack_keeps_the_byte_count_exact(tmp_path: Path) -> None:
+    with DiskBuffer(tmp_path / "b.sqlite", max_bytes=10_000_000, backpressure_ratio=0.8) as buf:
+        row_id = buf.append(_batch())
+        before = buf.bytes()
+        real = buf._conn
+        buf._conn = _FailingCommit(real)  # type: ignore[assignment]
+        with pytest.raises(sqlite3.OperationalError):
+            buf.ack([row_id])
+        buf._conn = real
+        assert buf.bytes() == before
+        assert buf.depth() == 1
+
+
+def test_commits_are_synced_to_disk(tmp_path: Path) -> None:
+    """synchronous=FULL: a cursor in another file can never be durable before its batch."""
+    with DiskBuffer(tmp_path / "b.sqlite", max_bytes=10_000_000, backpressure_ratio=0.8) as buf:
+        level = buf._conn.execute("PRAGMA synchronous").fetchone()
+        assert level is not None and level[0] == 2  # FULL

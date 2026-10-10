@@ -4,10 +4,11 @@ Batches wait here, zstd-compressed, until ``ingest-api`` acknowledges them. SQLi
 one connection behind a lock: every :meth:`DiskBuffer.append` is its own committed transaction,
 so a cursor committed after ``append`` returns points at data that survives a crash (spec 8.1
 "a cursor is committed only after the batch is durably in the disk buffer"). ``PRAGMA
-synchronous=NORMAL`` is used with WAL: a committed transaction survives an application crash
-and is durable against power loss up to the last WAL checkpoint, which SQLite documents as the
-recommended WAL setting; the at-least-once contract (core dedupes by ``event_id`` and
-``batch_id``) covers the narrow window.
+synchronous=FULL``: every commit is synced to disk before ``append`` returns. With ``NORMAL`` a
+commit survives an application crash but not a power cut, and because the cursors live in a
+separate file the cursor could reach the disk before the batch it covers, which would skip
+data, a loss core's deduplication cannot repair. One sync per batch of up to 5,000 events is
+cheap.
 
 Each row stores the compressed bytes and their size, so the size cap (``buffer.max_bytes``,
 default 20 GB) and the backpressure threshold (``buffer.backpressure_ratio``, default 80%) are
@@ -109,7 +110,7 @@ class DiskBuffer:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
         for statement in _SCHEMA:
             self._conn.execute(statement)
         row = self._conn.execute("SELECT COALESCE(SUM(size), 0) FROM batches").fetchone()
@@ -179,6 +180,7 @@ class DiskBuffer:
         if not wanted:
             return 0
         removed = 0
+        freed = 0
         with self._lock:
             self._conn.execute("BEGIN")
             try:
@@ -189,12 +191,13 @@ class DiskBuffer:
                     if row is None:
                         continue
                     self._conn.execute("DELETE FROM batches WHERE id = ?", (row_id,))
-                    self._bytes -= int(row[0])
+                    freed += int(row[0])
                     removed += 1
                 self._conn.execute("COMMIT")
             except sqlite3.Error:
                 self._conn.execute("ROLLBACK")
                 raise
+            self._bytes -= freed  # only once the delete is committed: the cap stays exact
         return removed
 
     def park(self, row_id: int) -> bool:

@@ -30,17 +30,21 @@ every response by route template and status. An unhandled exception becomes a ``
 and is logged by type name only. Nothing here logs a body, a header value, a token or a query
 string (spec 2.3 invariant 7, 14.12).
 
-The webhook secret is resolved on the event loop thread, not in the thread pool: the
-``local://`` store is a SQLite connection bound to the thread that opened it, which is also
-the thread that closes it at shutdown. Resolved values are cached (spec 14.3), so a resolution
-that does I/O is rare.
+The webhook secret is resolved in the thread pool: a ``vault://`` lookup is network I/O and
+must not stall the event loop (every other route would wait); the resolver is thread-safe,
+caches values (spec 14.3) and caches failures briefly. A secret shorter than
+:data:`MIN_WEBHOOK_SECRET_LEN` is refused (503) rather than used: an empty secret would make the
+HMAC check pass for anyone. At most :data:`OTLP_CONCURRENCY` OTLP requests are decoded at once,
+bounding the memory a burst of large requests can take.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
@@ -65,7 +69,8 @@ from carto_edge.connectors.registry import build_connector
 from carto_edge.connectors.webhook import WebhookBodyError, WebhookConnector
 from carto_edge.gateway.otlp import OTLP_ENCODINGS, OtlpBodyError, parse_logs_request
 from carto_edge.metrics import EdgeMetrics
-from carto_edge.pipeline.batch import REASON_BUFFER_FULL
+from carto_edge.pipeline.batch import buffer_refused
+from carto_edge.pipeline.forward import SourceHealth
 from carto_edge.pipeline.ingestor import BackpressureState, IngestorLike, IngestOutcome
 from carto_edge.pipeline.model import RawRecord
 from carto_edge.reveal import (
@@ -100,6 +105,10 @@ OTLP_MEDIA_TYPE: Final = "application/x-protobuf"
 JSON_MEDIA_TYPE: Final = "application/json"
 METRICS_MEDIA_TYPE: Final = "text/plain; version=0.0.4"
 REQUESTS_METRIC: Final = "carto_edge_requests_total"
+MIN_WEBHOOK_SECRET_LEN: Final = 16
+"""Shortest HMAC secret accepted (the source test asks for the same)."""
+OTLP_CONCURRENCY: Final = 4
+"""OTLP requests decoded and ingested at the same time."""
 UNMATCHED_ROUTE: Final = "unmatched"
 SLOW_RETRY_AFTER_SECONDS: Final = 5
 FULL_RETRY_AFTER_SECONDS: Final = 30
@@ -288,18 +297,38 @@ async def read_capped_body(request: Request, limit: int) -> bytes:
     return bytes(buffer)
 
 
-async def _ingest_durably(ingestor: IngestorLike, records: list[RawRecord]) -> IngestOutcome:
+async def _ingest_durably(
+    ingestor: IngestorLike,
+    records: list[RawRecord],
+    health: SourceHealth | None,
+    now: Callable[[], datetime],
+) -> IngestOutcome:
     """Ingest pushed records and seal them into the disk buffer before answering: a 2xx tells
-    the sender it may forget them (spec 8.1 at-least-once). A batch the buffer refused is a
-    503, so the collector keeps the request in its persistent queue and retries (spec 8.5)."""
-    outcome = await run_in_threadpool(ingestor.ingest, records, durable=True)
-    if outcome.dropped.get(REASON_BUFFER_FULL, 0):
+    the sender it may forget them (spec 8.1 at-least-once). A batch the buffer refused, or any
+    failure while storing, is a 503 with ``Retry-After``: the OTLP exporter retries 503 and keeps
+    the request in its persistent queue, where a 500 would make it drop the data (spec 8.5).
+    Pushed sources report their reads to source health so heartbeats are not "ok, no data"."""
+    try:
+        outcome = await run_in_threadpool(ingestor.ingest, records, durable=True)
+    except Exception as exc:  # the sender must retry, never drop
+        log.error("push.store_failed", error=type(exc).__name__, records=len(records))
+        raise Problem(
+            503,
+            "service unavailable",
+            "the edge could not store the records; retry later",
+            headers={"retry-after": str(FULL_RETRY_AFTER_SECONDS)},
+        ) from None
+    if buffer_refused(outcome):
         raise Problem(
             503,
             "service unavailable",
             "the edge buffer is full; retry later",
             headers={"retry-after": str(FULL_RETRY_AFTER_SECONDS)},
         )
+    if health is not None:
+        at = now()
+        for source_id, count in Counter(record.source_id for record in records).items():
+            health.record_read(source_id, count, None, at)
     return outcome
 
 
@@ -422,6 +451,7 @@ def create_gateway_app(
     ready: Callable[[], bool] | None = None,
     clock: Callable[[], datetime] | None = None,
     lifespan: Lifespan | None = None,
+    health: SourceHealth | None = None,
 ) -> FastAPI:
     """Build the application; the caller owns ``runtime``, ``ingestor`` and ``reveal``."""
     now = clock if clock is not None else _utc_now
@@ -435,6 +465,7 @@ def create_gateway_app(
     webhooks, context = _webhook_connectors(runtime)
     metrics.counter(REQUESTS_METRIC, "HTTP requests answered, by route and status.")
 
+    otlp_slots = asyncio.Semaphore(OTLP_CONCURRENCY)
     app = FastAPI(
         title="carto edge-gateway",
         docs_url=None,
@@ -475,6 +506,10 @@ def create_gateway_app(
             raise Problem(
                 415, "unsupported content encoding", "send gzip, zstd or no content encoding"
             )
+        async with otlp_slots:
+            return await _otlp_decode_and_ingest(request, encoding)
+
+    async def _otlp_decode_and_ingest(request: Request, encoding: str) -> Response:
         body = await read_capped_body(request, gateway.otlp_max_body_bytes)
         try:
             parsed = await run_in_threadpool(
@@ -491,12 +526,16 @@ def create_gateway_app(
                 raise Problem(
                     413, "payload too large", "decompressed body exceeds the cap"
                 ) from None
+            if exc.reason == "too_many":
+                raise Problem(
+                    413, "payload too large", "too many log records in one request"
+                ) from None
             raise Problem(400, "bad request", "body is not a readable OTLP logs request") from None
         del body
         records = parsed.all_records()
         events = 0
         if records:
-            outcome = await _ingest_durably(ingestor, records)
+            outcome = await _ingest_durably(ingestor, records, health, now)
             events = outcome.events
         log.info(
             "otlp.received",
@@ -524,10 +563,15 @@ def create_gateway_app(
         limit = min(gateway.webhook_max_body_bytes, connector.config.max_body_bytes)
         body = await read_capped_body(request, limit)
         try:
-            secret = context.secrets.resolve(connector.source.secret_ref or "")
+            secret = await run_in_threadpool(
+                context.secrets.resolve, connector.source.secret_ref or ""
+            )
         except Exception as exc:  # any resolver failure is the same 503
             log.warning("webhook.secret_unavailable", source_id=source_id, error=type(exc).__name__)
             raise Problem(503, "service unavailable", "secret unavailable") from None
+        if len(secret) < MIN_WEBHOOK_SECRET_LEN:
+            log.warning("webhook.secret_too_short", source_id=source_id)
+            raise Problem(503, "service unavailable", "secret unavailable")
         received_at = now()
         if not connector.verify_signature(secret, body, request.headers, received_at):
             log.warning("webhook.signature_rejected", source_id=source_id)
@@ -540,7 +584,7 @@ def create_gateway_app(
                 400, "bad request", "body must be a JSON object or an array of objects"
             ) from None
         del body
-        outcome = await _ingest_durably(ingestor, records)
+        outcome = await _ingest_durably(ingestor, records, health, now)
         log.info(
             "webhook.received", source_id=source_id, records=len(records), events=outcome.events
         )

@@ -424,3 +424,25 @@ def test_response_models_round_trip_as_json() -> None:
     assert RevealResponse.model_validate_json(response.model_dump_json()) == response
     with pytest.raises(ValidationError):
         RevealResponse(values={"bad": "A-1"}, missing=[], remaining_quota=0)
+
+
+def test_rejection_rows_are_capped_and_the_rest_counted(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Junk assertions cannot fill the state volume through the audit file (review)."""
+    monkeypatch.setattr("carto_edge.reveal.REJECTION_ROWS_PER_HOUR", 3)
+    before = len(audit_rows(harness.audit_path)) if harness.audit_path.exists() else 0
+    for _ in range(5):
+        with pytest.raises(AssertionRejected):
+            harness.service.reveal(
+                RevealRequest(assertion="garbage", tokens=[raw_token("PO-77001")])
+            )
+    rows = audit_rows(harness.audit_path)
+    assert len(rows) - before == 3
+    harness.clock.now = NOW + timedelta(hours=2)
+    with pytest.raises(AssertionRejected):
+        harness.service.reveal(RevealRequest(assertion="garbage", tokens=[raw_token("PO-77001")]))
+    last = audit_rows(harness.audit_path)[-1]
+    details = last["details"]
+    assert isinstance(details, dict)
+    assert details["suppressed_since_last_row"] == 2

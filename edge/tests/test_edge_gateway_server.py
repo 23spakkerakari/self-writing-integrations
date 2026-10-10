@@ -29,6 +29,7 @@ from carto_edge.gateway.server import (
     run_gateway,
     run_housekeeping,
 )
+from carto_edge.keys import KeyManager
 
 SOURCES_YAML = """\
 systems:
@@ -229,3 +230,23 @@ async def test_housekeeping_returns_promptly_when_stopped() -> None:
         run_housekeeping(stop, calls.append, lambda: None, stats_flush_seconds=30.0), timeout=2
     )
     assert calls == []
+
+
+def test_uvicorn_config_bounds_headers_and_connections(pki: Pki) -> None:
+    """httptools accepts unbounded headers; h11 caps a request head (review finding)."""
+    config = build_uvicorn_config(FastAPI(), listener(pki), log_level="warning")
+    assert config.http == "h11"
+    assert config.h11_max_incomplete_event_size == 16 * 1024
+    assert config.limit_concurrency == 256
+
+
+def test_run_gateway_with_a_broken_audit_chain_exits_cleanly(
+    tmp_path: Path, pki: Pki, logs: io.StringIO
+) -> None:
+    path = tmp_path / "sources.yaml"
+    path.write_text(SOURCES_YAML, encoding="utf-8")
+    settings = edge_settings(tmp_path, sources_file=path, gateway=listener(pki))
+    KeyManager(settings).init(create_local_kms=True)
+    settings.audit_file.write_text("not an audit row\n", encoding="utf-8")
+    assert run_gateway(settings) == EXIT_FAILURE
+    assert "gateway.audit_chain_broken" in logs.getvalue()

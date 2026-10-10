@@ -56,6 +56,10 @@ logger = logging.getLogger(__name__)
 MAX_CACHE_SECONDS: Final = 900
 """Spec 14.3: cached in memory at most 15 minutes."""
 
+FAILURE_CACHE_SECONDS: Final = 15.0
+"""A failed resolution is not retried for this long: a slow or unreachable Vault costs one
+timeout per reference per window, not one per request."""
+
 MAX_VAULT_BODY_BYTES: Final = 1024 * 1024
 VAULT_TIMEOUT_SECONDS: Final = 10.0
 DEFAULT_VAULT_FIELD: Final = "value"
@@ -259,6 +263,7 @@ class EdgeSecretResolver:
         self._cache: dict[str, _CacheEntry] = {}
         self._store: LocalSecretStore | None = None
         self._lock = threading.RLock()
+        self._failures: dict[str, float] = {}
 
     def __repr__(self) -> str:
         return f"EdgeSecretResolver(cached={len(self._cache)})"
@@ -303,6 +308,21 @@ class EdgeSecretResolver:
         entry = self._cache.get(secret_ref)
         if entry is not None and entry.expires_at > now:
             return entry.value
+        failed_until = self._failures.get(secret_ref)
+        if failed_until is not None and failed_until > now:
+            msg = "the secret could not be resolved a moment ago; retrying shortly"
+            raise SecretError(msg)
+        try:
+            value = self._fetch(secret_ref)
+        except SecretError:
+            self._failures[secret_ref] = now + FAILURE_CACHE_SECONDS
+            raise
+        self._failures.pop(secret_ref, None)
+        if self._cache_seconds > 0:
+            self._cache[secret_ref] = _CacheEntry(value, now + self._cache_seconds)
+        return value
+
+    def _fetch(self, secret_ref: str) -> str:
         scheme, _, rest = secret_ref.partition("://")
         if scheme == "local":
             value = self._resolve_local(rest)
@@ -314,8 +334,6 @@ class EdgeSecretResolver:
         else:  # pragma: no cover - validate_secret_ref admits only the schemes above
             msg = f"unsupported secret_ref scheme {scheme!r}"
             raise SecretError(msg)
-        if self._cache_seconds > 0:
-            self._cache[secret_ref] = _CacheEntry(value, now + self._cache_seconds)
         logger.debug("resolved secret_ref scheme=%s", scheme)
         return value
 

@@ -6,6 +6,7 @@ buffer refuses never advances the cursor, and its source is told to re-read (at-
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -29,10 +30,12 @@ from carto_edge.config import (
 )
 from carto_edge.metrics import EdgeMetrics, default_metrics
 from carto_edge.pipeline.batch import (
+    REASON_BUFFER_ERROR,
     REASON_BUFFER_FULL,
     UNKNOWN_SOURCE_LABEL,
     BatchAccumulator,
     Ingestor,
+    buffer_refused,
 )
 from carto_edge.pipeline.buffer import DiskBuffer, decompress_batch
 from carto_edge.pipeline.ingestor import BackpressureState, IngestorLike
@@ -519,3 +522,86 @@ def test_ingest_of_nothing_is_a_no_op(
     assert r.ingestor.flush() == 0
     assert buffer.depth() == 0
     assert repr(r.ingestor).startswith("Ingestor(")
+
+
+# ---------------------------------------------------------------------------------------------
+# Review findings: a refused append never lets a cursor pass the lost events
+# ---------------------------------------------------------------------------------------------
+
+
+class FlakyBuffer(DiskBuffer):
+    """A DiskBuffer whose next appends fail like a full disk (SQLITE_FULL)."""
+
+    fail_next = 0
+
+    def append(self, batch: IngestBatch, source_id: str | None = None) -> int:
+        if self.fail_next:
+            self.fail_next -= 1
+            raise sqlite3.OperationalError("database or disk is full")
+        return super().append(batch, source_id)
+
+
+def test_a_failed_append_rolls_the_pulled_source_back(runtime: EdgeRuntime, tmp_path: Path) -> None:
+    with (
+        FlakyBuffer(tmp_path / "b.sqlite", max_bytes=BIG, backpressure_ratio=0.8) as buf,
+        CursorStore(tmp_path / "c.sqlite") as cur,
+    ):
+        ing = Ingestor(
+            runtime, buf, cur, link=CoreLinkSettings(batch_events=3), metrics=default_metrics()
+        )
+        ing.ingest([record(1), record(2), record(3)])
+        buf.fail_next = 1
+        outcome = ing.ingest([record(4)])  # seals [1, 2, 3]; the append fails
+        assert outcome.dropped[REASON_BUFFER_ERROR] == 4  # the batch and the pending [4]
+        assert buffer_refused(outcome) == 4
+        ing.flush_stale(datetime(2030, 1, 1, tzinfo=UTC))  # housekeeping a second later
+        assert cur.get("src_web") is None  # never past the lost events
+        assert buf.depth() == 0
+        # The reader restarts from the committed cursor and everything arrives.
+        again = ing.ingest([record(i) for i in range(1, 5)])
+        assert not buffer_refused(again)
+        assert ing.flush() == 1  # [1, 2, 3] sealed while ingesting, [4] here
+        assert buf.pending_events() == 4
+        assert line(cur.get("src_web")) == 4
+
+
+def test_a_failed_flush_is_not_committed_by_a_later_unrelated_ingest(
+    runtime: EdgeRuntime, tmp_path: Path
+) -> None:
+    with (
+        FlakyBuffer(tmp_path / "b.sqlite", max_bytes=BIG, backpressure_ratio=0.8) as buf,
+        CursorStore(tmp_path / "c.sqlite") as cur,
+    ):
+        ing = Ingestor(
+            runtime, buf, cur, link=CoreLinkSettings(batch_events=100), metrics=default_metrics()
+        )
+        ing.ingest([record(1), record(2)])
+        buf.fail_next = 1
+        assert ing.flush() == 0  # no exception escapes; the loss is counted
+        push = ing.ingest([record(9, source_id="src_push", cursor=False)], durable=True)
+        assert push.batches_sealed == 1
+        assert cur.get("src_web") is None
+        refused = ing.ingest([record(3)])  # the next read of src_web learns it must re-read
+        assert refused.dropped[REASON_BUFFER_FULL] == 1
+        assert cur.get("src_web") is None
+
+
+def test_a_refusal_before_the_first_cursor_record_still_forces_a_re_read(
+    runtime: EdgeRuntime, tmp_path: Path
+) -> None:
+    """Splunk, SQL and SFTP put the cursor on the last record of a window, page or listing."""
+    with (
+        DiskBuffer(tmp_path / "s.sqlite", max_bytes=1, backpressure_ratio=0.5) as small,
+        CursorStore(tmp_path / "c.sqlite") as cur,
+    ):
+        small.append_bytes(b"x", source_id="other", batch_id="pre", events=1, created_at=NOW)
+        ing = Ingestor(
+            runtime, small, cur, link=CoreLinkSettings(batch_events=3), metrics=default_metrics()
+        )
+        window = [record(i, cursor=False) for i in range(1, 5)] + [record(5)]
+        outcome = ing.ingest(window)
+        assert buffer_refused(outcome) == 5
+        small.ack([row.id for row in small.iter_pending()])  # the forwarder makes room
+        ing.flush_stale(datetime(2030, 1, 1, tzinfo=UTC))
+        assert cur.get("src_web") is None
+        assert small.pending_events() == 0

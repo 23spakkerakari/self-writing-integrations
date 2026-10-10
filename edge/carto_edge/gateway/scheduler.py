@@ -55,7 +55,7 @@ from types import MappingProxyType
 from typing import Final
 
 from carto_common.logging import get_logger
-from carto_edge.config import SourceConfig, SourceType
+from carto_edge.config import SourceConfig
 from carto_edge.connectors.base import (
     ConnectorContext,
     ConnectorError,
@@ -68,7 +68,7 @@ from carto_edge.connectors.base import (
 from carto_edge.connectors.registry import build_connector
 from carto_edge.metrics import EdgeMetrics
 from carto_edge.net.retry import backoff_delay
-from carto_edge.pipeline.batch import REASON_BUFFER_FULL
+from carto_edge.pipeline.batch import PULL_SOURCE_TYPES, buffer_refused
 from carto_edge.pipeline.forward import MAX_BACKOFF_ATTEMPT, SourceHealth
 from carto_edge.pipeline.ingestor import BackpressureState, IngestorLike
 from carto_edge.pipeline.model import RawRecord
@@ -85,9 +85,6 @@ __all__ = [
     "PollScheduler",
 ]
 
-PULL_SOURCE_TYPES: Final = frozenset(
-    {SourceType.UPLOAD, SourceType.SPLUNK, SourceType.SQL, SourceType.SFTP}
-)
 CHUNK_RECORDS: Final = 500
 BACKPRESSURE_WAIT_SECONDS: Final = 1.0
 ERROR_BACKOFF_BASE_SECONDS: Final = 5.0
@@ -176,6 +173,8 @@ class PollScheduler:
                 log.warning(
                     "scheduler.source_skipped", source_id=source.id, error=type(exc).__name__
                 )
+                # The heartbeat must say "failing", not "ok with no data" (spec 8.1 health).
+                self._health.record_error(source.id, self._clock())
                 continue
             self._sources[source.id] = source
             self._connectors[source.id] = connector
@@ -295,9 +294,11 @@ class PollScheduler:
                     continue
                 outcome = await asyncio.to_thread(self._ingestor.ingest, chunk)
                 chunk = []
-                if outcome.dropped.get(REASON_BUFFER_FULL):
+                if buffer_refused(outcome):
                     aborted, flush = True, False
-                    log.warning("scheduler.read_aborted", source_id=source.id, reason="buffer_full")
+                    log.warning(
+                        "scheduler.read_aborted", source_id=source.id, reason="buffer_refused"
+                    )
                     break
                 if (stop is not None and stop.is_set()) or (
                     self._ingestor.backpressure() is not BackpressureState.OK
@@ -308,7 +309,7 @@ class PollScheduler:
             await _close_iterator(iterator)
         if chunk:
             outcome = await asyncio.to_thread(self._ingestor.ingest, chunk)
-            if outcome.dropped.get(REASON_BUFFER_FULL):
+            if buffer_refused(outcome):
                 aborted, flush = True, False
         if flush:
             await asyncio.to_thread(self._ingestor.flush)

@@ -265,3 +265,17 @@ async def test_test_checks_the_secret() -> None:
     assert "resolved" in bad.problems[0]
     short = await make(secrets=Secrets("short")).test()
     assert not short.ok
+
+
+@pytest.mark.parametrize("header", ["v1=\u00e9", "sha256=" + "\u0661" * 64, "v1=zz", "v1=abc"])
+def test_malformed_signature_candidates_are_refused_without_raising(header: str) -> None:
+    connector = make()
+    body = b'{"a": 1}'
+    assert not connector.verify_signature(SECRET, body, {"X-Carto-Signature": header}, NOW)
+
+
+def test_a_unicode_digit_timestamp_is_refused_without_raising() -> None:
+    connector = make()
+    body = b'{"a": 1}'
+    headers = {"X-Carto-Signature": sign(body), "X-Carto-Timestamp": "\u00b2"}
+    assert not connector.verify_signature(SECRET, body, headers, NOW)

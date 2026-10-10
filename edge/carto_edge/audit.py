@@ -12,15 +12,23 @@ purposes), never values: every string in it passes through
 :func:`carto_common.logging.mask_string` before it is written (spec 2.3 invariant 7), and sizes
 are bounded. Opening the file verifies the existing chain; a broken chain refuses to open so
 tampering never goes unnoticed. Writes are serialized with a lock and fsynced.
+
+Two processes append to the same file: the gateway (reveal, tokenize) and the operator CLI
+(``carto-edge key rotate``, ``secret set``) run inside the same container. Every append therefore
+takes an exclusive operating-system lock on ``audit.ndjson.lock`` and, when the file grew since
+this writer's last append, re-reads the last row's ``seq`` and ``row_hash`` before chaining to
+it, so the chain stays one chain whoever writes.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -56,6 +64,67 @@ HASH_KEY: Final = "row_hash"
 
 class AuditChainError(Exception):
     """The audit file does not verify; the message names the line, never its content."""
+
+
+LOCK_SUFFIX: Final = ".lock"
+_TAIL_CHUNK: Final = 8192
+
+
+@contextlib.contextmanager
+def _exclusive(path: Path) -> Iterator[None]:
+    """An exclusive lock between processes on ``path`` (created when missing)."""
+    with path.open("a+b") as handle:
+        if sys.platform == "win32":
+            import msvcrt  # noqa: PLC0415 - platform specific
+
+            handle.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:  # LK_LOCK gives up after about ten seconds; keep waiting
+                    continue
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl  # noqa: PLC0415 - platform specific
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _tail(path: Path) -> tuple[int, str] | None:
+    """``seq`` and ``row_hash`` of the last row, read from the end of the file."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        data = b""
+        line = b""
+        while position > 0:
+            step = min(_TAIL_CHUNK, position)
+            position -= step
+            handle.seek(position)
+            data = handle.read(step) + data
+            stripped = data.rstrip(b"\n")
+            cut = stripped.rfind(b"\n")
+            if cut >= 0:
+                line = stripped[cut + 1 :]
+                break
+            line = stripped
+    if not line:
+        return None
+    try:
+        row = json.loads(line)
+        return int(row["seq"]), str(row[HASH_KEY])
+    except (ValueError, KeyError, TypeError) as exc:
+        msg = f"the last row of {path} is not an audit row"
+        raise AuditChainError(msg) from exc
 
 
 class AuditRow(BaseModel):
@@ -173,7 +242,7 @@ def verify(path: Path) -> VerifyResult:
 class EdgeAudit:
     """Append rows to the chain. Open verifies the file; ``close`` releases it."""
 
-    __slots__ = ("_handle", "_last_hash", "_lock", "_path", "_seq")
+    __slots__ = ("_handle", "_last_hash", "_lock", "_lock_path", "_path", "_seq", "_size")
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -185,7 +254,9 @@ class EdgeAudit:
         self._last_hash = last_hash
         self._seq = rows
         self._lock = threading.Lock()
+        self._lock_path = path.with_name(path.name + LOCK_SUFFIX)
         self._handle: TextIO = path.open("a", encoding="utf-8", newline="\n")
+        self._size = os.fstat(self._handle.fileno()).st_size
 
     def __repr__(self) -> str:
         return f"EdgeAudit(path={str(self._path)!r}, seq={self._seq})"
@@ -223,7 +294,11 @@ class EdgeAudit:
     ) -> AuditRow:
         """Append one row and return it. ``details`` strings are masked; never pass values."""
         cleaned = _clean_details(details)
-        with self._lock:
+        with self._lock, _exclusive(self._lock_path):
+            if os.fstat(self._handle.fileno()).st_size != self._size:
+                tail = _tail(self._path)  # another process appended since our last row
+                if tail is not None:
+                    self._seq, self._last_hash = tail
             moment = datetime.now(UTC)
             row: dict[str, object] = {
                 "seq": self._seq + 1,
@@ -242,6 +317,7 @@ class EdgeAudit:
             os.fsync(self._handle.fileno())
             self._seq += 1
             self._last_hash = digest
+            self._size = os.fstat(self._handle.fileno()).st_size
         return AuditRow.model_validate({**row, "ts": moment})
 
     @staticmethod

@@ -656,3 +656,26 @@ async def test_a_failing_or_raising_test_keeps_the_source_off(
     assert not result.ok
     assert [check.name for check in result.checks] == ["test_raised:ConnectorError"]
     assert "MARKER" not in repr(logs)
+
+
+def test_a_source_skipped_at_build_time_reports_an_error_in_health(
+    runtime: EdgeRuntime, cursors: CursorStore
+) -> None:
+    """Spec 8.1: the heartbeat must not say "ok, no data" for a source that is never read."""
+    health = SourceHealth()
+    poll = scheduler(
+        runtime,
+        FakeIngestor(),
+        cursors,
+        health=health,
+        connector_factory=lambda _source, _context: _refuse(),
+    )
+    assert not poll.connectors
+    skipped = [
+        source.id
+        for source in runtime.sources.sources
+        if source.enabled and source.type in PULL_SOURCE_TYPES
+    ]
+    assert skipped
+    for source_id in skipped:
+        assert health.status(source_id) is not SourceStatus.OK

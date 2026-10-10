@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Final
 import uvicorn
 
 from carto_common.logging import configure_logging, get_logger
+from carto_edge.audit import AuditChainError
 from carto_edge.config import ConfigError, EdgeSettings, GatewaySettings, load_sources_file
 from carto_edge.gateway.app import create_gateway_app
 from carto_edge.keys import KeyManagementError
@@ -68,6 +69,9 @@ LOG_LEVEL: Final = "info"
 HOUSEKEEPING_SECONDS: Final = 1.0
 THREAD_JOIN_SECONDS: Final = 10.0
 TASK_STOP_SECONDS: Final = 10.0
+
+MAX_HEADER_BYTES: Final = 16 * 1024
+MAX_CONNECTIONS: Final = 256
 
 log = get_logger(component="edge-gateway")
 
@@ -123,6 +127,11 @@ def build_uvicorn_config(
         log_config=None,
         log_level=log_level,
         access_log=False,  # the app logs its own access line without paths or queries
+        # h11 bounds a request line plus headers at 16 KiB; httptools (the "auto" choice when
+        # installed) accepts any size. limit_concurrency answers 503 beyond it (spec 2.3 #8).
+        http="h11",
+        h11_max_incomplete_event_size=MAX_HEADER_BYTES,
+        limit_concurrency=MAX_CONNECTIONS,
         server_header=False,
         proxy_headers=False,
         lifespan="on",
@@ -194,6 +203,9 @@ def run_gateway(settings: EdgeSettings) -> int:
         runtime = build_runtime(settings, sources, mode="gateway")
     except KeyManagementError as exc:
         log.error("gateway.keys_unavailable", error=str(exc))
+        return EXIT_FAILURE
+    except AuditChainError as exc:
+        log.error("gateway.audit_chain_broken", error=str(exc))
         return EXIT_FAILURE
     try:
         return _serve(settings, runtime)
@@ -287,7 +299,14 @@ def _serve(settings: EdgeSettings, runtime: EdgeRuntime) -> int:
                 await scheduler.close()
 
         app = create_gateway_app(
-            settings, runtime, ingestor, reveal, metrics, ready=started.is_set, lifespan=lifespan
+            settings,
+            runtime,
+            ingestor,
+            reveal,
+            metrics,
+            ready=started.is_set,
+            lifespan=lifespan,
+            health=health,
         )
         config = build_uvicorn_config(app, settings.gateway, log_level=LOG_LEVEL)
         for thread in threads:

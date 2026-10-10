@@ -20,6 +20,7 @@ from carto_common.crypto import LocalKms, WrappedKey
 from carto_edge.config import EdgeSettings, KmsSettings
 from carto_edge.connectors.base import SecretResolver
 from carto_edge.secrets import (
+    FAILURE_CACHE_SECONDS,
     MAX_CACHE_SECONDS,
     Credentials,
     EdgeSecretResolver,
@@ -336,3 +337,29 @@ def test_local_store_and_resolver_work_from_other_threads(tmp_path: Path) -> Non
     closer.join()
     assert not errors
     assert results == ["s3cret-value-0123456789"] * 4
+
+
+def test_resolver_caches_failures_briefly(tmp_path: Path, kms: LocalKms) -> None:
+    """A slow or unreachable Vault costs one attempt per reference per window (review)."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(503, json={"errors": []})
+
+    now = [1000.0]
+    resolver = EdgeSecretResolver(
+        vault_settings(tmp_path),
+        kms,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=lambda: now[0],
+    )
+    for _ in range(3):
+        with pytest.raises(SecretError):
+            resolver.resolve("vault://kv/carto/hook")
+    assert len(calls) == 1
+    now[0] += FAILURE_CACHE_SECONDS + 1
+    with pytest.raises(SecretError):
+        resolver.resolve("vault://kv/carto/hook")
+    assert len(calls) == 2
+    resolver.close()

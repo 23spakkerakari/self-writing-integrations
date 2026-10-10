@@ -251,3 +251,12 @@ def test_client_certificate_can_only_be_relaxed_explicitly(pki: Pki) -> None:
         app, _listener(pki, _free_port(), require_client_cert=False, client_ca_file=None)
     )
     assert config.ssl_cert_reqs == ssl.CERT_NONE
+
+
+def test_uvicorn_config_bounds_headers_and_connections(pki: Pki) -> None:
+    settings = CoreSettings(ingest=_listener(pki, _free_port()))
+    app = create_app(settings, FakeWriter(), InMemoryBatchLedger(), InMemorySourceHealthStore())
+    config = build_uvicorn_config(app, settings.ingest)
+    assert config.http == "h11"
+    assert config.h11_max_incomplete_event_size == 16 * 1024
+    assert config.limit_concurrency == 256

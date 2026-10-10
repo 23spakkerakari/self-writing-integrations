@@ -47,6 +47,8 @@ MAX_WEBHOOK_BODY_BYTES: Final = MIB
 """Spec 8.1.6: body size limit 1 MB."""
 
 LOCATOR_DIGEST_LEN: Final = 16
+_HEX_DIGEST_LEN: Final = 64
+_HEX: Final = frozenset("0123456789abcdef")
 _NO_RECORDS: Final[tuple[RawRecord, ...]] = ()
 
 
@@ -80,7 +82,7 @@ def _candidates(header_value: str) -> list[str]:
         if "=" in text:
             _label, _, text = text.partition("=")
         text = text.strip().lower()
-        if text:
+        if len(text) == _HEX_DIGEST_LEN and text.isascii() and all(c in _HEX for c in text):
             found.append(text)
     return found
 
@@ -104,7 +106,7 @@ def verify_hmac_sha256(
         stamp = _header(headers, timestamp_header)
         if stamp is not None:
             stamp = stamp.strip()
-            if not stamp.isdigit() or len(stamp) > 12:
+            if not (stamp.isascii() and stamp.isdigit()) or len(stamp) > 12:
                 return False
             if abs(int(now.timestamp()) - int(stamp)) > window_seconds:
                 return False

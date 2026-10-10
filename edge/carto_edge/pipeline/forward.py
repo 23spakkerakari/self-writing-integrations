@@ -9,11 +9,14 @@
 - :class:`Forwarder` drains the :class:`~carto_edge.pipeline.buffer.DiskBuffer` oldest first:
   ``POST /internal/ingest`` with the stored zstd payload as is (``Content-Encoding: zstd``) and
   ``X-Request-Id`` set to the batch id, so a retried batch is the same request and core's batch
-  ledger acknowledges it as a duplicate (ADR 0015). 2xx acknowledges the row. 400, 403, 413,
-  415 and 422 mean core will never take this batch: the row is parked (kept, counted, out of
-  the queue) so one bad batch cannot stall the source. 429 honours ``Retry-After`` (seconds,
-  capped); 5xx, any other status and transport errors back off exponentially with jitter
-  (:func:`carto_edge.net.retry.backoff_delay`) up to ``retry_max_seconds``, and the row stays.
+  ledger acknowledges it as a duplicate (ADR 0015). 2xx acknowledges the row. 400, 413 and
+  422 mean core will never take this batch: the row is parked (kept, counted, out of the
+  queue) so one bad batch cannot stall the source. 403 (tenant mismatch) and 415 (media type
+  or encoding) are about the deployment, not the batch, so they are retried like a 5xx: parking
+  them would park the whole buffer within seconds, and fixing the configuration would recover
+  nothing. 429 honours ``Retry-After`` (seconds, capped); 5xx, any other status and transport
+  errors back off exponentially with jitter (:func:`carto_edge.net.retry.backoff_delay`) up to
+  ``retry_max_seconds``, and the row stays.
 - :class:`SourceHealth` keeps, per source, ``last_success_at``, ``lag_seconds``, the
   consecutive error count and the records read (spec 8.1 "Health"); the status is ``ok`` after a
   successful read, ``degraded`` after one or two consecutive errors and ``failing`` from three.
@@ -69,7 +72,7 @@ __all__ = [
 
 INGEST_PATH: Final = "/internal/ingest"
 HEARTBEAT_PATH: Final = "/internal/heartbeat"
-PARK_STATUSES: Final = frozenset({400, 403, 413, 415, 422})
+PARK_STATUSES: Final = frozenset({400, 413, 422})
 """Statuses after which core will never accept the batch as sent (spec 12, RFC 7807 problems)."""
 IDLE_WAIT_SECONDS: Final = 0.5
 BACKOFF_BASE_SECONDS: Final = 0.5

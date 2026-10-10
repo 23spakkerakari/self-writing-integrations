@@ -46,8 +46,10 @@ from carto_edge.config import (
     SystemConfig,
 )
 from carto_edge.gateway.app import PROBLEM_CONTENT_TYPE, create_gateway_app
+from carto_edge.gateway.otlp import MAX_WIRE_RECORDS
 from carto_edge.keys import ASSERTION_PUBLIC_KEY_FILE
 from carto_edge.metrics import EdgeMetrics, default_metrics
+from carto_edge.pipeline.forward import SourceHealth
 from carto_edge.pipeline.ingestor import BackpressureState, IngestOutcome
 from carto_edge.pipeline.model import FieldClass, RawRecord
 from carto_edge.pipeline.pii import RegexDetector
@@ -177,6 +179,7 @@ def make_world(
     *,
     reveal_enabled: bool = True,
     ready: Callable[[], bool] | None = None,
+    health: SourceHealth | None = None,
 ) -> World:
     if reveal_enabled:
         (runtime.settings.keys_dir / ASSERTION_PUBLIC_KEY_FILE).write_text(
@@ -186,7 +189,14 @@ def make_world(
     ingestor = FakeIngestor()
     metrics = default_metrics()
     app = create_gateway_app(
-        runtime.settings, runtime, ingestor, reveal, metrics, ready=ready, clock=lambda: NOW
+        runtime.settings,
+        runtime,
+        ingestor,
+        reveal,
+        metrics,
+        ready=ready,
+        clock=lambda: NOW,
+        health=health,
     )
     return World(TestClient(app), ingestor, metrics, runtime)
 
@@ -683,10 +693,32 @@ def test_unknown_routes_are_problems_without_the_path(world: World) -> None:
     assert_problem(world.client.get("/v1/logs"), 405)
 
 
-def test_unhandled_errors_are_500_problems_logged_by_type_only(
+def test_store_failures_are_retryable_503s_logged_by_type_only(
     world: World, logs: io.StringIO
 ) -> None:
+    """The OTLP exporter drops data on a 500 and retries a 503: a failure while storing pushed
+    records must never be a 500 (spec 8.1 at-least-once, 8.5)."""
     world.ingestor.fail = True
+    response = world.client.post(
+        "/v1/logs", content=otlp_body(resource("src_web_log", MARKER)), headers=PROTOBUF
+    )
+    problem = assert_problem(response, 503)
+    assert response.headers["retry-after"]
+    assert problem["instance"] == "/v1/logs"
+    assert MARKER not in response.text
+    output = logs.getvalue()
+    assert "RuntimeError" in output
+    assert MARKER not in output
+    assert world.metrics.get("carto_edge_requests_total", route="/v1/logs", status="503") == 1
+
+
+def test_unhandled_errors_are_500_problems_logged_by_type_only(
+    world: World, logs: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError(f"parser exploded on {MARKER}")
+
+    monkeypatch.setattr("carto_edge.gateway.app.parse_logs_request", explode)
     response = world.client.post(
         "/v1/logs", content=otlp_body(resource("src_web_log", MARKER)), headers=PROTOBUF
     )
@@ -697,6 +729,16 @@ def test_unhandled_errors_are_500_problems_logged_by_type_only(
     assert "RuntimeError" in output
     assert MARKER not in output
     assert world.metrics.get("carto_edge_requests_total", route="/v1/logs", status="500") == 1
+
+
+def test_push_reads_feed_source_health(runtime: EdgeRuntime) -> None:
+    health = SourceHealth()
+    world = make_world(runtime, health=health)
+    body = otlp_body(resource("src_web_log", "GET /cart 200", "GET /cart 201"))
+    assert world.client.post("/v1/logs", content=body, headers=PROTOBUF).status_code == 200
+    state = health.snapshot()["src_web_log"]
+    assert state.records == 2
+    assert state.last_success_at == NOW
 
 
 def test_no_response_or_log_line_carries_request_content(world: World, logs: io.StringIO) -> None:
@@ -718,3 +760,48 @@ def test_no_response_or_log_line_carries_request_content(world: World, logs: io.
         assert response.status_code >= 400
         assert MARKER not in response.text
     assert MARKER not in logs.getvalue()
+
+
+def test_webhook_secrets_shorter_than_16_characters_are_refused(
+    world: World, monkeypatch: pytest.MonkeyPatch, logs: io.StringIO
+) -> None:
+    """An empty or tiny secret would make the HMAC check pass for anyone (review)."""
+
+    def short(self: EdgeSecretResolver, secret_ref: str) -> str:
+        return ""
+
+    monkeypatch.setattr(EdgeSecretResolver, "resolve", short)
+    body = json.dumps({"type": "order.created"}).encode()
+    problem = assert_problem(
+        world.client.post("/webhooks/src_hooks", content=body, headers=signed(body, secret="")),
+        503,
+    )
+    assert "secret" in problem["detail"]
+    assert world.ingestor.calls == 0
+    assert "webhook.secret_too_short" in logs.getvalue()
+
+
+def test_a_non_ascii_signature_is_a_401_not_a_500(world: World) -> None:
+    body = json.dumps({"type": "order.created"}).encode()
+    headers = {**JSON_TYPE, "X-Carto-Signature": "v1=\u00e9"}
+    response = world.client.post(
+        "/webhooks/src_hooks", content=body, headers={k: v.encode() for k, v in headers.items()}
+    )
+    assert_problem(response, 401)
+
+
+def test_otlp_floods_are_refused_before_parsing(world: World) -> None:
+    flood = logs_service_pb2.ExportLogsServiceRequest(
+        resource_logs=[
+            logs_pb2.ResourceLogs(
+                scope_logs=[
+                    logs_pb2.ScopeLogs(
+                        log_records=[logs_pb2.LogRecord() for _ in range(MAX_WIRE_RECORDS + 1)]
+                    )
+                ]
+            )
+        ]
+    ).SerializeToString()
+    response = world.client.post("/v1/logs", content=flood, headers=PROTOBUF)
+    assert_problem(response, 413)
+    assert world.ingestor.calls == 0

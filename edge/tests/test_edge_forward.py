@@ -561,3 +561,24 @@ def test_heartbeater_run_stops_promptly(buffer: DiskBuffer) -> None:
     thread.join(timeout=2.0)
     assert not thread.is_alive()
     assert count == 2  # one round at start, then the 30 s wait was interrupted
+
+
+@pytest.mark.parametrize("status", [403, 415])
+def test_deployment_wide_refusals_are_retried_not_parked(buffer: DiskBuffer, status: int) -> None:
+    """403 (tenant) and 415 (media type) would park every batch in seconds; they back off."""
+    buffer.append(batch())
+    buffer.append(batch())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"title": "refused"})
+
+    metrics = default_metrics()
+    sender = forwarder(buffer, handler, metrics)
+    first = sender.send_once()
+    second = sender.send_once()
+    assert first.failed and second.failed
+    assert not first.parked and not second.parked
+    assert first.retry_after_seconds is not None and first.retry_after_seconds > 0
+    assert buffer.depth() == 2 and buffer.parked() == 0
+    assert metrics.get("carto_edge_send_errors_total") == 2
+    assert status not in PARK_STATUSES

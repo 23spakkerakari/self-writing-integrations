@@ -209,3 +209,19 @@ def test_canonical_json_is_sorted_and_compact() -> None:
     assert canonical_json({"b": 1, "a": {"d": [1, 2], "c": "\u00e9"}}) == (
         '{"a":{"c":"\\u00e9","d":[1,2]},"b":1}'
     )
+
+
+def test_two_writers_on_one_file_keep_one_chain(tmp_path: Path) -> None:
+    """The gateway and the operator CLI append to the same file (review finding)."""
+    path = tmp_path / "audit.ndjson"
+    gateway = EdgeAudit(path)
+    gateway.record("reveal", "user:a", "vault", {"n": 1})
+    cli = EdgeAudit(path)  # opened while the gateway keeps its handle
+    cli.record("key.rotate", "cli:ops", "tenant-key", {"active_version": 2})
+    gateway.record("reveal", "user:a", "vault", {"n": 2})  # must chain to the CLI row
+    cli.record("secret.set", "cli:ops", "local://x", {"bytes": 20})
+    gateway.close()
+    cli.close()
+    assert verify(path) == VerifyResult(ok=True, rows=4, first_bad_line=None)
+    assert [row["seq"] for row in rows_of(path)] == [1, 2, 3, 4]
+    EdgeAudit(path).close()  # and the next start opens it

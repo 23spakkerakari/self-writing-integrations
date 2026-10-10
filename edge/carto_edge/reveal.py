@@ -65,6 +65,9 @@ TOKENIZE_AUDIENCE: Final = "edge-tokenize"
 REVEAL_PERMISSION: Final = "reveal"
 SEARCH_PERMISSION: Final = "search"
 RATE_WINDOW: Final = timedelta(hours=1)
+REJECTION_ROWS_PER_HOUR: Final = 600
+"""Audit rows for rejected calls per hour; the rest are counted in the next row."""
+_REJECTIONS: Final = "*rejections*"
 NONCE_GRACE: Final = timedelta(seconds=30)
 """Matches the clock skew :func:`verify_assertion` allows: a nonce is remembered until its
 assertion could no longer verify."""
@@ -200,8 +203,11 @@ class RevealService:
         "_clock",
         "_lock",
         "_nonces",
+        "_reject_lock",
+        "_rejections",
         "_reveal_window",
         "_settings",
+        "_suppressed",
         "_tokenize_window",
         "_tokenizer",
         "_vault",
@@ -228,6 +234,9 @@ class RevealService:
         self._nonces: dict[str, datetime] = {}
         self._reveal_window = _SlidingWindow()
         self._tokenize_window = _SlidingWindow()
+        self._rejections = _SlidingWindow()
+        self._suppressed = 0
+        self._reject_lock = threading.Lock()
 
     def __repr__(self) -> str:
         enabled = self._verify_key is not None
@@ -248,7 +257,20 @@ class RevealService:
     # -----------------------------------------------------------------------------------------
 
     def _reject(self, action: str, reason: str, subject: str = "", request_id: str = "") -> None:
-        self._audit.record(f"{action}.rejected", subject, action, {"reason": reason}, request_id)
+        """Audit a rejection; beyond :data:`REJECTION_ROWS_PER_HOUR` rows the rest are counted
+        and reported on the next row written, so junk calls cannot fill the state volume."""
+        now = self._clock()
+        # Its own lock: _verify calls this while holding self._lock (nonce replay).
+        with self._reject_lock:
+            if self._rejections.used(_REJECTIONS, now) >= REJECTION_ROWS_PER_HOUR:
+                self._suppressed += 1
+                return
+            self._rejections.add(_REJECTIONS, now, 1)
+            suppressed, self._suppressed = self._suppressed, 0
+        details: dict[str, object] = {"reason": reason}
+        if suppressed:
+            details["suppressed_since_last_row"] = suppressed
+        self._audit.record(f"{action}.rejected", subject, action, details, request_id)
 
     def _verify(
         self, text: str, *, action: str, audience: str, permission: str

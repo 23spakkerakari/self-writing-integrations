@@ -28,16 +28,20 @@ flush seals the partial batch, the current candidate is committed. A source with
 (say every record of a call was dropped by the pipeline) commits its candidate at the end of the
 call. So a record whose event sits in a partial batch never commits its cursor.
 
-A full buffer (:class:`~carto_edge.pipeline.buffer.BufferFullError`) loses the batch: its events
-are counted as dropped with reason ``buffer_full`` and the cursor stays where it was. For a
-source that reports cursors the ingestor then also discards the source's pending events, rolls
-the candidate back to the committed cursor and refuses every further record of that source
-(reason ``buffer_full``) until one ingest call has reported the refusal: a caller that sees
-``buffer_full`` in an :class:`~carto_edge.pipeline.ingestor.IngestOutcome` must stop its read and
-restart from the committed cursor (the poll scheduler does), so no later cursor can be committed
-past the lost events (at-least-once; core dedupes by ``event_id`` and ``batch_id``). Sources
-without cursors (OTLP and webhook pushes) lose only the refused batch; the gateway answers 503
-from :meth:`Ingestor.backpressure` before that happens.
+A batch the buffer refuses is lost from memory: a full buffer
+(:class:`~carto_edge.pipeline.buffer.BufferFullError`, reason ``buffer_full``) or any other
+failure of the append (a full disk, an I/O error, a locked database: ``sqlite3.Error`` or
+``OSError``, reason ``buffer_error``). Its events are counted as dropped and the cursor stays
+where it was. For a pulled source (:data:`PULL_SOURCE_TYPES`; decided by the source type, not by
+whether a record with a cursor was seen yet, because Splunk, SQL and SFTP put the cursor on the
+last record of a window, page or listing) the ingestor then also discards the source's pending
+events, rolls the candidate back to the committed cursor and refuses every further record of
+that source until one ingest call has reported the refusal: a caller that sees a refusal
+(:func:`buffer_refused`) in an :class:`~carto_edge.pipeline.ingestor.IngestOutcome` must stop its
+read and restart from the committed cursor (the poll scheduler does), so no later cursor can be
+committed past the lost events (at-least-once; core dedupes by ``event_id`` and ``batch_id``).
+Pushed sources (OTLP and webhooks) lose only the refused batch, and the gateway answers 503 so
+the sender keeps it and retries.
 
 Records whose source the sources file does not know are dropped by the pipeline with reason
 ``unknown_source`` and never reach an accumulator; their metrics carry the label
@@ -47,6 +51,7 @@ lines carry source ids, batch ids, counts and reasons only (spec 2.3 invariant 7
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -56,7 +61,7 @@ from typing import Final, Literal
 
 from carto_common.ids import new_ulid
 from carto_common.logging import get_logger
-from carto_edge.config import MIB, CoreLinkSettings
+from carto_edge.config import MIB, CoreLinkSettings, SourceType
 from carto_edge.connectors.base import Cursor
 from carto_edge.metrics import EdgeMetrics
 from carto_edge.pipeline.buffer import BufferFullError, DiskBuffer
@@ -68,12 +73,16 @@ from carto_schema.event import SCHEMA_VERSION, CanonicalEvent
 from carto_schema.ingest import MAX_EVENTS_PER_BATCH, IngestBatch
 
 __all__ = [
+    "BUFFER_REFUSALS",
     "DEFAULT_MAX_BYTES",
     "ENVELOPE_BYTES",
+    "PULL_SOURCE_TYPES",
+    "REASON_BUFFER_ERROR",
     "REASON_BUFFER_FULL",
     "UNKNOWN_SOURCE_LABEL",
     "BatchAccumulator",
     "Ingestor",
+    "buffer_refused",
 ]
 
 ENVELOPE_BYTES: Final = 512
@@ -81,6 +90,19 @@ ENVELOPE_BYTES: Final = 512
 ``source_id`` (at most 64 characters each), ``batch_id``, ``sent_at`` and the brackets."""
 DEFAULT_MAX_BYTES: Final = 5 * MIB
 REASON_BUFFER_FULL: Final = "buffer_full"
+REASON_BUFFER_ERROR: Final = "buffer_error"
+BUFFER_REFUSALS: Final = frozenset({REASON_BUFFER_FULL, REASON_BUFFER_ERROR})
+PULL_SOURCE_TYPES: Final = frozenset(
+    {SourceType.UPLOAD, SourceType.SPLUNK, SourceType.SQL, SourceType.SFTP}
+)
+"""Sources the edge reads with a cursor; a refused batch makes them re-read."""
+
+
+def buffer_refused(outcome: IngestOutcome) -> int:
+    """Events of ``outcome`` the disk buffer refused (full, or failed to write)."""
+    return sum(outcome.dropped.get(reason, 0) for reason in BUFFER_REFUSALS)
+
+
 UNKNOWN_SOURCE_LABEL: Final = "unknown"
 _BACKPRESSURE_GAUGE: Final = {
     BackpressureState.OK: 0,
@@ -283,7 +305,7 @@ class Ingestor:
             for source_id in reported:
                 self._states[source_id].lost = False
             self._commit_idle()
-            if outcome.batches_sealed or outcome.dropped.get(REASON_BUFFER_FULL):
+            if outcome.batches_sealed or buffer_refused(outcome):
                 self._refresh_buffer_gauges()
         self._publish(tally)
         if outcome.vault_entries:
@@ -331,6 +353,8 @@ class Ingestor:
                     clock=self._clock,
                 )
             )
+            source = self._runtime.pipeline.source(source_id)
+            state.uses_cursor = source is not None and source.type in PULL_SOURCE_TYPES
             self._states[source_id] = state
         return state
 
@@ -387,12 +411,14 @@ class Ingestor:
         outcome: IngestOutcome | None,
         tally: _Tally,
     ) -> Stored:
-        """Append ``batch``, then commit ``commit``. On a full buffer, count the loss and, for
-        a source with cursors, discard what is pending and refuse the source until reported."""
+        """Append ``batch``, then commit ``commit``. When the buffer refuses it (full, or the
+        write failed), count the loss and, for a pulled source, discard what is pending and refuse
+        the source until reported, so its cursor can never move past the lost events."""
         source_id = state.accumulator.source_id
         try:
             self._buffer.append(batch, source_id)
-        except BufferFullError:
+        except (BufferFullError, sqlite3.Error, OSError) as exc:
+            reason = REASON_BUFFER_FULL if isinstance(exc, BufferFullError) else REASON_BUFFER_ERROR
             lost = len(batch.events)
             if state.uses_cursor:
                 discarded = state.accumulator.seal()
@@ -400,14 +426,16 @@ class Ingestor:
                 state.candidate = state.committed
                 state.lost = True
             if outcome is not None:
-                outcome.dropped[REASON_BUFFER_FULL] += lost
-            tally.dropped[source_id, REASON_BUFFER_FULL] += lost
+                outcome.dropped[reason] += lost
+            tally.dropped[source_id, reason] += lost
             log.warning(
-                "batch.buffer_full",
+                "batch.refused",
+                reason=reason,
                 source_id=source_id,
                 batch_id=batch.batch_id,
                 events=lost,
                 rereads=state.uses_cursor,
+                error=type(exc).__name__,
             )
             return "reread" if state.uses_cursor else "refused"
         if outcome is not None:

@@ -84,6 +84,11 @@ def build_uvicorn_config(
         log_config=None,
         log_level=log_level,
         access_log=True,
+        # h11 bounds a request line plus headers at 16 KiB; httptools (the "auto" choice when
+        # installed) accepts any size (spec 2.3 invariant 8).
+        http="h11",
+        h11_max_incomplete_event_size=16 * 1024,
+        limit_concurrency=256,
         server_header=False,
         proxy_headers=False,
         lifespan="off",
