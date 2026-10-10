@@ -334,7 +334,7 @@ class EdgeSecretResolver:
         else:  # pragma: no cover - validate_secret_ref admits only the schemes above
             msg = f"unsupported secret_ref scheme {scheme!r}"
             raise SecretError(msg)
-        logger.debug("resolved secret_ref scheme=%s", scheme)
+        logger.debug("reference resolved, scheme=%s", scheme)
         return value
 
     def _resolve_local(self, name: str) -> str:

@@ -7,8 +7,9 @@ check-runs API and the pull request view without downloading the job log.
 
 Messages are escaped as workflow commands require (``%``, CR, LF) and cut at 4,000 characters.
 The data CI produces is synthetic (simulator output, test fixtures) and the product's own logs
-are redacted, so the tail of a step's output is safe to show. Standard library only; always
-exits 0 so it never hides the step's own failure.
+are redacted, so the tail of a step's output is safe to show. Standard library only, except
+the ``junit`` mode, which parses with ``defusedxml`` and so runs under ``uv run`` in the jobs
+that have the workspace installed. Always exits 0 so it never hides the step's own failure.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import xml.etree.ElementTree as ET  # nosec B405 - parses pytest's own JUnit report only
 from pathlib import Path
 
 MAX_MESSAGE = 4000
@@ -45,7 +45,9 @@ def junit(path: Path) -> None:
     if not path.is_file():
         _emit(f"{path} was not written (collection error?)", title="pytest")
         return
-    root = ET.parse(path).getroot()  # noqa: S314  # nosec B314 - our own report
+    from defusedxml.ElementTree import parse  # noqa: PLC0415 - only the junit mode needs it
+
+    root = parse(path).getroot()
     emitted = 0
     for case in root.iter("testcase"):
         for kind in ("failure", "error"):

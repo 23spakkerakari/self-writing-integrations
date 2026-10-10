@@ -5,6 +5,7 @@ connector's START TRANSACTION READ ONLY session is refused. Skipped when Docker 
 from __future__ import annotations
 
 import socket
+import ssl
 import warnings
 from collections.abc import Iterator
 from datetime import datetime
@@ -110,6 +111,17 @@ def mysql() -> Iterator[dict[str, Any]]:
                 cursor.execute("GRANT SELECT, INSERT ON wms.purchase_orders TO 'carto_rw'@'%'")
         finally:
             root.close()
+        # caching_sha2_password (the MySQL 8.4 default) needs one full authentication per login
+        # before the fast path works over plain TCP, and PyMySQL fails that exchange without
+        # TLS. One TLS login per test user fills the server's cache. The connector itself uses
+        # TLS by default; these tests turn it off only to avoid certificate setup.
+        tls = ssl.create_default_context()
+        tls.check_hostname = False
+        tls.verify_mode = ssl.CERT_NONE
+        for user, secret in (("carto_ro", RO_PASSWORD), ("carto_rw", RW_PASSWORD)):
+            pymysql.connect(
+                host=host, port=port, user=user, password=secret, database="wms", ssl=tls
+            ).close()
         yield {"host": host, "port": port}
     finally:
         with warnings.catch_warnings():

@@ -60,7 +60,9 @@ def postgres() -> Iterator[dict[str, Any]]:
         container = PostgresContainer(
             "postgres:16-alpine",
             username="admin",
-            password="admin-pw",  # noqa: S106 dbname="wms", driver=None
+            password="admin-pw",  # noqa: S106
+            dbname="wms",
+            driver=None,
         )
         try:
             container.start()
@@ -75,7 +77,9 @@ def postgres() -> Iterator[dict[str, Any]]:
             host=host,
             port=port,
             user="admin",
-            password="admin-pw",  # noqa: S106 dbname="wms", autocommit=True
+            password="admin-pw",  # noqa: S106
+            dbname="wms",
+            autocommit=True,
         ) as admin:
             admin.execute(
                 "CREATE TABLE purchase_orders (id serial PRIMARY KEY, po_num text, order_ref text, "

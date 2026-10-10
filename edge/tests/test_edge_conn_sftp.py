@@ -429,7 +429,7 @@ def test_remote_needs_a_secret_ref() -> None:
 
 async def test_local_directory_variant(outbound: Path) -> None:
     connector = local_source(
-        {"url": f"local:///{outbound.as_posix()}", "filename_patterns": ["SHIP_*.csv"]}
+        {"url": f"local:///{outbound.as_posix().lstrip('/')}", "filename_patterns": ["SHIP_*.csv"]}
     )
     records = await collect(connector)
     assert [r.locator for r in records] == [
@@ -455,7 +455,7 @@ async def test_local_directories_form_and_symlinks_skipped(outbound: Path) -> No
     except (OSError, NotImplementedError):
         pytest.skip("symlinks need privileges on this platform")
     assert stat.S_ISLNK(os.lstat(link).st_mode)
-    connector = local_source({"directories": [f"local:///{outbound.as_posix()}"]})
+    connector = local_source({"directories": [f"local:///{outbound.as_posix().lstrip('/')}"]})
     records = await collect(connector)
     assert all("99999999" not in r.locator for r in records)
 

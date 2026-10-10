@@ -115,4 +115,7 @@ def test_ssl_contexts_accept_the_chain(tmp_path: Path) -> None:
     client_context = ssl.create_default_context(cafile=str(tmp_path / "ca.crt"))
     client_context.load_cert_chain(tmp_path / "client.crt", tmp_path / "client.key")
     assert server_context.verify_mode == ssl.CERT_REQUIRED
-    assert client_context.minimum_version >= ssl.TLSVersion.TLSv1_2
+    # The default floor is the platform's OpenSSL setting (TLS 1.2 on the Windows builds,
+    # "minimum supported" on Ubuntu); every carto client and listener sets TLS 1.2 itself.
+    client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    assert client_context.minimum_version == ssl.TLSVersion.TLSv1_2

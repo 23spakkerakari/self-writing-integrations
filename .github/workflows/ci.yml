@@ -44,7 +44,7 @@ jobs:
           --junitxml=pytest-report.xml
       - name: Annotate test failures
         if: failure()
-        run: python3 tools/ci/annotate.py junit pytest-report.xml
+        run: uv run python tools/ci/annotate.py junit pytest-report.xml
       - name: JSON Schema drift check
         run: uv run carto-schema check --dir packages/carto-schema/schemas
       - name: Simulator scenario A (14 days)
@@ -87,7 +87,7 @@ jobs:
         run: uv run pytest -m integration -q --junitxml=integration-report.xml
       - name: Annotate integration test failures
         if: failure()
-        run: python3 tools/ci/annotate.py junit integration-report.xml
+        run: uv run python tools/ci/annotate.py junit integration-report.xml
       - name: Offline analyzer over scenario A
         run: make analyze SCENARIO=shop 2>&1 | tee analyze.log
       - name: Leak test (spec 18.3)
@@ -240,6 +240,10 @@ jobs:
           tail -n 400 compose.log
           python3 tools/ci/annotate.py tail compose-ps.txt --title "compose ps -a" --lines 40
           python3 tools/ci/annotate.py tail compose.log --title "compose logs (tail)" --lines 150
+          for svc in volumes-init pki-init key-init migrate ingest-api edge-gateway otel-collector clickhouse; do
+            $COMPOSE logs --no-color --no-log-prefix --tail 40 "$svc" > "svc-$svc.log" 2>&1 || true
+            python3 tools/ci/annotate.py tail "svc-$svc.log" --title "logs: $svc" --lines 40
+          done
       - name: Tear down
         if: always()
         run: $COMPOSE --profile dev down -v --remove-orphans
