@@ -1,8 +1,9 @@
 # carto simulator
 
-Deterministic multi-system synthetic data with ground truth (spec Section 19). M0 ships scenario A
+Deterministic multi-system synthetic data with ground truth (spec Section 19). M0 shipped scenario A
 ("shop") in batch mode: native-format files per system plus `ground_truth/` for the eval harness
-(Section 18.4). Nothing here is real customer data (spec 0.1 item 7).
+(Section 18.4). M1 added live mode, which replays a batch run into a directory in real time for
+the Compose dev stack. Nothing here is real customer data (spec 0.1 item 7).
 
 ## Run it
 
@@ -32,6 +33,33 @@ refused (`ValueError` from `generate`, exit 2 from the CLI) so a mistyped `--out
 checkout.
 The default run (14 days, 800 orders per weekday, about 115,000 records, 51 MB) takes 6 to 11 s
 on a laptop and well under 1 GB of memory in pure Python.
+
+## Live mode
+
+```sh
+uv run carto-sim live --scenario shop --days 2 --speed 60 --out /data/sim [--duration-seconds 3600]
+```
+
+`carto-sim live` generates the requested run once, in batch mode into a temporary directory, then
+replays it into `--out`: every timestamp is shifted by one constant so that the first record lands
+at the moment the command starts, and later records follow at `--speed` simulated seconds per
+real second (the default, 60, plays a simulated minute per real second, so two days take about
+48 minutes). Lines are appended to the same per-day file names batch mode uses and flushed after
+every record, so a tailing collector (`otel/collector.dev.yaml`) sees them promptly. `SHIP_*.csv`
+drops land at their arrival instant with the mtime set to it. The warehouse rows are streamed into
+`warehouse/purchase_orders.ndjson`, one JSON object per row at its creation instant, because the
+M1 Compose stack has no source database; `warehouse/purchase_orders.sql` is written whole up front
+with the shifted timestamps and the CSV exports are not written in live mode.
+
+`ground_truth/` is written before the replay starts and describes the complete run with the
+shifted times, so an interrupted replay (Ctrl-C, SIGTERM or `--duration-seconds`) leaves a valid
+directory whose manifest counts the whole run and whose `sha256` entries are those of the fully
+replayed files. Locator keys, counts, links, batches and markers are those of the batch run. The
+generated `README.md` gains a "Live replay" section with the shift and the exact
+`carto-eval run` command for scoring the directory. Only scenario A supports live mode in M1.
+
+`make dev` runs the `simulator` Compose service with these arguments into the `sim-data` volume
+(`deploy/compose/compose.yaml`).
 
 ## Output layout
 
@@ -235,6 +263,10 @@ error naming `tzdata` if the zone cannot be loaded.
 
 `uv run pytest simulator/tests` (file prefix `test_sim_`). The suite checks formats with
 independent parsers (json, a logfmt regex, `xml.etree`, sqlite3), the faults day by day, that every
-locator key resolves, the leak-test markers, determinism, the CLI and the request contract. The
-statistical test (14 days by 200 orders, clerk share 0.30 +/- 0.08, typo share 0.02 +/- 0.02) is
-marked `slow`.
+locator key resolves, the leak-test markers, determinism, the CLI and the request contract. Live
+mode is checked with a replay that never sleeps (`test_sim_live.py`): shifted timestamps in every
+format, file mtimes, the row stream, the SQL seed, the shifted ground truth and the early-stop
+paths; `test_sim_analyze_config.py` checks that `simulator/analyze.shop.yaml`,
+`deploy/compose/sources.dev.yaml` and `otel/collector.dev.yaml` name exactly the sources and
+systems the ground truth declares and match the generated file layout. The statistical test (14
+days by 200 orders, clerk share 0.30 +/- 0.08, typo share 0.02 +/- 0.02) is marked `slow`.
