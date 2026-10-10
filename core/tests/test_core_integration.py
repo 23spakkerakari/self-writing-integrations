@@ -450,17 +450,20 @@ def test_scenario_a_bundle_from_the_analyzer_loads_into_core(
 
     event_ids = [event.event_id for event in iter_events(verified)]
     assert len(event_ids) == expected
-    assert _count(client, "events", event_ids) == expected
+    # Thousands of ids exceed ClickHouse's HTTP parameter limit: query in chunks.
+    chunks = [event_ids[i : i + 500] for i in range(0, len(event_ids), 500)]
+    assert sum(_count(client, "events", chunk) for chunk in chunks) == expected
     rows = tmp_path / "rows.ndjson"
     with rows.open("wb") as handle:
         for table in ("events", "event_identifiers"):
-            handle.write(
-                client.raw_query(
-                    "SELECT * FROM {table:Identifier} WHERE event_id IN {ids:Array(String)} "
-                    "FORMAT JSONEachRow",
-                    parameters={"table": table, "ids": event_ids},
+            for chunk in chunks:
+                handle.write(
+                    client.raw_query(
+                        "SELECT * FROM {table:Identifier} WHERE event_id IN {ids:Array(String)} "
+                        "FORMAT JSONEachRow",
+                        parameters={"table": table, "ids": chunk},
+                    )
                 )
-            )
 
     leak_scan = _leak_scan_module()
     markers = leak_scan.Markers(
