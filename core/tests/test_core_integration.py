@@ -1,16 +1,21 @@
 """Container-backed checks (spec 18.2): migrations apply idempotently to a real ClickHouse and
 PostgreSQL, a retention change rewrites the TTLs, a batch posted to the app lands as rows in
 ``events`` and ``event_identifiers`` with its ledger row, a duplicate is skipped, a heartbeat
-upserts, and a bundle loads idempotently. Skipped when Docker is unreachable."""
+upserts, a bundle loads idempotently, and a bundle the offline analyzer builds from scenario A
+loads into core with no marker in the stored rows (spec 21, M1 acceptance; spec 18.3). Skipped
+when Docker is unreachable."""
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import json
 import os
 import warnings
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import docker  # type: ignore[import-untyped]
 import pytest
@@ -24,7 +29,7 @@ from testcontainers.core.config import testcontainers_config
 from carto_common.crypto import SigningKey, b64url_encode
 from carto_common.ids import derive_ulid, new_ulid
 from carto_common.settings import RetentionSettings
-from carto_core.bundle import LoadResult, load_bundle, verify_bundle
+from carto_core.bundle import LoadResult, iter_events, load_bundle, verify_bundle
 from carto_core.db.clickhouse import ClickHouseWriter, create_client
 from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.app import create_app
@@ -36,6 +41,7 @@ from carto_core.migrations import (
     apply_retention,
 )
 from carto_core.settings import ClickHouseSettings, CoreSettings, PostgresSettings
+from carto_edge.cli.analyze import analyze
 from carto_schema.bundle import (
     DATA_FILES,
     EVENTS_FILE,
@@ -52,6 +58,7 @@ from carto_schema.bundle import (
 )
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
+from carto_simulator.api import GenerationRequest, generate
 
 with warnings.catch_warnings():
     # starlette 1.7 deprecates httpx (vs httpx2) under its TestClient at import time.
@@ -69,6 +76,7 @@ DB_NAME = "carto_test"
 JSON = {"content-type": "application/json"}
 BUNDLE_ID = "01K71Y5B2XQ0M4N8P3R6S9T1VX"
 BASE_MS = 1_790_000_000_000
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _docker_available() -> bool:
@@ -407,3 +415,57 @@ def test_bundle_loads_into_clickhouse_idempotently(
             {"source_id": f"bundle_{BUNDLE_ID.lower()}"},
         ).scalar_one()
     assert chunks == 3
+
+
+def _leak_scan_module() -> Any:
+    """``tools/ci/leak_scan.py``, the scanner CI runs over the Compose stack's rows."""
+    spec = importlib.util.spec_from_file_location(
+        "leak_scan", ROOT / "tools" / "ci" / "leak_scan.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_scenario_a_bundle_from_the_analyzer_loads_into_core(
+    migrated: tuple[Client, sqlalchemy.Engine], tmp_path: Path
+) -> None:
+    client, engine = migrated
+    sim = tmp_path / "shop"
+    generate(GenerationRequest(days=2, daily_volume=20, seed=11), sim)
+    out = tmp_path / "shop.carto"
+    result = analyze(
+        ROOT / "simulator" / "analyze.shop.yaml", sim, out, state_dir=tmp_path / "state"
+    )
+    expected = result.manifest.counts.events
+    assert expected > 0
+    verified = verify_bundle(out)
+    writer, ledger = ClickHouseWriter(client), PostgresBatchLedger(engine)
+    loaded = load_bundle(verified, writer, ledger)
+    assert loaded.events_written == expected
+    assert loaded.duplicates == 0
+    again = load_bundle(verified, writer, ledger)
+    assert again == LoadResult(0, loaded.chunks, loaded.chunks)
+
+    event_ids = [event.event_id for event in iter_events(verified)]
+    assert len(event_ids) == expected
+    assert _count(client, "events", event_ids) == expected
+    rows = tmp_path / "rows.ndjson"
+    with rows.open("wb") as handle:
+        for table in ("events", "event_identifiers"):
+            handle.write(
+                client.raw_query(
+                    "SELECT * FROM {table:Identifier} WHERE event_id IN {ids:Array(String)} "
+                    "FORMAT JSONEachRow",
+                    parameters={"table": table, "ids": event_ids},
+                )
+            )
+
+    leak_scan = _leak_scan_module()
+    markers = leak_scan.Markers(
+        json.loads((sim / "ground_truth" / "markers.json").read_text(encoding="utf-8"))
+    )
+    assert len(markers) > 0
+    hits = leak_scan.scan_rows(rows, markers)
+    assert not hits, f"markers in the ClickHouse rows: {dict(hits)}"
