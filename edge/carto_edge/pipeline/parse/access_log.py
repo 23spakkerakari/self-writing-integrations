@@ -146,7 +146,8 @@ class AccessLogParser:
         return AccessLogRecord(fields=fields, template=_template(fields))
 
     def _parse_custom(self, line: str) -> AccessLogRecord | None:
-        assert self._custom is not None  # noqa: S101 - established by the constructor
+        if self._custom is None:  # established by the constructor
+            return None
         try:
             match = self._custom.search(line)
         except (re2.error, UnicodeError, ValueError, TypeError):

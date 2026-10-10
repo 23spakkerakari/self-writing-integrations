@@ -449,7 +449,9 @@ class TemplateStore:
             self.flush()
 
     def _path(self, system_id: str) -> Path:
-        assert self._directory is not None  # noqa: S101 - callers check
+        if self._directory is None:  # callers check
+            msg = "the template store has no directory"
+            raise RuntimeError(msg)
         return self._directory / f"{system_id}.json"
 
     def _write(self, system_id: str, state: _SystemState) -> None:

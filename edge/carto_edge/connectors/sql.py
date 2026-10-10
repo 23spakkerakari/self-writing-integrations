@@ -192,16 +192,22 @@ def _dbapi_connect(dialect: str, plan: ConnectionPlan) -> Any:
     if dialect == "postgresql":
         import psycopg  # noqa: PLC0415 - driver imports stay lazy
 
-        assert isinstance(plan, dict)  # noqa: S101
+        if not isinstance(plan, dict):
+            msg = "internal: the PostgreSQL connection plan must be keyword arguments"
+            raise TypeError(msg)
         return psycopg.connect(**plan)
     if dialect == "mysql":
         import pymysql  # noqa: PLC0415
 
-        assert isinstance(plan, dict)  # noqa: S101
+        if not isinstance(plan, dict):
+            msg = "internal: the MySQL connection plan must be keyword arguments"
+            raise TypeError(msg)
         return pymysql.connect(**plan)
     import pyodbc  # noqa: PLC0415
 
-    assert isinstance(plan, str)  # noqa: S101
+    if not isinstance(plan, str):
+        msg = "internal: the SQL Server connection plan must be a connection string"
+        raise TypeError(msg)
     return pyodbc.connect(plan)
 
 

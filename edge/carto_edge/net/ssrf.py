@@ -164,7 +164,9 @@ class DefaultNetworkPolicy:
             self._check(host, parsed)
             if pinned is None:
                 pinned = _pin_text(parsed)
-        assert pinned is not None  # noqa: S101 - addresses is non-empty and every one passed
+        if pinned is None:  # unreachable: addresses is non-empty and every one passed
+            msg = f"host {host!r} resolved to no usable address"
+            raise SsrfError(msg)
         return ResolvedHost(host=host, address=pinned, port=port)
 
     def _check(self, host: str, address: IPAddress) -> None:

@@ -147,7 +147,7 @@ class FieldClass(StrEnum):
     FINANCIAL = "financial"
     HEALTH = "health"
     FREE_TEXT = "free_text"
-    SECRET_LIKE = "secret_like"  # noqa: S105 - a class name, not a credential
+    SECRET_LIKE = "secret_like"  # noqa: S105  # nosec B105 - a class name, not a credential
     UNKNOWN = "unknown"
 
 

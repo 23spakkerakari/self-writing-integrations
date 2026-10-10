@@ -231,8 +231,9 @@ class SftpConnector:
         return options
 
     async def _list_remote(self) -> Snapshot:
-        assert self.config.host is not None  # noqa: S101 - validated by the config model
-        assert self.config.host_key_sha256 is not None  # noqa: S101
+        if self.config.host is None or self.config.host_key_sha256 is None:
+            msg = "a remote source needs host and host_key_sha256"  # the config model enforces it
+            raise RuntimeError(msg)
         resolved = self.context.network.resolve(self.config.host, self.config.port)
         expected = self.config.host_key_sha256
         try:

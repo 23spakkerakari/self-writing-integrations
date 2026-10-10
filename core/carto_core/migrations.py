@@ -148,7 +148,7 @@ def render(migration: Migration, retention: RetentionSettings) -> str:
 
 
 def _applied(client: ClickHouseClientLike) -> dict[str, str]:
-    query = f"SELECT name, checksum FROM {MIGRATION_TABLE} ORDER BY name"  # noqa: S608 - constant
+    query = f"SELECT name, checksum FROM {MIGRATION_TABLE} ORDER BY name"  # noqa: S608  # nosec B608 - constant table name
     result = client.query(query)
     return {str(name): str(checksum) for name, checksum in result.result_rows}
 

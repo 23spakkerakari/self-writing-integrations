@@ -147,7 +147,7 @@ class RevealVault:
                 placeholders = ",".join("?" * len(chunk))
                 found.extend(
                     self._conn.execute(
-                        f"SELECT token, ciphertext FROM vault "  # noqa: S608 - placeholders only
+                        f"SELECT token, ciphertext FROM vault "  # noqa: S608  # nosec B608 - placeholders only
                         f"WHERE expires_at > ? AND token IN ({placeholders})",
                         (cutoff, *chunk),
                     ).fetchall()
@@ -175,7 +175,7 @@ class RevealVault:
                 for chunk in _chunks(wanted):
                     placeholders = ",".join("?" * len(chunk))
                     cursor = self._conn.execute(
-                        f"DELETE FROM vault WHERE token IN ({placeholders})",  # noqa: S608
+                        f"DELETE FROM vault WHERE token IN ({placeholders})",  # noqa: S608  # nosec B608
                         tuple(chunk),
                     )
                     deleted += max(cursor.rowcount, 0)

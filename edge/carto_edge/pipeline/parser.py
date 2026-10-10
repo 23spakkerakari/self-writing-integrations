@@ -138,7 +138,8 @@ class RecordParser:
     # -- records that arrive as fields --------------------------------------------------------
 
     def _parse_fields(self, raw: RawRecord) -> ParsedRecord | ParseFailure:
-        assert raw.fields is not None  # noqa: S101 - checked by the caller
+        if raw.fields is None:  # checked by the caller
+            return ParseFailure(REASON_EMPTY)
         flat = flatten(raw.fields)
         fields = flat.fields
         message = raw.text.strip() if raw.text and raw.text.strip() else None
