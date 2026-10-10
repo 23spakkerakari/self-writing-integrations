@@ -1,0 +1,164 @@
+# simulator/analyze.shop.yaml: offline analyzer configuration for simulator scenario A ("shop").
+#
+# The worked example of docs/install/offline-analyzer.md (spec 4.1, 8.1.1). Every source is an
+# `upload` source whose paths are globs relative to `--input`, the simulator's output directory:
+#
+#   carto-edge analyze --config simulator/analyze.shop.yaml --input sim-out/shop \
+#       --out sim-out/shop.carto --state-dir sim-out/shop.edge-state --locator-map
+#
+# Point it at the per-system directories only. ground_truth/ holds the synthetic PII and the
+# transaction mapping in clear and is never an input (simulator/README.md). Source and system
+# ids equal ground_truth/sources.json so the eval harness can resolve the locator map (ADR 0006).
+#
+# Parse hints follow simulator/README.md: ISO 8601 UTC in the webstore, order and shipping logs,
+# ISO 8601 with an offset in the payment messages, and naive America/New_York time in the two
+# warehouse sources (which also run 90 s fast; clock skew is a property of the source and is
+# left as it is). Credentials do not exist here: local files are read, nothing is written.
+
+systems:
+  - id: sys_webstore
+    name: Webstore
+    owner_group: Digital Commerce
+    criticality: high
+  - id: sys_orders
+    name: Order system
+    owner_group: Commerce Platform
+    criticality: high
+  - id: sys_payments
+    name: Payments
+    owner_group: Payments Engineering
+    criticality: high
+  - id: sys_warehouse
+    name: Warehouse
+    owner_group: WMS Support
+    criticality: high
+  - id: sys_shipping
+    name: Shipping
+    owner_group: Logistics IT
+    criticality: high
+
+sources:
+  # Webstore application log: one JSON object per line, one file per UTC day.
+  - id: src_webstore_log
+    system: sys_webstore
+    type: upload
+    config:
+      kind: log
+      paths: ["webstore/app-*.ndjson"]
+    parse:
+      format: ndjson
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+  # Order service log: logfmt, one file per UTC day. Carries the cart_id ~ order_id and
+  # order_id ~ merchant_ref bridges (spec 19).
+  - id: src_orders_log
+    system: sys_orders
+    type: upload
+    config:
+      kind: log
+      paths: ["orders/order-svc-*.log"]
+    parse:
+      format: logfmt
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+  # Payment processor messages: one complete XML document per line, one file per local day.
+  # The timestamp carries its own offset; the timezone applies only to timestamps without one.
+  - id: src_payments_xml
+    system: sys_payments
+    type: upload
+    config:
+      kind: log
+      paths: ["payments/messages-*.xml"]
+    parse:
+      format: xml
+      timestamp_field: timestamp
+      timestamp_format: iso8601
+      timezone: UTC
+
+  # Warehouse purchase_orders table, exported as CSV with a header row. purchase_orders.csv
+  # holds the rows created before the day-12 column rename (po_num) and
+  # purchase_orders.renamed.csv the rows from then on (po_number); a pilot exports its table
+  # the same way (one CSV per table, primary key column included). Rows are `row_change`
+  # events keyed by the primary key, timestamped by updated_at, with created_by as the actor
+  # (clerk or service account: the manual-hop signal of spec 11.1).
+  - id: src_wms_db
+    system: sys_warehouse
+    type: upload
+    config:
+      kind: rows
+      paths: ["warehouse/purchase_orders*.csv"]
+      table: purchase_orders
+      primary_key: id
+      timestamp_column: updated_at
+      actor_column: created_by
+    parse:
+      format: csv
+      timestamp_field: updated_at
+      timestamp_format: "%Y-%m-%d %H:%M:%S"
+      timezone: America/New_York
+      actor_field: created_by
+
+  # Warehouse export job log: unstructured lines (template mining), naive local time.
+  - id: src_wms_export_log
+    system: sys_warehouse
+    type: upload
+    config:
+      kind: log
+      paths: ["warehouse/export-job-*.log"]
+    parse:
+      format: text
+      timestamp_format: "%Y-%m-%d %H:%M:%S"
+      timezone: America/New_York
+
+  # Nightly SHIP_YYYYMMDD_HHMM.csv drops. `kind: files` emits one file_arrived event per file
+  # from its name, size and mtime; the contents are never read (spec 8.1.5).
+  - id: src_ship_sftp
+    system: sys_shipping
+    type: upload
+    config:
+      kind: files
+      paths: ["shipping/outbound/SHIP_*.csv"]
+
+  # Shipping application log: logfmt, one file per UTC day; shipment_no with po_num, the
+  # SHIP file name and the carrier manifest id (two batch keys, spec 9.7).
+  - id: src_ship_log
+    system: sys_shipping
+    type: upload
+    config:
+      kind: log
+      paths: ["shipping/shipping-app-*.log"]
+    parse:
+      format: logfmt
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+# Admin pins (spec 8.3). Names are PII and are tokenized whatever the classifier says; the
+# pins add the phonetic form (spec 8.4 `phonetic.k`) so that the composite link L06 of the
+# ground truth (payments cardholderName ~ warehouse customer_name, keyed by clerks with typos,
+# spec 9.5) can be found by the linker in M2 without any name leaving the edge in clear.
+field_policies:
+  - field: sys_warehouse/*/customer_name
+    field_class: person_name
+    policy: tokenize
+    forms: ["phonetic"]
+    reason: "L06 composite link: clerks key the cardholder name into the PO; phonetic forms survive their typos"
+  - field: sys_payments/*/cardholderName
+    field_class: person_name
+    policy: tokenize
+    forms: ["phonetic"]
+    reason: "L06 composite link: the name on the payment is what the clerk reads from the confirmation"
+
+# The analyzer opens no network connection; no private range needs to be allowed.
+network:
+  allowed_source_cidrs: []

@@ -327,7 +327,16 @@ class CoreLinkSettings(_Frozen):
     timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     batch_events: int = Field(default=5000, ge=1, le=5000)
     batch_bytes: int = Field(default=5 * MIB, ge=64 * 1024, le=5 * MIB)
+    batch_flush_seconds: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=60,
+        description="Oldest event age at which a partial batch is sealed and buffered.",
+    )
     heartbeat_seconds: float = Field(default=30.0, ge=5, le=3600)
+    retry_max_seconds: float = Field(
+        default=60.0, ge=1, le=3600, description="Cap of the forwarder's exponential backoff."
+    )
 
     @field_validator("url")
     @classmethod
@@ -407,6 +416,13 @@ class GatewaySettings(_Frozen):
     otlp_max_body_bytes: int = Field(default=4 * MIB, ge=64 * 1024, le=64 * MIB)
     webhook_max_body_bytes: int = Field(default=MIB, ge=1024, le=MIB)
     poll_concurrency: int = Field(default=4, ge=1, le=64)
+    poll_seconds: float = Field(
+        default=60.0,
+        ge=1,
+        le=86_400,
+        description="Poll interval for pull sources whose connector config names none.",
+    )
+    stats_flush_seconds: float = Field(default=30.0, ge=1, le=3600)
 
 
 class EdgeSettings(ProductSettings):

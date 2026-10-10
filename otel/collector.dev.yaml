@@ -1,0 +1,134 @@
+# OpenTelemetry Collector configuration for the Compose dev stack (deploy/compose/compose.yaml).
+#
+# Derived from otel/collector.yaml, the production template (spec 8.1.2): the same persistent
+# queue, the same mutual-TLS export to edge-gateway, but only `filelog` receivers, one per
+# simulated log source under /data/sim (the sim-data volume `carto-sim live` writes into). No
+# syslog, Splunk HEC or OTLP receiver: nothing else sends logs in the dev stack. Every receiver
+# sets the `carto.source_id` resource attribute to the id of the matching `otlp` source in
+# deploy/compose/sources.dev.yaml. Records stay raw; edge-gateway parses them (spec 8.2).
+#
+# `start_at: beginning` so a restart of the collector re-reads nothing it already sent (the
+# file_storage extension keeps the per-file offsets) and a replay that started before the
+# collector is picked up from the first line. The queue lives on the otel-queue volume.
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    timeout: 10s
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/storage
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+receivers:
+  filelog/webstore:
+    include:
+      - /data/sim/webstore/app-*.ndjson
+    start_at: beginning
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    resource:
+      carto.source_id: src_webstore_log
+    operators: []
+
+  filelog/orders:
+    include:
+      - /data/sim/orders/order-svc-*.log
+    start_at: beginning
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    resource:
+      carto.source_id: src_orders_log
+    operators: []
+
+  filelog/payments:
+    include:
+      - /data/sim/payments/messages-*.xml
+    start_at: beginning
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    resource:
+      carto.source_id: src_payments_xml
+    operators: []
+
+  filelog/warehouse_export:
+    include:
+      - /data/sim/warehouse/export-job-*.log
+    start_at: beginning
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    resource:
+      carto.source_id: src_wms_export_log
+    operators: []
+
+  filelog/shipping:
+    include:
+      - /data/sim/shipping/shipping-app-*.log
+    start_at: beginning
+    storage: file_storage
+    include_file_name: true
+    include_file_path: false
+    resource:
+      carto.source_id: src_ship_log
+    operators: []
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    send_batch_size: 500
+    send_batch_max_size: 1000
+    timeout: 1s
+  # Drop anything without a carto.source_id so edge-gateway never guesses (spec 2.3 invariant 3).
+  filter/require_source:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'resource.attributes["carto.source_id"] == nil'
+
+exporters:
+  otlphttp/edge:
+    endpoint: https://edge-gateway:8443 # path /v1/logs is appended
+    tls:
+      ca_file: /etc/carto/pki/ca.crt # carto-ctl pki init (the pki volume)
+      cert_file: /etc/carto/pki/otel-collector.crt
+      key_file: /etc/carto/pki/otel-collector.key
+      min_version: "1.2"
+    compression: zstd
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 60s
+      max_elapsed_time: 0 # retry forever; the queue holds data while the edge answers 429/503 (spec 8.5)
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      num_consumers: 2
+      queue_size: 5000
+
+service:
+  extensions: [file_storage, health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: basic
+      address: 127.0.0.1:8888
+  pipelines:
+    logs:
+      receivers:
+        - filelog/webstore
+        - filelog/orders
+        - filelog/payments
+        - filelog/warehouse_export
+        - filelog/shipping
+      processors: [memory_limiter, filter/require_source, batch]
+      exporters: [otlphttp/edge]

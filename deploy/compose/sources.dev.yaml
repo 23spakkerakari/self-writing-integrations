@@ -1,0 +1,139 @@
+# deploy/compose/sources.dev.yaml: edge-gateway sources for the Compose dev stack (`make dev`).
+#
+# `carto-sim live` writes scenario A into the sim-data volume, mounted at /data/sim in
+# edge-gateway (read-only) and in the OpenTelemetry Collector. How each source reaches the edge:
+#
+#   - The five log sources arrive through the collector: otel/collector.dev.yaml tails the files
+#     and tags every record with carto.source_id, so here they are `otlp` sources with an empty
+#     config (spec 8.1.2). Parse hints stay here: the edge parses, the collector does not.
+#   - The nightly SHIP_*.csv drops are watched with the sftp connector's local:// variant
+#     (spec 8.1.5), which lists the directory and never opens a file.
+#   - The warehouse rows: the M1 stack has no source PostgreSQL, so the simulator streams the
+#     purchase_orders rows as JSON objects into /data/sim/warehouse/purchase_orders.ndjson, one
+#     per row at its creation instant. KNOWN GAP: the upload connector reads `kind: rows` from
+#     CSV only (edge/carto_edge/connectors/upload.py), not from NDJSON, so the stream is read as
+#     `kind: log` and parsed as NDJSON. Each row then becomes a log event with the row's columns
+#     as fields (event kind log, locator purchase_orders.ndjson:line:<n>) instead of a row_change
+#     event keyed purchase_orders:row:<id>. A `sql` source against a source database (spec
+#     Appendix A) replaces this entry in a pilot; the offline analyzer reads the CSV export as
+#     rows (simulator/analyze.shop.yaml).
+#
+# Systems, parse hints and field policy pins are the same as simulator/analyze.shop.yaml. For a
+# real pilot copy this file to sources.yaml and replace the sources (docs/install/compose-pilot.md).
+
+systems:
+  - id: sys_webstore
+    name: Webstore
+    owner_group: Digital Commerce
+    criticality: high
+  - id: sys_orders
+    name: Order system
+    owner_group: Commerce Platform
+    criticality: high
+  - id: sys_payments
+    name: Payments
+    owner_group: Payments Engineering
+    criticality: high
+  - id: sys_warehouse
+    name: Warehouse
+    owner_group: WMS Support
+    criticality: high
+  - id: sys_shipping
+    name: Shipping
+    owner_group: Logistics IT
+    criticality: high
+
+sources:
+  - id: src_webstore_log
+    system: sys_webstore
+    type: otlp
+    config: {}
+    parse:
+      format: ndjson
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+  - id: src_orders_log
+    system: sys_orders
+    type: otlp
+    config: {}
+    parse:
+      format: logfmt
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+  - id: src_payments_xml
+    system: sys_payments
+    type: otlp
+    config: {}
+    parse:
+      format: xml
+      timestamp_field: timestamp
+      timestamp_format: iso8601
+      timezone: UTC
+
+  # The row stream (see the header): read as NDJSON log records until a source database exists.
+  - id: src_wms_db
+    system: sys_warehouse
+    type: upload
+    config:
+      kind: log
+      paths: ["/data/sim/warehouse/purchase_orders.ndjson"]
+    parse:
+      format: ndjson
+      timestamp_field: updated_at
+      timestamp_format: "%Y-%m-%d %H:%M:%S"
+      timezone: America/New_York
+      actor_field: created_by
+
+  - id: src_wms_export_log
+    system: sys_warehouse
+    type: otlp
+    config: {}
+    parse:
+      format: text
+      timestamp_format: "%Y-%m-%d %H:%M:%S"
+      timezone: America/New_York
+
+  # Directory watch: listings and stat only, no file is ever opened (spec 2.3 invariant 1).
+  - id: src_ship_sftp
+    system: sys_shipping
+    type: sftp
+    config:
+      directories: ["local:///data/sim/shipping/outbound"]
+      filename_patterns: ["SHIP_*.csv"]
+      poll_seconds: 15
+
+  - id: src_ship_log
+    system: sys_shipping
+    type: otlp
+    config: {}
+    parse:
+      format: logfmt
+      timestamp_field: ts
+      timestamp_format: iso8601
+      timezone: UTC
+      message_field: msg
+      severity_field: level
+
+field_policies:
+  - field: sys_warehouse/*/customer_name
+    field_class: person_name
+    policy: tokenize
+    forms: ["phonetic"]
+    reason: "L06 composite link: clerks key the cardholder name into the PO; phonetic forms survive their typos"
+  - field: sys_payments/*/cardholderName
+    field_class: person_name
+    policy: tokenize
+    forms: ["phonetic"]
+    reason: "L06 composite link: the name on the payment is what the clerk reads from the confirmation"
+
+# Every source is a local file or the collector on the edge network; nothing private to reach.
+network:
+  allowed_source_cidrs: []
