@@ -487,7 +487,11 @@ def build_manual_hops() -> list[ManualHopTruth]:
 
 
 def build_marker_set(
-    marker_tokens: set[str], pii_values: set[str], identifier_values: dict[str, set[str]]
+    marker_tokens: set[str],
+    pii_values: set[str],
+    identifier_values: dict[str, set[str]],
+    actor_values: set[str] | None = None,
+    amount_values: set[str] | None = None,
 ) -> MarkerSet:
     return MarkerSet(
         marker_tokens=sorted(marker_tokens),
@@ -495,6 +499,8 @@ def build_marker_set(
         identifier_values={
             key: sorted(values) for key, values in sorted(identifier_values.items())
         },
+        actor_values=sorted(actor_values or ()),
+        amount_values=sorted(amount_values or ()),
     )
 
 

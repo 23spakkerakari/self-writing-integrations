@@ -17,6 +17,7 @@ wall clock.
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import shutil
 from collections.abc import Iterator
@@ -938,7 +939,14 @@ class _ShopRun:
             ),
             manual_hops=shop_truth.build_manual_hops(),
             markers=shop_truth.build_marker_set(
-                self.marker_tokens, self.pii_values, self.identifier_values
+                self.marker_tokens,
+                self.pii_values,
+                self.identifier_values,
+                actor_values={po.created_by for po in self.purchase_orders if po.human},
+                amount_values=_amount_renderings(
+                    [txn.total for txn in self.transactions]
+                    + [po.total for po in self.purchase_orders]
+                ),
             ),
         )
         ground_truth_dir = write_ground_truth(self.out_dir, truth, self.events())
@@ -959,3 +967,13 @@ class ShopScenario:
             msg = f"request is for scenario {request.scenario!r}, not {self.name!r}"
             raise ValueError(msg)
         return _ShopRun(request, out_dir).run()
+
+
+def _amount_renderings(totals: list[str]) -> set[str]:
+    """Every way an amount appears in the native files: ``123.40`` in logfmt, XML and rows, and
+    ``123.4`` where the webstore writes it as a JSON number."""
+    values: set[str] = set()
+    for total in totals:
+        values.add(total)
+        values.add(json.dumps(float(total)))
+    return values

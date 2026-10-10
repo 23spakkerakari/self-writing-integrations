@@ -84,6 +84,7 @@ from carto_schema.ingest import MAX_EVENTS_PER_BATCH, IngestBatch
 from carto_simulator.api import GenerationRequest, generate
 
 ROOT = Path(__file__).resolve().parents[2]
+NL = "\n"
 CONFIG = ROOT / "simulator" / "analyze.shop.yaml"
 MIN_MARKER_LEN = 4
 MAX_REPORTED = 40
@@ -114,6 +115,9 @@ def _trie_pattern(words: Iterable[str]) -> str:
         return body
 
     return build(trie)
+
+
+_TOKEN = re.compile(r"t[1-9][0-9]{0,3}\.[A-Za-z0-9_-]{22}")
 
 
 def _is_own_shape(text: str) -> bool:
@@ -188,7 +192,9 @@ class LeakReport:
     def _clean(self, text: str) -> str:
         for path in self.environment:
             text = text.replace(path, "<env>")
-        return text
+        # carto tokens are base64url HMAC output: a 4-digit order id can appear inside one by
+        # chance between '-' or '_' characters. Tokens carry no value, so they are not scanned.
+        return _TOKEN.sub("<token>", text)
 
     def text(self, output: str, text: str, location: str = "text") -> None:
         self.scanned[output] += 1
@@ -377,6 +383,11 @@ def test_leak_scenario_a_small_run(tmp_path: Path, restore_logging: None) -> Non
     generate(
         GenerationRequest(days=2, daily_volume=20, seed=7, noise_rate=0.5, pii_density=0.5), sim
     )
+    probes = _plant_probes(sim)
+    markers_file = tmp_path / "markers.json"
+    planted = json.loads((sim / "ground_truth" / "markers.json").read_text(encoding="utf-8"))
+    planted["probes"] = probes
+    markers_file.write_text(json.dumps(planted), encoding="utf-8")
     out = tmp_path / "shop.carto"
     result = analyze(CONFIG, sim, out, locator_map=True)
     manifest = result.manifest
@@ -386,7 +397,7 @@ def test_leak_scenario_a_small_run(tmp_path: Path, restore_logging: None) -> Non
     assert len(events) == manifest.counts.events
 
     report = LeakReport(
-        Markers.load(sim / "ground_truth" / "markers.json"),
+        Markers.load(markers_file),
         environment=_environment(tmp_path, ROOT),
     )
     assert report.markers.category, "markers.json holds no marker"
@@ -443,3 +454,42 @@ def test_leak_full_scenario_bundle(request: pytest.FixtureRequest) -> None:
     assert scan_bundle(report, bundle) == verified.manifest.counts.events
     assert not (bundle / default_locator_map_path(bundle).name).exists()
     report.assert_clean()
+
+
+def _plant_probes(sim: Path) -> dict[str, list[str]]:
+    """Records that exercise the leak classes the simulator does not generate (review): a JSON
+    map keyed by a value, free text in a field, a one-off message, a logfmt line whose message
+    runs on unquoted, and rare free text in an otherwise low-cardinality field. Returns the
+    probe markers, which are scanned like the simulator's own."""
+    webstore = min((sim / "webstore").glob("app-*.ndjson"))
+    orders = min((sim / "orders").glob("order-svc-*.log"))
+    day = webstore.stem.removeprefix("app-")
+    probes = {
+        "map_key": [f"mkprobe{n:03d}key" for n in range(3)],
+        "free_text": [f"please call mrs mkprobe{n:03d}note back tomorrow" for n in range(3)],
+        "one_off": ["mkprobeoneoffword"],
+        "logfmt_words": ["mkprobebareword"],
+        "rare_kept": [f"refund issued by mkprobe{n:03d}rare after review" for n in range(2)],
+    }
+    lines: list[str] = []
+    for n, key in enumerate(probes["map_key"]):
+        stock = {key: n}
+        lines.append(json.dumps({"ts": f"{day}T05:0{n}:00.000Z", "msg": "stock", "stock": stock}))
+    for n, note in enumerate(probes["free_text"]):
+        lines.append(json.dumps({"ts": f"{day}T05:1{n}:00.000Z", "msg": "note", "note": note}))
+    lines.append(
+        json.dumps({"ts": f"{day}T05:20:00.000Z", "msg": "gate code mkprobeoneoffword today"})
+    )
+    for n in range(60):
+        detail = probes["rare_kept"][n // 30] if n % 30 == 7 else "ok"
+        lines.append(
+            json.dumps({"ts": f"{day}T06:{n:02d}:00.000Z", "msg": "callback", "callback": detail})
+        )
+    with webstore.open("a", encoding="utf-8", newline=NL) as handle:
+        handle.writelines(line + NL for line in lines)
+    with orders.open("a", encoding="utf-8", newline=NL) as handle:
+        handle.write(
+            f"ts={day}T05:30:00.000Z level=info msg=refund approved for mkprobebareword"
+            f" order_id=4471{NL}"
+        )
+    return probes

@@ -302,6 +302,15 @@ class MarkerSet(_Model):
     identifier_values: dict[str, list[str]] = Field(
         description="Field ref string -> every identifier value emitted for it."
     )
+    actor_values: list[str] = Field(
+        default_factory=list,
+        description="Human actor logins as emitted (clerks); the edge tokenizes actors (7.1).",
+    )
+    amount_values: list[str] = Field(
+        default_factory=list,
+        description="Order amounts as emitted (two decimals, and JSON's float rendering); "
+        "spec 8.3 rule 4: never in clear.",
+    )
 
 
 class Manifest(_Model):
