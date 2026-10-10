@@ -61,6 +61,36 @@ def test_pki_init_writes_the_ca_and_one_pair_per_service(
     assert "PRIVATE" not in captured.out
 
 
+def test_ca_key_dir_keeps_the_ca_key_away_from_the_service_files(tmp_path: Path) -> None:
+    out = tmp_path / "pki"
+    ca_dir = tmp_path / "pki-ca"
+    argv = ["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir)]
+    assert main(argv) == EXIT_OK
+    assert "ca.key" not in _files(out)
+    assert _files(ca_dir) == {"ca.key"}
+    ca = load_certificate(out / "ca.crt")
+    key = load_private_key(ca_dir / "ca.key")
+    assert key.public_key().public_numbers() == ca.public_key().public_numbers()  # type: ignore[union-attr]
+
+
+def test_if_missing_succeeds_on_a_complete_run_and_refuses_a_partial_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "pki"
+    ca_dir = tmp_path / "pki-ca"
+    argv = ["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir), "--if-missing"]
+    assert main(argv) == EXIT_OK
+    first = {name: (out / name).read_bytes() for name in _files(out)}
+    capsys.readouterr()
+    assert main(argv) == EXIT_OK  # the Compose job on its second start
+    assert "nothing written" in capsys.readouterr().out
+    assert {name: (out / name).read_bytes() for name in _files(out)} == first
+    (out / "edge-gateway.crt").unlink()  # a partial state is never papered over
+    assert main(argv) == EXIT_FAILURE
+    assert "refusing to overwrite" in capsys.readouterr().err
+    assert main(["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir)]) == EXIT_FAILURE
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_private_keys_are_owner_only(tmp_path: Path) -> None:
     out = tmp_path / "pki"

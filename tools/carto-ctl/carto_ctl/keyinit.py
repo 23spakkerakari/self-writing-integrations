@@ -11,8 +11,11 @@ Creates, under ``<state-dir>/keys/``, exactly what the edge ``KeyManager`` reads
 
 ``--kms vault`` wraps through Vault Transit; the token is read from ``--vault-token-file``,
 never from an option or the environment (spec 8.4 "No key material in environment variables").
-Existing key files are never overwritten. The output names key ids and fingerprints only: no
-key material, in any encoding, reaches a terminal or a log.
+Existing key files are never overwritten. With ``--if-missing`` a complete earlier run (the
+tenant key, the rotation state and, for ``--kms local``, the master key all present) is a
+success that writes nothing, which is what the Compose ``key-init`` job needs on its second
+start; a partial one is still refused. The output names key ids and fingerprints only: no key
+material, in any encoding, reaches a terminal or a log.
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ __all__ = [
     "configure_key_init",
     "initialize_keys",
     "key_init",
+    "keys_complete",
 ]
 
 DEFAULT_STATE_DIR: Final = Path("/var/lib/carto-edge")
@@ -126,6 +130,11 @@ def configure_key_init(parser: argparse.ArgumentParser) -> None:
         default="local",
         help="Which KMS wraps the key: a local master key file or Vault Transit (ADR 0012)",
     )
+    parser.add_argument(
+        "--if-missing",
+        action="store_true",
+        help="Succeed without writing when a complete earlier run is present (Compose jobs)",
+    )
     parser.add_argument("--vault-url", metavar="URL", help="Vault address (https)")
     parser.add_argument("--vault-transit-key", default="carto", metavar="NAME")
     parser.add_argument("--vault-mount", default="transit", metavar="PATH")
@@ -169,6 +178,14 @@ def _build_kms(options: KeyInitOptions) -> tuple[KeyWrapper, Path | None]:
         ),
         None,
     )
+
+
+def keys_complete(options: KeyInitOptions) -> bool:
+    """True when every file :func:`initialize_keys` would write for ``options`` exists."""
+    planned = [options.tenant_key_file, options.rotation_file]
+    if options.kms == "local":
+        planned.append(options.local_kms_file)
+    return all(path.is_file() for path in planned)
 
 
 def initialize_keys(options: KeyInitOptions, *, kms: KeyWrapper | None = None) -> KeyInitResult:
@@ -220,6 +237,11 @@ def key_init(invocation: Invocation) -> int:
         vault_mount=args.vault_mount,
         vault_token_file=args.vault_token_file,
     )
+    if args.if_missing and keys_complete(options):
+        invocation.out.write(
+            f"tenant key already present in {options.keys_dir}; nothing written.\n"
+        )
+        return EXIT_OK
     try:
         result = initialize_keys(options)
     except (CryptoError, OSError) as exc:

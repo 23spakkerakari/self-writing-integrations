@@ -144,6 +144,87 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
+  compose:
+    name: compose stack (simulator live replay, ingest to ClickHouse, live leak scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE: docker compose -f deploy/compose/compose.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service images
+        run: make images
+      - name: Generate the database passwords
+        run: |
+          openssl rand -hex 24 > deploy/compose/secrets/pg_password
+          openssl rand -hex 24 > deploy/compose/secrets/ch_password
+      - name: Start the stack (one-shot jobs, databases, ingest-api, edge-gateway, collector)
+        run: |
+          $COMPOSE up -d
+          for i in $(seq 1 60); do
+            id=$($COMPOSE ps -q ingest-api)
+            health=$(docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null || echo starting)
+            echo "ingest-api: $health"
+            [ "$health" = healthy ] && break
+            sleep 5
+          done
+          [ "$health" = healthy ]
+          $COMPOSE ps -a
+          for job in volumes-init pki-init key-init migrate; do
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$($COMPOSE ps -aq $job)")
+            echo "$job exited $code"
+            [ "$code" = 0 ]
+          done
+      - name: The one-shot jobs are idempotent (a second up changes nothing)
+        run: |
+          $COMPOSE up -d
+          for job in pki-init key-init migrate; do
+            [ "$(docker inspect -f '{{.State.ExitCode}}' "$($COMPOSE ps -aq $job)")" = 0 ]
+          done
+      - name: Replay one simulated day at high speed into the stack
+        run: >
+          $COMPOSE --profile dev run --rm -T simulator live --scenario shop --days 1
+          --daily-volume 40 --seed 3 --speed 100000 --out /data/sim
+      - name: Wait for events in ClickHouse
+        run: |
+          query() {
+            $COMPOSE exec -T clickhouse clickhouse-client --user carto \
+              --password "$(cat deploy/compose/secrets/ch_password)" -q "$1"
+          }
+          for i in $(seq 1 72); do
+            events=$(query "SELECT count() FROM carto.events" || echo 0)
+            sources=$(query "SELECT uniqExact(source_id) FROM carto.events" || echo 0)
+            echo "events: $events from $sources sources"
+            [ "${sources:-0}" -ge 6 ] && break
+            sleep 5
+          done
+          [ "${events:-0}" -gt 0 ]
+          query "SELECT source_id, count() FROM carto.events GROUP BY source_id ORDER BY source_id"
+          echo "## Compose stack" >> "$GITHUB_STEP_SUMMARY"
+          echo "events in ClickHouse: $events from $sources sources" >> "$GITHUB_STEP_SUMMARY"
+      - name: Export rows, markers and logs
+        run: |
+          mkdir -p scan
+          for table in events event_identifiers; do
+            $COMPOSE exec -T clickhouse clickhouse-client --user carto \
+              --password "$(cat deploy/compose/secrets/ch_password)" \
+              -q "SELECT * FROM carto.$table FORMAT JSONEachRow" > "scan/$table.ndjson"
+          done
+          $COMPOSE --profile dev run --rm -T --entrypoint cat simulator \
+            /data/sim/ground_truth/markers.json > scan/markers.json
+          $COMPOSE logs --no-color --no-log-prefix ingest-api edge-gateway migrate > scan/logs.txt
+          wc -c scan/*
+      - name: Leak scan of everything core stored and every product log (spec 18.3)
+        run: >
+          python3 tools/ci/leak_scan.py --markers scan/markers.json
+          --rows scan/events.ndjson --rows scan/event_identifiers.ndjson --text scan/logs.txt
+      - name: Stack logs on failure
+        if: failure()
+        run: $COMPOSE --profile dev logs --no-color | tail -n 400
+      - name: Tear down
+        if: always()
+        run: $COMPOSE --profile dev down -v --remove-orphans
+
   bandit:
     name: bandit
     runs-on: ubuntu-latest

@@ -4,6 +4,7 @@
     carto-core ingest-api
     carto-core verify-bundle --bundle PATH
     carto-core load-bundle --bundle PATH [--chunk-size N]
+    carto-core healthcheck --url https://localhost:8443/healthz [--timeout SECONDS]
 
 Settings come from the environment (``CARTO_...``, :class:`carto_core.settings.CoreSettings`);
 ``verify-bundle`` needs none. ``migrate`` runs with the configured database users, so point
@@ -11,16 +12,24 @@ Settings come from the environment (``CARTO_...``, :class:`carto_core.settings.C
 one run (spec 14.4: per-service users with least privilege). Exit codes: 0 success, 1 the
 operation failed (a store unreachable, a migration refused, a bundle rejected), 2 a usage or
 configuration error. Handlers return codes; only ``__main__`` exits.
+
+``healthcheck`` is the container healthcheck of ``ingest-api`` (Compose ``healthcheck.test``): it
+GETs an ``https://`` URL presenting the service's own certificate as the client certificate
+(``ingest.tls_cert_file``/``tls_key_file``; ``carto-ctl pki init`` issues every leaf for client
+and server use) and verifying the server against ``ingest.client_ca_file``, so it works against a
+listener that requires mutual TLS. Exit 0 on a 2xx, 1 otherwise; the response body is not read.
 """
 
 from __future__ import annotations
 
 import argparse
+import ssl
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import httpx
 from alembic.util.exc import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
@@ -51,6 +60,7 @@ EXIT_OK: Final = 0
 EXIT_FAILURE: Final = 1
 EXIT_USAGE: Final = 2
 _MAX_MESSAGE: Final = 300
+HEALTHCHECK_TIMEOUT: Final = 5.0
 
 
 def _emit(text: str) -> None:
@@ -98,6 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CHUNK_SIZE,
         help=f"Events per write, 1 to {MAX_EVENTS_PER_BATCH} (default {DEFAULT_CHUNK_SIZE})",
+    )
+    health = commands.add_parser(
+        "healthcheck", help="GET a health URL over mutual TLS (container healthcheck)"
+    )
+    health.add_argument("--url", required=True, help="https:// URL, e.g. the service's /healthz")
+    health.add_argument(
+        "--timeout",
+        type=float,
+        default=HEALTHCHECK_TIMEOUT,
+        help=f"Seconds before giving up (default {HEALTHCHECK_TIMEOUT:g})",
     )
     return parser
 
@@ -187,6 +207,47 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
     return EXIT_OK
 
 
+def health_ssl_context(settings: CoreSettings) -> ssl.SSLContext:
+    """Client context for :func:`_healthcheck`: the service's own pair as the client
+    certificate, the install CA as the trust anchor, TLS 1.2 minimum (spec 14.4)."""
+    listener = settings.ingest
+    if listener.tls_cert_file is None or listener.tls_key_file is None:
+        msg = "ingest.tls_cert_file and ingest.tls_key_file are required for the healthcheck"
+        raise CoreConfigError(msg)
+    if listener.client_ca_file is None:
+        msg = "ingest.client_ca_file is required for the healthcheck"
+        raise CoreConfigError(msg)
+    context = ssl.create_default_context(cafile=str(listener.client_ca_file))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(listener.tls_cert_file), str(listener.tls_key_file))
+    return context
+
+
+def _health_client(settings: CoreSettings, timeout: float) -> httpx.Client:
+    """The probe's HTTP client (tests substitute one with a mock transport)."""
+    return httpx.Client(
+        verify=health_ssl_context(settings),
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+def _healthcheck(args: argparse.Namespace, settings: CoreSettings) -> int:
+    if not str(args.url).startswith("https://"):
+        return _usage("--url must be an https:// URL (the listener serves mutual TLS only)")
+    if not 0 < args.timeout <= 60:
+        return _usage("--timeout must be between 0 and 60 seconds")
+    try:
+        with _health_client(settings, args.timeout) as client:
+            response = client.get(args.url)
+    except (CoreConfigError, OSError, ssl.SSLError, httpx.HTTPError) as exc:
+        return _fail(f"healthcheck failed: {_describe(exc)}")
+    if response.is_success:
+        return EXIT_OK
+    return _fail(f"healthcheck failed: HTTP {response.status_code}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point; returns the exit code instead of exiting."""
     try:
@@ -205,6 +266,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _migrate(args, settings)
     if args.command == "ingest-api":
         return _ingest_api(settings)
+    if args.command == "healthcheck":
+        return _healthcheck(args, settings)
     return _load(args, settings)
 
 

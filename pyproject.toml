@@ -92,6 +92,7 @@ ignore = [
 "**/tests/**" = ["S101", "ANN", "PLR2004", "ARG001", "ARG002", "DTZ001", "S311", "PLC1901"]
 "**/cli.py" = ["T201"]
 "**/cli/**" = ["T201"]
+"tools/ci/**" = ["T201"]   # CI scripts report on stdout
 "simulator/**" = ["S311"]   # synthetic data uses random on purpose; crypto never lives here
 
 [tool.ruff.lint.isort]

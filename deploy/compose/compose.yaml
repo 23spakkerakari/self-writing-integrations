@@ -6,7 +6,14 @@
 # later milestones. Passwords come from Docker secrets (files under ./secrets, never from the
 # environment); keys live in the edge state volume wrapped by the local KMS (ADR 0012).
 #
-# First run:   make dev            (runs `carto-ctl pki init`, `carto-ctl key init`, migrations)
+# One-shot jobs run in this order on every `up` and are idempotent:
+#   volumes-init  chowns the named volumes to the carto uid (a new volume is root-owned)
+#   pki-init      carto-ctl pki init --if-missing; the CA key goes to the pki-ca volume, which no
+#                 running service mounts (spec 14.4)
+#   key-init      carto-ctl key init --if-missing (local KMS; production uses Vault Transit)
+#   migrate       carto-core migrate
+#
+# First run:   make dev
 # Tear down:   docker compose -f deploy/compose/compose.yaml down -v
 
 name: carto
@@ -21,6 +28,11 @@ x-hardening: &hardening
     driver: json-file
     options: { max-size: "20m", max-file: "5" }
 
+# The official database images start as root, chown their data directory and drop to their own
+# user, which needs these capabilities and nothing else; no-new-privileges still applies.
+x-db-capabilities: &db-capabilities
+  cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+
 networks:
   core:
     internal: true
@@ -32,6 +44,7 @@ volumes:
   ch-data:
   edge-state:
   pki:
+  pki-ca:
   sim-data:
   otel-queue:
 
@@ -44,7 +57,7 @@ secrets:
 services:
   postgres:
     image: postgres:16.6-bookworm
-    <<: *hardening
+    <<: [*hardening, *db-capabilities]
     networks: [core]
     environment:
       POSTGRES_DB: carto
@@ -62,7 +75,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
-    <<: *hardening
+    <<: [*hardening, *db-capabilities]
     networks: [core]
     environment:
       CLICKHOUSE_DB: carto
@@ -72,8 +85,13 @@ services:
     secrets: [ch_password]
     volumes:
       - ch-data:/var/lib/clickhouse
-      - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
-    tmpfs: ["/tmp:size=256m", "/var/log/clickhouse-server:size=128m"]
+      # One file into users.d; the directory itself is a tmpfs because the image's entrypoint
+      # writes users.d/default-user.xml for CLICKHOUSE_USER on a read-only root filesystem.
+      - ./clickhouse/users.d/carto.xml:/etc/clickhouse-server/users.d/carto.xml:ro
+    tmpfs:
+      - "/tmp:size=256m"
+      - "/var/log/clickhouse-server:size=128m"
+      - "/etc/clickhouse-server/users.d:size=1m"
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:
@@ -82,24 +100,50 @@ services:
       timeout: 5s
       retries: 12
 
-  pki-init:
+  volumes-init:
     image: carto-ctl:dev
     build:
       context: ../..
       dockerfile: deploy/docker/base.Dockerfile
       args: { MEMBER: ctl, ENTRY: carto-ctl }
-    networks: [core]
+    # Root only for the chown of fresh named volumes to the carto uid; nothing else runs here.
+    user: "0:0"
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - chown 10001:10001 /mnt/pki /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
+    volumes:
+      - pki:/mnt/pki
+      - pki-ca:/mnt/pki-ca
+      - edge-state:/mnt/edge-state
+      - sim-data:/mnt/sim-data
+      - otel-queue:/mnt/otel-queue
+    restart: "no"
+
+  pki-init:
+    image: carto-ctl:dev
+    <<: *hardening
+    restart: "no"
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
     volumes:
       - pki:/etc/carto/pki
+      - pki-ca:/etc/carto/pki-ca
     command:
       - pki
       - init
       - --out
       - /etc/carto/pki
+      - --ca-key-dir
+      - /etc/carto/pki-ca
       - --services
       - ingest-api,edge-gateway,otel-collector
       - --if-missing
-    restart: "no"
 
   migrate:
     image: carto-core:dev
@@ -121,6 +165,7 @@ services:
       # The core network is internal to this host; TLS to the databases returns with M6.
       CARTO_POSTGRES__SSLMODE: disable
       CARTO_CLICKHOUSE__URL: http://clickhouse:8123
+      CARTO_CLICKHOUSE__SECURE: "false"
       CARTO_CLICKHOUSE__DATABASE: carto
       CARTO_CLICKHOUSE__USER: carto
       CARTO_CLICKHOUSE__PASSWORD_FILE: /run/secrets/ch_password
@@ -146,14 +191,20 @@ services:
       - pki:/etc/carto/pki:ro
     command: ["ingest-api"]
     healthcheck:
+      # Mutual TLS: the probe presents the service's own certificate (carto-core healthcheck).
       test: ["CMD", "carto-core", "healthcheck", "--url", "https://localhost:8443/healthz"]
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 8
+      start_period: 20s
 
   key-init:
     image: carto-ctl:dev
-    networks: [edge]
+    <<: *hardening
+    restart: "no"
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
     volumes:
       - edge-state:/var/lib/carto
     command:
@@ -166,7 +217,6 @@ services:
       - --kms
       - local
       - --if-missing
-    restart: "no"
 
   edge-gateway:
     image: carto-edge:dev
@@ -205,6 +255,7 @@ services:
     networks: [edge]
     depends_on:
       edge-gateway: { condition: service_started }
+      volumes-init: { condition: service_completed_successfully }
     user: "10001:10001"
     volumes:
       - ../../otel/collector.dev.yaml:/etc/otelcol-contrib/config.yaml:ro
@@ -220,8 +271,12 @@ services:
       dockerfile: deploy/docker/base.Dockerfile
       args: { MEMBER: simulator, ENTRY: carto-sim }
     <<: *hardening
-    networks: [edge]
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
     volumes:
       - sim-data:/data/sim
     command: ["live", "--scenario", "shop", "--days", "2", "--speed", "60", "--out", "/data/sim"]
+    # A finished replay must not restart: a new run empties /data/sim and starts over.
+    restart: "no"
     profiles: ["dev"]

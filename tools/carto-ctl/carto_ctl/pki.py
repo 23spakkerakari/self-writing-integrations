@@ -1,12 +1,17 @@
 """``carto-ctl pki init``: the private CA and per-service certificates for Compose (spec 14.4).
 
-Writes ``ca.crt``/``ca.key`` and ``<service>.crt``/``<service>.key`` for every service into
-``--out`` (default ``./pki``). Each leaf allows server and client authentication, so the same
-pair serves a listener and authenticates it as a client of another service, and carries SANs
-for the service name, ``localhost`` and any ``--dns``/``--ip`` given. Keys are written with
-owner-only permissions and never overwritten: a directory holding any of the keys this run would
-write is refused before anything is touched. The output lists certificate fingerprints only.
-Kubernetes installs use cert-manager instead (M6).
+Writes ``ca.crt`` and ``<service>.crt``/``<service>.key`` for every service into ``--out``
+(default ``./pki``) and ``ca.key`` into ``--ca-key-dir`` (default: ``--out``). Keeping the CA key
+in a directory no running service mounts means a compromised service cannot mint certificates
+(spec 14.4, 15); the Compose stack puts it on its own volume that only ``pki-init`` sees. Each
+leaf allows server and client authentication, so the same pair serves a listener and
+authenticates it as a client of another service, and carries SANs for the service name,
+``localhost`` and any ``--dns``/``--ip`` given. Keys are written with owner-only permissions and
+never overwritten: a directory holding any of the keys this run would write is refused before
+anything is touched. With ``--if-missing`` a complete earlier run (every file this run would
+write is present) is a success that writes nothing, which is what a Compose one-shot job needs
+on its second start; a partial one is still refused. The output lists certificate fingerprints
+only. Kubernetes installs use cert-manager instead (M6).
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ __all__ = [
     "PkiInitResult",
     "configure_pki_init",
     "initialize_pki",
+    "pki_complete",
     "pki_init",
 ]
 
@@ -110,6 +116,17 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
         help=f"Directory to write into (default {DEFAULT_OUT})",
     )
     parser.add_argument(
+        "--ca-key-dir",
+        type=Path,
+        default=None,
+        help="Directory for ca.key, kept away from the services (default: --out)",
+    )
+    parser.add_argument(
+        "--if-missing",
+        action="store_true",
+        help="Succeed without writing when a complete earlier run is present (Compose jobs)",
+    )
+    parser.add_argument(
         "--services",
         type=_service_list,
         default=DEFAULT_SERVICES,
@@ -140,6 +157,19 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _planned_files(out: Path, ca_key_dir: Path, services: tuple[str, ...]) -> list[Path]:
+    files = [out / "ca.crt", ca_key_dir / "ca.key"]
+    for service in services:
+        files.extend((out / f"{service}.crt", out / f"{service}.key"))
+    return files
+
+
+def pki_complete(out: Path, services: tuple[str, ...], ca_key_dir: Path | None = None) -> bool:
+    """True when every file :func:`initialize_pki` would write for ``services`` exists."""
+    planned = _planned_files(out, ca_key_dir if ca_key_dir is not None else out, services)
+    return all(path.is_file() for path in planned)
+
+
 def initialize_pki(
     out: Path,
     services: tuple[str, ...],
@@ -147,19 +177,22 @@ def initialize_pki(
     ip_addresses: tuple[str, ...],
     days: int,
     *,
+    ca_key_dir: Path | None = None,
     now: dt.datetime | None = None,
 ) -> PkiInitResult:
     """Create the CA and one server+client pair per service; refuse to overwrite any key."""
     if not services:
         msg = "at least one service is required"
         raise PkiError(msg)
-    key_paths = [out / "ca.key", *(out / f"{service}.key" for service in services)]
+    key_dir = ca_key_dir if ca_key_dir is not None else out
+    key_paths = [key_dir / "ca.key", *(out / f"{service}.key" for service in services)]
     existing = [str(path) for path in key_paths if path.exists()]
     if existing:
         msg = f"refusing to overwrite existing private key(s): {', '.join(existing)}"
         raise PkiError(msg)
     ca = create_ca(now=now)
-    write_pem(ca, out / "ca.crt", out / "ca.key")
+    key_dir.mkdir(parents=True, exist_ok=True)
+    write_pem(ca, out / "ca.crt", key_dir / "ca.key")
     issued: list[tuple[str, str]] = []
     for service in services:
         names: list[str] = []
@@ -188,9 +221,20 @@ def initialize_pki(
 
 def pki_init(invocation: Invocation) -> int:
     args = invocation.args
+    services = tuple(args.services)
+    if args.if_missing and pki_complete(args.out, services, args.ca_key_dir):
+        invocation.out.write(
+            f"PKI already present in {args.out} for {', '.join(services)}; nothing written.\n"
+        )
+        return EXIT_OK
     try:
         result = initialize_pki(
-            args.out, tuple(args.services), tuple(args.dns), tuple(args.ip), args.days
+            args.out,
+            services,
+            tuple(args.dns),
+            tuple(args.ip),
+            args.days,
+            ca_key_dir=args.ca_key_dir,
         )
     except (PkiError, OSError) as exc:
         invocation.err.write(f"carto-ctl pki init: {exc}\n")

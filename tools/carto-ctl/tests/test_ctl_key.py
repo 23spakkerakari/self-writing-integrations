@@ -70,6 +70,23 @@ def test_local_kms_creates_exactly_the_edge_layout(
     assert wrapped.ciphertext not in captured.out
 
 
+def test_if_missing_succeeds_on_a_complete_run_and_refuses_a_partial_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    assert _run(state, "--kms", "local", "--if-missing") == EXIT_OK
+    keys = state / "keys"
+    before = {path.name: path.read_bytes() for path in keys.iterdir()}
+    capsys.readouterr()
+    assert _run(state, "--kms", "local", "--if-missing") == EXIT_OK
+    assert "nothing written" in capsys.readouterr().out
+    assert {path.name: path.read_bytes() for path in keys.iterdir()} == before
+    (keys / "rotation.json").unlink()
+    assert _run(state, "--kms", "local", "--if-missing") == EXIT_FAILURE
+    assert "refusing to overwrite" in capsys.readouterr().err
+    assert (keys / "tenant-key.json").read_bytes() == before["tenant-key.json"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_key_files_are_owner_only(tmp_path: Path) -> None:
     state = tmp_path / "state"

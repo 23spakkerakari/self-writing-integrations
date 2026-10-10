@@ -6,10 +6,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
+import httpx
 import pytest
 
+from carto_common.pki import create_ca, issue_certificate, write_pem
+from carto_core import cli
 from carto_core.cli import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, build_parser, main
+from carto_core.settings import CoreSettings
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +104,64 @@ def test_ingest_api_refuses_to_start_without_tls_files(
     err = capsys.readouterr().err
     assert "ingest-api cannot start" in err
     assert "tls_cert_file" in err
+
+
+def _pki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ca = create_ca()
+    write_pem(ca, tmp_path / "ca.crt", tmp_path / "ca.key")
+    leaf = issue_certificate(ca, "ingest-api", dns_names=("ingest-api", "localhost"))
+    write_pem(leaf, tmp_path / "ingest-api.crt", tmp_path / "ingest-api.key")
+    monkeypatch.setenv("CARTO_INGEST__TLS_CERT_FILE", str(tmp_path / "ingest-api.crt"))
+    monkeypatch.setenv("CARTO_INGEST__TLS_KEY_FILE", str(tmp_path / "ingest-api.key"))
+    monkeypatch.setenv("CARTO_INGEST__CLIENT_CA_FILE", str(tmp_path / "ca.crt"))
+
+
+def _mock_client(monkeypatch: pytest.MonkeyPatch, status: int, seen: list[str]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(status, json={"status": "ok"})
+
+    def factory(settings: CoreSettings, timeout: float) -> httpx.Client:
+        cli.health_ssl_context(settings)  # the real context must build from the files
+        return httpx.Client(transport=httpx.MockTransport(handler), timeout=timeout)
+
+    monkeypatch.setattr(cli, "_health_client", factory)
+
+
+@pytest.mark.parametrize(("status", "code"), [(200, EXIT_OK), (503, EXIT_FAILURE)])
+def test_healthcheck_maps_the_status(
+    status: int,
+    code: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _pki(tmp_path, monkeypatch)
+    seen: list[str] = []
+    _mock_client(monkeypatch, status, seen)
+    assert main(["healthcheck", "--url", "https://localhost:8443/healthz"]) == code
+    assert seen == ["https://localhost:8443/healthz"]
+    if code == EXIT_FAILURE:
+        assert "HTTP 503" in capsys.readouterr().err
+
+
+def test_healthcheck_refuses_plain_http_and_missing_tls_files(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["healthcheck", "--url", "http://localhost:8443/healthz"]) == EXIT_USAGE
+    assert main(["healthcheck", "--url", "https://localhost/healthz", "--timeout", "0"]) == 2
+    capsys.readouterr()
+    assert main(["healthcheck", "--url", "https://localhost:8443/healthz"]) == EXIT_FAILURE
+    assert "tls_cert_file" in capsys.readouterr().err
+
+
+def test_healthcheck_against_nothing_listening_is_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _pki(tmp_path, monkeypatch)
+    argv = ["healthcheck", "--url", "https://127.0.0.1:1/healthz", "--timeout", "2"]
+    assert main(argv) == EXIT_FAILURE
+    assert "healthcheck failed" in capsys.readouterr().err
 
 
 def test_module_entry_point_matches_main() -> None:
