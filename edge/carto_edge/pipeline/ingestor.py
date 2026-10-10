@@ -52,8 +52,13 @@ class IngestOutcome:
 class IngestorLike(Protocol):
     """Records in, durably buffered batches out."""
 
-    def ingest(self, records: Iterable[RawRecord]) -> IngestOutcome:
-        """Process records; full batches are appended to the buffer before this returns."""
+    def ingest(self, records: Iterable[RawRecord], *, durable: bool = False) -> IngestOutcome:
+        """Process records; full batches are appended to the buffer before this returns.
+
+        With ``durable`` the partial batches of the sources these records belong to are sealed
+        and appended too, and a batch the buffer refused is reported as ``buffer_full`` in the
+        outcome: a push receiver acknowledges only what is on disk (spec 8.1 at-least-once).
+        """
         ...
 
     def flush(self) -> int:
