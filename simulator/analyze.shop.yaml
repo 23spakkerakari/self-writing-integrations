@@ -158,6 +158,22 @@ field_policies:
     policy: tokenize
     forms: ["phonetic"]
     reason: "L06 composite link: the name on the payment is what the clerk reads from the confirmation"
+  # Batch keys (spec 9.7) and file names: identifiers with naturally low cardinality (one carrier
+  # manifest and one SHIP file per night), so spec 8.3 rule 6 would keep them in clear as
+  # low-cardinality attributes. Pinned as identifiers they are tokenized like any other key and
+  # the linker can still group shipments by manifest and file (ADR 0026).
+  - field: sys_shipping/*/manifest_id
+    field_class: identifier
+    policy: tokenize
+    reason: "Batch key: one carrier manifest per night, low cardinality by nature (spec 9.7)"
+  - field: sys_shipping/*/file
+    field_class: identifier
+    policy: tokenize
+    reason: "Batch key: the SHIP file a shipment travelled in, one per night (spec 9.7)"
+  - field: sys_shipping/*/name
+    field_class: identifier
+    policy: tokenize
+    reason: "The dropped SHIP file name of a file_arrived event; joins the drop to its shipments"
 
 # The analyzer opens no network connection; no private range needs to be allowed.
 network:

@@ -1,16 +1,17 @@
-"""The edge skeleton imports and its CLI refuses to pretend it works."""
+"""The edge packages import, and the CLI entry point is the real one (no M0 placeholder left)."""
 
 import pytest
 
+import carto_edge.cli.main as cli_main
 import carto_edge.connectors
 import carto_edge.gateway
 import carto_edge.pipeline
-from carto_edge.cli.main import NOT_YET, main
 
 
-def test_cli_returns_nonzero_until_m1(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main([]) == 2
-    assert NOT_YET in capsys.readouterr().out
+def test_cli_without_a_command_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli_main.main([]) == 2
+    assert "usage: carto-edge" in capsys.readouterr().err
+    assert not hasattr(cli_main, "NOT_YET")
 
 
 def test_subpackages_import() -> None:
