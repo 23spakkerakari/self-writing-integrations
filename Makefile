@@ -70,7 +70,7 @@ bench: ## Edge pipeline throughput benchmark (spec 17, M1 acceptance: 2,000 even
 
 sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 > $(UV) run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
-> $(UV) export --all-packages --no-emit-workspace --no-hashes --format requirements-txt -o requirements-export.txt
+> $(UV) export --all-packages --no-emit-workspace --no-emit-package en-core-web-sm --no-hashes --format requirements-txt -o requirements-export.txt
 > $(UV) run pip-audit -r requirements-export.txt --strict --desc on
 > @command -v semgrep >/dev/null 2>&1 && semgrep --test --metrics=off tools/semgrep && semgrep scan --config tools/semgrep --error --metrics=off edge/carto_edge/connectors && semgrep scan --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude tools/semgrep . || echo "semgrep: not installed locally, runs in CI"
 > @command -v gitleaks >/dev/null 2>&1 && gitleaks git --no-banner --redact . || echo "gitleaks: not installed locally, runs in CI"

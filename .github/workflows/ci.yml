@@ -39,7 +39,12 @@ jobs:
       - name: Types (mypy --strict)
         run: uv run mypy
       - name: Tests (unit and property; integration tests run in their own job)
-        run: uv run pytest -m "not integration" --cov --cov-report=xml --cov-report=term
+        run: >
+          uv run pytest -m "not integration" --cov --cov-report=xml --cov-report=term
+          --junitxml=pytest-report.xml
+      - name: Annotate test failures
+        if: failure()
+        run: python3 tools/ci/annotate.py junit pytest-report.xml
       - name: JSON Schema drift check
         run: uv run carto-schema check --dir packages/carto-schema/schemas
       - name: Simulator scenario A (14 days)
@@ -79,11 +84,19 @@ jobs:
       - name: Simulator scenario A (14 days)
         run: make sim SCENARIO=shop DAYS=14 SEED=1
       - name: Docker-backed integration tests (PostgreSQL, MySQL, ClickHouse)
-        run: uv run pytest -m integration -q
+        run: uv run pytest -m integration -q --junitxml=integration-report.xml
+      - name: Annotate integration test failures
+        if: failure()
+        run: python3 tools/ci/annotate.py junit integration-report.xml
       - name: Offline analyzer over scenario A
-        run: make analyze SCENARIO=shop
+        run: make analyze SCENARIO=shop 2>&1 | tee analyze.log
       - name: Leak test (spec 18.3)
-        run: make leak SCENARIO=shop
+        run: make leak SCENARIO=shop 2>&1 | tee leak.log
+      - name: Annotate analyzer and leak test failures
+        if: failure()
+        run: |
+          python3 tools/ci/annotate.py tail analyze.log --title "make analyze" --lines 40
+          python3 tools/ci/annotate.py tail leak.log --title "make leak" --lines 80
       - name: Throughput benchmark (spec 17, informative on shared runners)
         run: make bench SCENARIO=shop | tee bench.txt
       - name: Benchmark summary
@@ -220,7 +233,13 @@ jobs:
           --rows scan/events.ndjson --rows scan/event_identifiers.ndjson --text scan/logs.txt
       - name: Stack logs on failure
         if: failure()
-        run: $COMPOSE --profile dev logs --no-color | tail -n 400
+        run: |
+          $COMPOSE --profile dev ps -a > compose-ps.txt 2>&1 || true
+          $COMPOSE --profile dev logs --no-color --tail 60 > compose.log 2>&1 || true
+          cat compose-ps.txt
+          tail -n 400 compose.log
+          python3 tools/ci/annotate.py tail compose-ps.txt --title "compose ps -a" --lines 40
+          python3 tools/ci/annotate.py tail compose.log --title "compose logs (tail)" --lines 150
       - name: Tear down
         if: always()
         run: $COMPOSE --profile dev down -v --remove-orphans
@@ -250,8 +269,16 @@ jobs:
           python-version: "3.12"
       - run: uv sync --locked --all-packages
       - name: Export locked requirements (all members, dev included)
-        run: uv export --all-packages --no-emit-workspace --no-hashes --format requirements-txt -o requirements-export.txt
-      - run: uv run pip-audit -r requirements-export.txt --strict --desc on
+        # en-core-web-sm is the spaCy model pinned by URL and hash (ADR 0020): not on PyPI, so
+        # pip-audit cannot look it up (docs/security-exceptions.md).
+        run: >
+          uv export --all-packages --no-emit-workspace --no-emit-package en-core-web-sm
+          --no-hashes --format requirements-txt -o requirements-export.txt
+      - name: pip-audit
+        run: uv run pip-audit -r requirements-export.txt --strict --desc on 2>&1 | tee pip-audit.log
+      - name: Annotate pip-audit findings
+        if: failure()
+        run: python3 tools/ci/annotate.py tail pip-audit.log --title "pip-audit" --lines 60
 
   semgrep:
     name: semgrep
@@ -266,7 +293,12 @@ jobs:
       - name: Read-only connector rule over connector modules (spec 8.1, ADR 0008)
         run: semgrep scan --config tools/semgrep --error --metrics=off edge/carto_edge/connectors
       - name: Registry rulesets over the repository
-        run: semgrep scan --config p/python --config p/secrets --error --metrics=off --exclude legacy --exclude tools/semgrep .
+        run: >
+          semgrep scan --config p/python --config p/secrets --error --metrics=off
+          --exclude legacy --exclude tools/semgrep --text-output=semgrep.txt .
+      - name: Annotate semgrep findings
+        if: failure()
+        run: python3 tools/ci/annotate.py tail semgrep.txt --title "semgrep" --lines 120
 
   osv-scanner:
     name: osv-scanner
@@ -289,6 +321,15 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Annotate gitleaks findings (rule, file and line; values redacted)
+        if: failure()
+        run: |
+          curl -sSfL -o gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks git . --redact --no-banner --config .gitleaks.toml \
+            --report-format json --report-path gitleaks.json || true
+          python3 tools/ci/annotate.py gitleaks gitleaks.json
 
   trivy:
     name: trivy (filesystem)
