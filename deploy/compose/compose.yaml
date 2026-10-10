@@ -76,6 +76,9 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
     <<: [*hardening, *db-capabilities]
+    # The image's init step (create the database) stops its temporary server, which runs as the
+    # clickhouse uid, from the root entrypoint: that signal needs KILL on top of the db set.
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "KILL"]
     networks: [core]
     environment:
       CLICKHOUSE_DB: carto

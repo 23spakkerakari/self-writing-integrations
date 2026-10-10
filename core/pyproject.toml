@@ -25,3 +25,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["carto_core"]
+
+# The migration scripts live at core/migrations (spec Section 20) and ship inside the wheel, so
+# a non-editable install (the service images) can run `carto-core migrate`.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations/clickhouse" = "carto_core/_migrations/clickhouse"
+"migrations/postgres" = "carto_core/_migrations/postgres"

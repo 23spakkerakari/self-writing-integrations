@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import subprocess
+import zipfile
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +25,7 @@ from carto_core.migrations import (
     POSTGRES_MIGRATIONS_DIR,
     Migration,
     MigrationError,
+    alembic_config,
     apply_clickhouse_migrations,
     apply_retention,
     current_ttl_days,
@@ -295,3 +299,39 @@ def test_clickhouse_migrations_dir_is_the_repository_layout_of_section_20() -> N
     assert CLICKHOUSE_MIGRATIONS_DIR.name == "clickhouse"
     assert CLICKHOUSE_MIGRATIONS_DIR.parent.name == "migrations"
     assert CLICKHOUSE_MIGRATIONS_DIR.parent.parent.name == "core"
+
+
+def test_a_missing_or_empty_migrations_directory_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(MigrationError, match="no ClickHouse migrations directory"):
+        load_clickhouse_migrations(tmp_path / "missing")
+    with pytest.raises(MigrationError, match="no ClickHouse migration files"):
+        load_clickhouse_migrations(tmp_path)
+    with pytest.raises(MigrationError, match="no Alembic environment"):
+        alembic_config(tmp_path)
+
+
+@pytest.mark.slow
+def test_the_core_wheel_carries_the_migration_scripts(tmp_path: Path) -> None:
+    """The service images install core as a wheel; ``carto-core migrate`` needs the scripts."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is not on PATH")
+    root = Path(__file__).resolve().parents[2]
+    subprocess.run(  # noqa: S603 - fixed arguments, uv from PATH
+        [uv, "build", "--package", "carto-core", "--wheel", "--out-dir", str(tmp_path)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    (wheel,) = tmp_path.glob("carto_core-*.whl")
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    expected = {
+        f"carto_core/_migrations/clickhouse/{path.name}"
+        for path in (root / "core" / "migrations" / "clickhouse").glob("*.sql")
+    }
+    assert expected
+    assert expected <= names
+    assert "carto_core/_migrations/postgres/env.py" in names
+    assert "carto_core/_migrations/postgres/alembic.ini" in names
+    assert any(name.startswith("carto_core/_migrations/postgres/versions/") for name in names)

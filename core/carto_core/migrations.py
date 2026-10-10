@@ -12,6 +12,10 @@ fixed table name; lookups use server-side query parameters (spec 14.7).
 
 PostgreSQL: Alembic scripts under ``core/migrations/postgres`` run through the Alembic API on an
 engine built from settings (``carto-core migrate``); the password never lands in ``alembic.ini``.
+
+The wheel carries both script directories as ``carto_core/_migrations`` (``core/pyproject.toml``),
+so the service images find them; a source checkout uses ``core/migrations``. A missing or empty
+directory is an error, never "up to date".
 """
 
 from __future__ import annotations
@@ -47,9 +51,11 @@ __all__ = [
     "render",
 ]
 
-_CORE_DIR: Final = Path(__file__).resolve().parent.parent
-CLICKHOUSE_MIGRATIONS_DIR: Final = _CORE_DIR / "migrations" / "clickhouse"
-POSTGRES_MIGRATIONS_DIR: Final = _CORE_DIR / "migrations" / "postgres"
+_PACKAGED_DIR: Final = Path(__file__).resolve().parent / "_migrations"
+_SOURCE_DIR: Final = Path(__file__).resolve().parent.parent / "migrations"
+_MIGRATIONS_DIR: Final = _PACKAGED_DIR if _PACKAGED_DIR.is_dir() else _SOURCE_DIR
+CLICKHOUSE_MIGRATIONS_DIR: Final = _MIGRATIONS_DIR / "clickhouse"
+POSTGRES_MIGRATIONS_DIR: Final = _MIGRATIONS_DIR / "postgres"
 
 MIGRATION_TABLE: Final = "schema_migrations"
 MIGRATION_TABLE_DDL: Final = (
@@ -106,6 +112,9 @@ class Migration:
 
 def load_clickhouse_migrations(directory: Path = CLICKHOUSE_MIGRATIONS_DIR) -> list[Migration]:
     """Read ``NNNN_name.sql`` files in order; numbers must run 0001, 0002, ... without gaps."""
+    if not directory.is_dir():
+        msg = f"no ClickHouse migrations directory at {directory}"
+        raise MigrationError(msg)
     found: list[tuple[int, Migration]] = []
     for path in sorted(directory.glob("*.sql")):
         match = _FILE_PATTERN.match(path.name)
@@ -127,6 +136,9 @@ def load_clickhouse_migrations(directory: Path = CLICKHOUSE_MIGRATIONS_DIR) -> l
         if number != expected:
             msg = f"migration {migration.name} breaks the sequence; expected number {expected:04d}"
             raise MigrationError(msg)
+    if not found:
+        msg = f"no ClickHouse migration files in {directory}"
+        raise MigrationError(msg)
     return [migration for _number, migration in found]
 
 
@@ -221,6 +233,9 @@ def apply_retention(client: ClickHouseClientLike, retention: RetentionSettings) 
 
 def alembic_config(directory: Path = POSTGRES_MIGRATIONS_DIR) -> Config:
     """An Alembic configuration pointing at the scripts, with no URL (the engine is injected)."""
+    if not (directory / "env.py").is_file():
+        msg = f"no Alembic environment at {directory}"
+        raise MigrationError(msg)
     config = Config()
     config.set_main_option("script_location", str(directory))
     return config
