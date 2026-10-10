@@ -47,6 +47,9 @@ first two log files):
 | `make bench` (pipeline only) | 3,114 events/s | 5,435 events/s |
 | `make bench-gateway` (sustained, buffer emptied) | 2,398 events/s | 3,600 events/s |
 
+On a GitHub-hosted Ubuntu runner (CI run 38091030224, unpinned, shared machine) the pipeline
+benchmark gave 5,103 events/s and the gateway path 3,425 events/s sustained.
+
 The full gateway path meets 2,000 events/s in one process even on the slow core, so step 2 is
 not triggered and no worker design is started. The margin on a slow core is small (about 20%).
 Server cores are usually closer to the performance core, but only a reference-node run shows it.
