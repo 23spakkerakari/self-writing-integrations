@@ -1,12 +1,16 @@
 """``carto-edge bench``: edge pipeline throughput (spec 17: 2,000 events/s sustained; M1 plan).
 
     carto-edge bench --input DIR --config FILE [--seconds 30] [--max-records 50000]
+                     [--path pipeline|gateway]
+
+``--path gateway`` runs the full gateway ingest path instead (:mod:`carto_edge.cli.bench_gateway`,
+ADR 0028); what follows describes the default ``pipeline`` path.
 
 Builds an ``analyze``-mode runtime with a throwaway local key in a temporary state directory,
-loads up to ``--max-records`` raw records from the configuration's upload sources (paths
-relative to ``--input``) into memory, runs pass 1 (``observe_only``) over them once and decides
-every field (which loads the PII model) so every field is classified as the analyzer would,
-then cycles ``process`` over the list until
+loads up to ``--max-records`` raw records, an equal share per source, from the configuration's
+upload sources (paths relative to ``--input``) into memory, runs pass 1 (``observe_only``) over
+them once and decides every field (which loads the PII model) so every field is classified as
+the analyzer would, then cycles ``process`` over the list until
 ``--seconds`` have passed, writing the reveal vault every :data:`VAULT_CHUNK` results as the
 gateway and the analyzer do. Reading files is outside the measurement.
 
@@ -60,6 +64,8 @@ __all__ = [
     "add_bench_arguments",
     "bench",
     "format_bench",
+    "load_records",
+    "percentiles",
     "run_bench",
 ]
 
@@ -115,11 +121,16 @@ async def _collect(connector: ReadConnector, limit: int) -> list[RawRecord]:
     return records
 
 
-def _load(runtime: EdgeRuntime, sources: Sequence[SourceConfig], limit: int) -> list[RawRecord]:
+def load_records(
+    runtime: EdgeRuntime, sources: Sequence[SourceConfig], limit: int
+) -> list[RawRecord]:
+    """Up to ``limit`` records, an equal share from every source (each in its own order), so
+    the mix covers every format the configuration reads, not just the first files."""
     context = build_connector_context(runtime)
     records: list[RawRecord] = []
+    share = -(-limit // len(sources)) if sources else 0
     for source in sources:
-        remaining = limit - len(records)
+        remaining = min(share, limit - len(records))
         if remaining <= 0:
             break
         try:
@@ -130,7 +141,7 @@ def _load(runtime: EdgeRuntime, sources: Sequence[SourceConfig], limit: int) -> 
     return records
 
 
-def _percentiles(latencies: list[float]) -> tuple[float, float, float]:
+def percentiles(latencies: list[float]) -> tuple[float, float, float]:
     if not latencies:
         return 0.0, 0.0, 0.0
     if len(latencies) == 1:
@@ -183,7 +194,7 @@ def _measure(
     if pending:
         runtime.write_vault_entries(pending)
     elapsed = time.perf_counter() - start
-    p50, p95, p99 = _percentiles(latencies)
+    p50, p95, p99 = percentiles(latencies)
     return BenchResult(
         sources=sources,
         records_loaded=total,
@@ -234,7 +245,7 @@ def bench(
             msg = f"keys unusable: {describe(exc)}"
             raise AnalyzeError(msg, EXIT_FAILURE) from exc
         try:
-            records = _load(runtime, sources, max_records)
+            records = load_records(runtime, sources, max_records)
             if not records:
                 msg = "the inputs hold no record to benchmark"
                 raise AnalyzeError(msg, EXIT_FAILURE)
@@ -298,14 +309,32 @@ def add_bench_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MAX_RECORDS,
         help=f"Records loaded into memory (default {DEFAULT_MAX_RECORDS})",
     )
+    parser.add_argument(
+        "--path",
+        choices=("pipeline", "gateway"),
+        default="pipeline",
+        help="pipeline: parse to vault in analyzer mode (default); gateway: the full ingest path "
+        "with buffer and forwarder (ADR 0028)",
+    )
 
 
 def run_bench(args: argparse.Namespace) -> int:
+    from carto_edge.cli.bench_gateway import bench_gateway, format_gateway_bench  # noqa: PLC0415
+
     try:
-        result = bench(args.config, args.input, seconds=args.seconds, max_records=args.max_records)
+        if args.path == "gateway":
+            lines = format_gateway_bench(
+                bench_gateway(
+                    args.config, args.input, seconds=args.seconds, max_records=args.max_records
+                )
+            )
+        else:
+            lines = format_bench(
+                bench(args.config, args.input, seconds=args.seconds, max_records=args.max_records)
+            )
     except AnalyzeError as exc:
         print(f"carto-edge bench: {exc}", file=sys.stderr)
         return exc.code
-    for line in format_bench(result):
+    for line in lines:
         emit(line)
     return EXIT_OK

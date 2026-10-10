@@ -1,6 +1,6 @@
-"""carto-edge bench (spec 17, plan M1): loads records once, cycles the pipeline for the given
-time, reports throughput, latency percentiles, drops and the 2,000 events/s verdict, and leaves
-no state behind (its temporary key and vault are closed before the directory goes)."""
+"""carto-edge bench (spec 17, plan M1, ADR 0028): loads an equal share of records from every
+source, cycles the pipeline (or the full gateway path) for the given time, reports throughput,
+latency percentiles, drops and the 2,000 events/s verdict, and leaves no state behind."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import structlog
 
 from carto_edge.cli.analyze import AnalyzeError
 from carto_edge.cli.bench import TARGET_EVENTS_PER_SECOND, BenchResult, bench, format_bench
+from carto_edge.cli.bench_gateway import GatewayBenchResult, bench_gateway, format_gateway_bench
 from carto_edge.cli.main import main
 from carto_edge.pipeline.pii import RegexDetector
 from carto_simulator.api import GenerationRequest, generate
@@ -45,8 +46,8 @@ def restore_logging() -> Iterator[None]:
 def test_bench_measures_throughput_and_latency(sim_dir: Path) -> None:
     result = bench(CONFIG, sim_dir, seconds=0.5, max_records=300, detector=RegexDetector())
     assert isinstance(result, BenchResult)
-    assert result.records_loaded == 300
-    assert result.sources >= 1
+    assert 0 < result.records_loaded <= 300
+    assert result.sources == 7
     assert result.processed >= 1
     assert result.events + sum(result.dropped.values()) == result.processed
     assert result.seconds >= 0.5
@@ -69,7 +70,8 @@ def test_the_command_runs_for_one_second(
     args = ["--input", str(sim_dir), "--config", str(CONFIG), "--max-records", "200"]
     assert main(["bench", *args, "--seconds", "1"]) == 0
     out = capsys.readouterr().out
-    assert "carto-edge bench: 200 records" in out
+    assert "carto-edge bench: " in out
+    assert "from 7 sources" in out
     assert "events/s" in out
     assert "p50" in out
     assert "p95" in out
@@ -90,3 +92,56 @@ def test_usage_errors(
     with pytest.raises(AnalyzeError, match="no record") as nothing:
         bench(CONFIG, empty, seconds=0.1, detector=RegexDetector())
     assert nothing.value.code == 1
+
+
+def test_bench_loads_an_equal_share_from_every_source(sim_dir: Path) -> None:
+    from carto_edge.cli.analyze import upload_sources  # noqa: PLC0415
+    from carto_edge.cli.bench import load_records  # noqa: PLC0415
+    from carto_edge.config import EdgeSettings, load_sources_file  # noqa: PLC0415
+    from carto_edge.runtime import build_runtime  # noqa: PLC0415
+
+    sources_file = load_sources_file(CONFIG)
+    sources = upload_sources(sources_file, sim_dir.resolve())
+    settings = EdgeSettings(state_dir=sim_dir.parent / "load-state")
+    runtime = build_runtime(
+        settings, sources_file, mode="analyze", detector=RegexDetector(), init_local_keys=True
+    )
+    try:
+        records = load_records(runtime, sources, 70)
+    finally:
+        runtime.close()
+    by_source: dict[str, int] = {}
+    for record in records:
+        by_source[record.source_id] = by_source.get(record.source_id, 0) + 1
+    assert len(by_source) >= 5
+    assert max(by_source.values()) <= 10
+
+
+def test_gateway_bench_runs_the_buffer_and_the_forwarder(sim_dir: Path) -> None:
+    result = bench_gateway(CONFIG, sim_dir, seconds=0.5, max_records=300, detector=RegexDetector())
+    assert isinstance(result, GatewayBenchResult)
+    assert result.processed >= 1
+    assert result.events + sum(result.dropped.values()) == result.processed
+    assert result.ingest_seconds >= 0.5
+    assert result.drained
+    assert result.forwarded == result.events
+    assert result.batches >= 1
+    assert 0 < result.p50_us <= result.p95_us <= result.p99_us
+    assert result.target_met is (result.sustained_events_per_second >= TARGET_EVENTS_PER_SECOND)
+    lines = format_gateway_bench(result)
+    assert any("sustained" in line for line in lines)
+    assert "spec 17 target" in lines[-1]
+
+
+def test_the_gateway_path_from_the_command(
+    sim_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    restore_logging: None,
+) -> None:
+    monkeypatch.setenv("CARTO_PII__ENABLED", "false")
+    args = ["--input", str(sim_dir), "--config", str(CONFIG), "--max-records", "200"]
+    assert main(["bench", *args, "--seconds", "1", "--path", "gateway"]) == 0
+    out = capsys.readouterr().out
+    assert "carto-edge bench (gateway path)" in out
+    assert "events/s sustained" in out

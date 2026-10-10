@@ -99,10 +99,14 @@ jobs:
           python3 tools/ci/annotate.py tail leak.log --title "make leak" --lines 80
       - name: Throughput benchmark (spec 17, informative on shared runners)
         run: make bench SCENARIO=shop | tee bench.txt
+      - name: Gateway path benchmark (ADR 0028, informative on shared runners)
+        run: make bench-gateway SCENARIO=shop | tee bench-gateway.txt
       - name: Benchmark summary
         run: |
           echo "## Edge benchmark" >> "$GITHUB_STEP_SUMMARY"
-          cat bench.txt >> "$GITHUB_STEP_SUMMARY"
+          cat bench.txt bench-gateway.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=bench pipeline::$(grep -E '^  events ' bench.txt | tr -s ' ')"
+          echo "::notice title=bench gateway::$(grep -E '^  forwarded ' bench-gateway.txt | tr -s ' ')"
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-manifest

@@ -3,7 +3,7 @@
     carto-edge analyze --config FILE --input DIR --out DIR [--state-dir DIR] [--tenant-id ID]
                        [--locator-map] [--producer TEXT]
     carto-edge gateway
-    carto-edge bench --input DIR --config FILE [--seconds N] [--max-records N]
+    carto-edge bench --input DIR --config FILE [--seconds N] [--max-records N] [--path P]
     carto-edge audit verify --file PATH
     carto-edge key {status,rotate,rewrap}
     carto-edge secret {set,list,delete}

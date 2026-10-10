@@ -14,7 +14,7 @@ SEED ?= 1
 SIM_OUT ?= sim-out
 EVAL_OUT ?= eval/reports
 
-.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench analyze sec sbom images dev dev-down release clean
+.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench bench-gateway analyze sec sbom images dev dev-down release clean
 
 help: ## Show targets
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -67,6 +67,9 @@ leak: ## Spec 18.3 leak test over scenario $(SCENARIO): bundle, forwarded batche
 
 bench: ## Edge pipeline throughput benchmark (spec 17, M1 acceptance: 2,000 events/s sustained)
 > $(UV) run carto-edge bench --input $(SIM_OUT)/$(SCENARIO) --config simulator/analyze.$(SCENARIO).yaml --seconds 30
+
+bench-gateway: ## Full gateway ingest path benchmark: buffer, cursors, forwarder (ADR 0028)
+> $(UV) run carto-edge bench --path gateway --input $(SIM_OUT)/$(SCENARIO) --config simulator/analyze.$(SCENARIO).yaml --seconds 30
 
 sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 > $(UV) run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
