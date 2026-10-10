@@ -44,10 +44,16 @@ def test_parse_logfmt_quoting_and_escapes() -> None:
     }
 
 
-def test_parse_logfmt_bare_keys_and_spacing() -> None:
-    assert parse_logfmt("  level=info   debug  retry=3 ") == {
+def test_parse_logfmt_bare_words_are_not_logfmt() -> None:
+    """A bare word is usually an unquoted message running on; taken as a flag it would turn
+    the words, names included, into field names (spec 2.3 invariant 2)."""
+    assert parse_logfmt("  level=info   debug  retry=3 ") is None
+    assert parse_logfmt("msg=refund approved for MKBOB Higgins order_id=4471") is None
+
+
+def test_parse_logfmt_spacing() -> None:
+    assert parse_logfmt("  level=info     retry=3 ") == {
         "level": "info",
-        "debug": "true",
         "retry": "3",
     }
 

@@ -252,6 +252,12 @@ def _iter_lines(stream: IO[bytes], encoding: str) -> Iterator[tuple[int, str, in
             yield number, text, size
 
 
+def _mtime(item: _Input) -> datetime:
+    """The file's modification time: the receive time of its records. Deterministic, so a
+    record without a source timestamp gets the same ``event_id`` on every run (ADR 0025)."""
+    return datetime.fromtimestamp(item.mtime, tz=UTC)
+
+
 @register("upload")
 class UploadConnector:
     """Spec 8.1.1. Local files only; no network, no writes."""
@@ -454,30 +460,31 @@ class UploadConnector:
                                 raw, min(info.file_size, self.config.max_file_bytes), entry_name
                             )
                         )
-                        yield from self._content_records(bounded, entry_name, key, after)
+                        yield from self._content_records(
+                            bounded, entry_name, key, after, _mtime(item)
+                        )
             return
         after = skip_line if skip_file == item.key else 0
         if item.suffix == ".gz":
             name = item.path.name[:-3]
             with gzip.open(item.path, "rb") as raw:
                 bounded = io.BufferedReader(_BoundedReader(raw, self.config.max_file_bytes, name))
-                yield from self._content_records(bounded, name, item.key, after)
+                yield from self._content_records(bounded, name, item.key, after, _mtime(item))
             return
         with item.path.open("rb") as handle:
-            yield from self._content_records(handle, item.path.name, item.key, after)
+            yield from self._content_records(handle, item.path.name, item.key, after, _mtime(item))
 
     def _content_records(
-        self, stream: IO[bytes], name: str, key: str, after: int
+        self, stream: IO[bytes], name: str, key: str, after: int, received_at: datetime
     ) -> Iterator[RawRecord]:
         if self.config.kind == "rows":
-            yield from self._row_records(stream, name, key, after)
+            yield from self._row_records(stream, name, key, after, received_at)
         else:
-            yield from self._line_records(stream, name, key, after)
+            yield from self._line_records(stream, name, key, after, received_at)
 
     def _line_records(
-        self, stream: IO[bytes], name: str, key: str, after: int
+        self, stream: IO[bytes], name: str, key: str, after: int, now: datetime
     ) -> Iterator[RawRecord]:
-        now = datetime.now(UTC)
         for number, text, size in _iter_lines(stream, self.config.encoding):
             if number <= after:
                 continue
@@ -494,11 +501,10 @@ class UploadConnector:
             )
 
     def _row_records(
-        self, stream: IO[bytes], name: str, key: str, after: int
+        self, stream: IO[bytes], name: str, key: str, after: int, now: datetime
     ) -> Iterator[RawRecord]:
         table = self.config.table or name
         primary_key = self.config.primary_key or "id"
-        now = datetime.now(UTC)
         text_stream = io.TextIOWrapper(
             stream, encoding=self.config.encoding, errors="replace", newline=""
         )
@@ -551,7 +557,8 @@ class UploadConnector:
                 "name": item.path.name,
                 "size": item.size,
                 "mtime": mtime.isoformat(),
-                "directory": str(item.path.parent),
+                # Only the directory's own name: the full path names the analyst's machine.
+                "directory": item.path.parent.name,
             },
             commit_cursor={"file": item.key, "line": 0},
             size_bytes=item.size,

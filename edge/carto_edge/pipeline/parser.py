@@ -39,7 +39,7 @@ from carto_common.logging import get_logger
 from carto_edge.config import DEFAULT_MESSAGE_FIELDS, ParseConfig, RecordFormat, SourceConfig
 from carto_edge.pipeline.model import ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.access_log import AccessLogParser
-from carto_edge.pipeline.parse.common import flatten, key_signature, utf8_len
+from carto_edge.pipeline.parse.common import flatten, key_signature, safe_path, utf8_len
 from carto_edge.pipeline.parse.csv import CsvHeader, CsvParser, looks_like_csv_header
 from carto_edge.pipeline.parse.detect import FormatDetector
 from carto_edge.pipeline.parse.json import parse_json
@@ -49,7 +49,13 @@ from carto_edge.pipeline.parse.xml import parse_xml
 from carto_edge.pipeline.severity import detect_severity, map_level
 from carto_edge.pipeline.templates import TemplateStore
 from carto_edge.pipeline.timestamps import find_timestamp, resolve_zone
-from carto_schema.event import MAX_TEMPLATE_TEXT_LEN, EventKind, ObservedAtQuality, Severity
+from carto_schema.event import (
+    MAX_FIELD_NAME_LEN,
+    MAX_TEMPLATE_TEXT_LEN,
+    EventKind,
+    ObservedAtQuality,
+    Severity,
+)
 
 __all__ = ["ParseFailure", "RecordParser"]
 
@@ -287,7 +293,7 @@ class RecordParser:
         return None
 
     def _finish(self, raw: RawRecord, draft: _Draft) -> ParsedRecord:
-        fields = draft.fields
+        fields = _safe_fields(draft.fields)
         config = self._config
         system_id = raw.system_id
         template_text = draft.template_text
@@ -298,7 +304,7 @@ class RecordParser:
             if template_text is None:
                 template_text = mined
         if template_text is None:
-            template_text = key_signature(draft.top_keys)
+            template_text = key_signature(tuple(safe_path(key) for key in draft.top_keys))
         if len(template_text) > MAX_TEMPLATE_TEXT_LEN:
             template_text = template_text[:MAX_TEMPLATE_TEXT_LEN]
 
@@ -357,6 +363,18 @@ class RecordParser:
             cached = self._config.model_copy(update={"timestamp_field": override})
             self._timestamp_configs[override] = cached
         return cached
+
+
+def _safe_fields(fields: dict[str, str]) -> dict[str, str]:
+    """Field names never carry values (spec 2.3 invariant 2): value-like path segments become
+    ``*``; when two paths mask to the same name the first value is kept. Longer than the
+    canonical event allows, a path is dropped."""
+    out: dict[str, str] = {}
+    for path, value in fields.items():
+        safe = safe_path(path)
+        if safe not in out and len(safe) <= MAX_FIELD_NAME_LEN:
+            out[safe] = value
+    return out
 
 
 def _utc(value: datetime) -> datetime:

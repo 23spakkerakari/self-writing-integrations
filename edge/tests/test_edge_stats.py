@@ -17,7 +17,9 @@ from hypothesis import strategies as st
 from carto_edge.config import ClassifySettings
 from carto_edge.pipeline.pii import SECRET_MIN_LEN
 from carto_edge.pipeline.stats import (
+    COUNTED_VALUE_MAX_LEN,
     HLL_PRECISION,
+    MAX_COUNTED_VALUES,
     MAX_SHAPES,
     OVERFLOW_SHAPE,
     SNAPSHOT_VERSION,
@@ -298,3 +300,33 @@ def test_maybe_flush_without_a_path_is_a_no_op() -> None:
     store = FieldStatsStore(sample_size=8)
     store.observe("sys_a/tpl_000000000001/x", "1")
     assert store.maybe_flush(now=10_000.0) is False
+
+
+def test_value_counts_are_exact_and_never_persisted() -> None:
+    stats = FieldStats(8)
+    for value in ("yes", "yes", "no", "yes", MARKER, "", None):
+        stats.observe(value)
+    assert stats.value_count("yes") == 3
+    assert stats.value_count("no") == 1
+    assert stats.value_count(MARKER) == 1
+    assert stats.value_count("maybe") == 0
+    long_value = "x" * (COUNTED_VALUE_MAX_LEN + 10)
+    stats.observe(long_value)
+    stats.observe(long_value)
+    assert stats.value_count(long_value) == 2
+    assert stats.value_count(long_value + "y") == 0
+    snapshot = json.dumps(stats.snapshot())
+    assert MARKER not in snapshot
+    assert "yes" not in snapshot
+    restored = FieldStats.restore(json.loads(snapshot), 8)
+    assert restored.value_count("yes") == 0  # counts start empty after a restart
+
+
+def test_value_counts_stop_when_the_field_has_too_many_distinct_values() -> None:
+    stats = FieldStats(8)
+    for _ in range(3):
+        stats.observe("yes")
+    for n in range(MAX_COUNTED_VALUES):
+        stats.observe(f"id-{n}")
+    assert stats.value_count("yes") == 0
+    assert stats.value_count("id-1") == 0

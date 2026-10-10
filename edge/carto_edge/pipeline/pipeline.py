@@ -219,6 +219,12 @@ class EdgePipeline:
     def source(self, source_id: str) -> SourceConfig | None:
         return self._sources.get(source_id)
 
+    def reset_parsers(self) -> None:
+        """Forget per-source parser state (a learned CSV header, a locked format). The analyzer
+        calls it between its passes so pass 2 reads each file from its first line again."""
+        with self._lock:
+            self._parsers.clear()
+
     def parser_for(self, source_id: str) -> RecordParser | None:
         """The parser of a configured source, created on first use."""
         parser = self._parsers.get(source_id)
@@ -292,7 +298,12 @@ class EdgePipeline:
             decision = decisions[path]
             name = path[:MAX_FIELD_NAME_LEN]
             if decision.policy is Policy.KEEP:
-                if len(attributes) < MAX_ATTRIBUTES and attribute_is_clean(value, self._detector):
+                ref = field_ref(parsed.system_id, parsed.template_id, path)
+                if (
+                    len(attributes) < MAX_ATTRIBUTES
+                    and self._classifier.keeps(ref, value)
+                    and attribute_is_clean(value, self._detector)
+                ):
                     attributes[path[:MAX_ATTRIBUTE_KEY_LEN]] = truncate_attribute(value)
                 else:
                     self.counters.attributes_refused += 1

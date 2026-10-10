@@ -284,7 +284,7 @@ async def test_files_kind_emits_file_arrived_with_mtime(tmp_path: Path) -> None:
         "name": "SHIP_20260923_2112.csv",
         "size": len("shipment_id\n"),
         "mtime": arrival.isoformat(),
-        "directory": str(outbound),
+        "directory": "outbound",  # the name only: no machine path in clear
     }
     assert record.commit_cursor == {"file": str(first), "line": 0}
     window = [

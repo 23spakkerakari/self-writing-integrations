@@ -341,6 +341,7 @@ def _run(
             locator_map=locator_path,
             clock=clock,
         ) as writer:
+            runtime.pipeline.reset_parsers()  # pass 2 reads each file from its first line
             second = _connectors(runtime, sources)
             for source, connector in zip(sources, second, strict=True):
                 handle = functools.partial(_emit_chunk, runtime, writer, source.id)
@@ -437,6 +438,9 @@ def run_analyze(args: argparse.Namespace) -> int:
     except AnalyzeError as exc:
         print(f"carto-edge analyze: {exc}", file=sys.stderr)
         return exc.code
+    except Exception as exc:  # never a traceback: it could quote a value
+        print(f"carto-edge analyze: internal error: {type(exc).__name__}", file=sys.stderr)
+        return EXIT_FAILURE
     for line in format_summary(result):
         emit(line)
     return EXIT_OK

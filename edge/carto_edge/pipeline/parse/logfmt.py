@@ -3,10 +3,12 @@
 ``key=value`` pairs separated by whitespace. A value is bare (up to the next whitespace) or
 double-quoted with ``\\"`` and ``\\\\`` escapes (``\\n``, ``\\t``, ``\\r`` are honoured too, as
 Go's logfmt writes them); an unterminated quote runs to the end of the line. A bare key (no
-``=``) is a flag and gets the value ``true``. A key cannot be empty and cannot contain
-whitespace, ``=`` or a quote. A line is logfmt only when its first token is a ``key=`` pair and
-every token is a pair or a flag; otherwise :func:`parse_logfmt` returns ``None`` so the next
-parser in spec 8.2 order gets a turn. The scanner is a single pass over the characters: no
+``=``) is not accepted: in practice a bare word is an unquoted message running on
+(``msg=refund approved for Alice``), and taking it for a flag would turn the words, names
+included, into field names that leave the edge in clear. A key cannot be empty and cannot
+contain whitespace, ``=`` or a quote. A line is logfmt only when every token is a ``key=`` pair;
+otherwise :func:`parse_logfmt` returns ``None`` so the next parser in spec 8.2 order gets a
+turn. The scanner is a single pass over the characters: no
 regular expressions, linear time.
 """
 
@@ -67,8 +69,7 @@ def parse_logfmt(text: str) -> dict[str, str] | None:
         if not key:
             return None
         if index >= length or text[index].isspace():
-            fields[key] = _FLAG_VALUE
-            continue
+            return None  # a bare word: not logfmt (see the module docstring)
         if text[index] != "=":
             return None
         index += 1

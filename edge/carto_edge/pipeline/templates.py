@@ -24,6 +24,11 @@ Two things are done differently from a stock Drain3 setup, both for spec 2.3:
   :meth:`TemplateStore.flush`/:meth:`TemplateStore.close`. A corrupt or oversized file is
   logged by path and ignored; mining starts fresh.
 
+A third rule for the same invariant: Drain3 keeps a one-member cluster's message verbatim, so
+a word that appeared once (a name, a code word, free text) would become a "constant". Until a
+cluster has :data:`MIN_CLUSTER_SIZE` members every token of its messages is a parameter and the
+template is all ``<*>``; constants appear once the message shape has been seen that often.
+
 The registry (:meth:`TemplateStore.registry`) counts records per template with the event kind
 and the first and last ``observed_at``; the offline analyzer writes it as ``templates.json``
 (``carto_schema.bundle.BundleTemplate``). Memory is bounded by ``max_clusters`` per system
@@ -58,6 +63,7 @@ __all__ = [
     "MASK",
     "MAX_MESSAGE_TOKENS",
     "MAX_STATE_BYTES",
+    "MIN_CLUSTER_SIZE",
     "STATE_VERSION",
     "TemplateRecord",
     "TemplateStore",
@@ -71,6 +77,8 @@ MAX_MESSAGE_TOKENS: Final = 512
 """Tokens of one message fed to Drain3; the rest is cut (bounded work per record)."""
 MAX_STATE_BYTES: Final = 64 * 1024 * 1024
 STATE_VERSION: Final = 1
+MIN_CLUSTER_SIZE: Final = 3
+"""Messages a Drain3 cluster needs before its common words count as template constants."""
 DEFAULT_MAX_CLUSTERS: Final = 10_000
 DEFAULT_FLUSH_INTERVAL: Final = 60.0
 DEFAULT_CACHE_SIZE: Final = 8192
@@ -302,8 +310,10 @@ class TemplateStore:
         flush_interval_seconds: float = DEFAULT_FLUSH_INTERVAL,
         max_clusters: int = DEFAULT_MAX_CLUSTERS,
         cache_size: int = DEFAULT_CACHE_SIZE,
+        min_cluster_size: int = MIN_CLUSTER_SIZE,
     ) -> None:
         self._directory = directory
+        self._min_cluster_size = max(1, min_cluster_size)
         self._flush_interval = max(0.0, flush_interval_seconds)
         self._max_clusters = max(1, max_clusters)
         self._cache_size = max(16, cache_size)
@@ -345,7 +355,10 @@ class TemplateStore:
             template = str(result["template_mined"])
             if result["change_type"] == _CHANGED or len(state.cache) >= self._cache_size:
                 state.cache.clear()
-            state.cache[masked] = template
+            if int(result.get("cluster_size", 0)) >= self._min_cluster_size:
+                state.cache[masked] = template
+            else:
+                template = " ".join(MASK for _ in tokens)  # not yet a constant: all parameters
             state.dirty = True
             self._maybe_flush()
         template_tokens = template.split(" ")

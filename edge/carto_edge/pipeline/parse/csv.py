@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from carto_edge.config import ParseConfig
-from carto_edge.pipeline.parse.common import MAX_FIELDS
+from carto_edge.pipeline.parse.common import MAX_FIELDS, safe_segment
 
 __all__ = ["CsvHeader", "CsvParser", "looks_like_csv_header", "parse_csv_row", "split_csv_line"]
 
@@ -84,6 +84,19 @@ def looks_like_csv_header(text: str, delimiter: str) -> bool:
     return len(set(cells)) == len(cells)
 
 
+_HEADER_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9 _./#()-]{0,127}")
+
+
+def _header_is_names(cells: Sequence[str]) -> bool:
+    """A configured header row must look like column names: every cell non-empty, name-like
+    (letters first, no ``@``), without a run of three digits, and distinct."""
+    if not cells or len(set(cells)) != len(cells):
+        return False
+    return all(
+        _HEADER_NAME.fullmatch(cell) is not None and safe_segment(cell) == cell for cell in cells
+    )
+
+
 class CsvParser:
     """Per-source CSV state: the known columns and the delimiter (spec 8.2 item 4)."""
 
@@ -122,6 +135,11 @@ class CsvParser:
             header = tuple(cell.strip() for cell in cells)
             self._header_pending = False
             if self._columns is None:
+                if not _header_is_names(header):
+                    # A data row where a header was expected: its cells would become field
+                    # names in clear. Positional names instead, and the row stays data.
+                    self._columns = tuple(f"col_{i}" for i in range(len(cells)))
+                    return parse_csv_row(text, self._columns, self._delimiter)
                 self._columns = header
             return CsvHeader(columns=header)
         if self._columns is None:

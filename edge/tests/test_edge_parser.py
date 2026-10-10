@@ -58,7 +58,7 @@ def parsed(result: ParsedRecord | ParseFailure) -> ParsedRecord:
 
 
 def test_parser_webstore_ndjson_line() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     line = (
         '{"ts": "2026-09-23T13:04:06.001Z", "level": "info", "msg": "cart created", '
         '"cart_id": "c-88213", "items": 3, "region": "us-east", "channel": "web"}'
@@ -83,7 +83,7 @@ def test_parser_webstore_ndjson_line() -> None:
 
 
 def test_parser_message_params_become_msg_param_fields() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     first = parsed(
         parser.parse(raw('{"ts": "2026-09-23T13:04:06Z", "msg": "user alice logged in"}'))
     )
@@ -97,14 +97,16 @@ def test_parser_message_params_become_msg_param_fields() -> None:
 
 
 def test_parser_structured_record_without_message_uses_key_signature() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     record = parsed(parser.parse(raw('{"ts": "2026-09-23T13:04:06Z", "b": 1, "a": {"c": 2}}')))
     assert record.template_text == "keys:a,b,ts"
     assert record.fields == {"b": "1", "a.c": "2"}
 
 
 def test_parser_configured_message_field_and_actor_field() -> None:
-    parser = RecordParser(source(message_field="event", actor_field="user"), TemplateStore())
+    parser = RecordParser(
+        source(message_field="event", actor_field="user"), TemplateStore(min_cluster_size=1)
+    )
     record = parsed(parser.parse(raw('{"event": "login ok 7", "user": "alice", "msg": "kept"}')))
     assert record.template_text == f"login ok {MASK}"
     assert record.fields == {"msg.param_0": "7", "user": "alice", "msg": "kept"}
@@ -112,7 +114,7 @@ def test_parser_configured_message_field_and_actor_field() -> None:
 
 
 def test_parser_orders_logfmt_line_with_error_status() -> None:
-    parser = RecordParser(source("sys_orders"), TemplateStore())
+    parser = RecordParser(source("sys_orders"), TemplateStore(min_cluster_size=1))
     line = (
         'ts=2026-09-28T14:20:19.579Z level=error msg="payment request failed" order_id=7816 '
         "merchant_ref=X9-3787 http_status=503"
@@ -126,7 +128,7 @@ def test_parser_orders_logfmt_line_with_error_status() -> None:
 
 
 def test_parser_payments_xml_root_is_the_template_and_http_status_sets_severity() -> None:
-    parser = RecordParser(source("sys_payments"), TemplateStore())
+    parser = RecordParser(source("sys_payments"), TemplateStore(min_cluster_size=1))
     failed = (
         "<paymentMessage><timestamp>2026-09-28T10:20:19.186-04:00</timestamp>"
         "<merchantRef>X9-3787</merchantRef><amount>596.99</amount><currency>USD</currency>"
@@ -158,7 +160,7 @@ def test_parser_payments_xml_root_is_the_template_and_http_status_sets_severity(
 def test_parser_export_log_text_lines_with_local_zone() -> None:
     parser = RecordParser(
         source("sys_warehouse", format=RecordFormat.TEXT, timezone="America/New_York"),
-        TemplateStore(),
+        TemplateStore(min_cluster_size=1),
     )
     record = parsed(
         parser.parse(
@@ -188,7 +190,7 @@ def test_parser_export_log_text_lines_with_local_zone() -> None:
 
 
 def test_parser_text_without_level_uses_the_error_lexicon() -> None:
-    parser = RecordParser(source(format=RecordFormat.TEXT), TemplateStore())
+    parser = RecordParser(source(format=RecordFormat.TEXT), TemplateStore(min_cluster_size=1))
     record = parsed(parser.parse(raw("2026-09-23T21:12:41Z connection refused by 10.0.0.1")))
     assert record.severity == Severity.ERROR
     record = parsed(parser.parse(raw("2026-09-23T21:12:41Z connection established to 10.0.0.1")))
@@ -196,7 +198,7 @@ def test_parser_text_without_level_uses_the_error_lexicon() -> None:
 
 
 def test_parser_access_log_sets_kind_and_template() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     line = (
         '203.0.113.9 - - [23/Sep/2026:13:04:06 +0000] "GET /orders/4471/items HTTP/1.1" 503 512 '
         '"-" "curl/8.0"'
@@ -222,7 +224,7 @@ def test_parser_access_log_custom_pattern() -> None:
                 r"^(?P<time>\S+) (?P<method>[A-Z]+) (?P<path>\S+) (?P<status>\d{3})$"
             ),
         ),
-        TemplateStore(),
+        TemplateStore(min_cluster_size=1),
     )
     record = parsed(parser.parse(raw("2026-09-23T13:04:06Z GET /u/42 404")))
     assert record.kind == EventKind.HTTP_ACCESS
@@ -235,7 +237,7 @@ def test_parser_access_log_custom_pattern() -> None:
 def test_parser_csv_file_with_header_then_rows_then_a_new_file() -> None:
     parser = RecordParser(
         source("sys_warehouse", format=RecordFormat.CSV, timezone="America/New_York"),
-        TemplateStore(),
+        TemplateStore(min_cluster_size=1),
     )
     header = "id,po_num,order_ref,status,warehouse_code,created_by,created_at"
     row = "1,88-210,SO-0004471,SHIPPED,DC-01,svc_wms_integration,2026-09-23 09:21:04"
@@ -259,7 +261,7 @@ def test_parser_csv_file_with_header_then_rows_then_a_new_file() -> None:
 
 
 def test_parser_csv_auto_detected_from_a_header_line() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     assert parser.parse(raw("po_num,carrier", locator="SHIP_1.csv:line:1")) == ParseFailure(
         "csv_header"
     )
@@ -271,7 +273,9 @@ def test_parser_csv_auto_detected_from_a_header_line() -> None:
 
 
 def test_parser_fields_records_rows_and_file_events_use_the_hint() -> None:
-    parser = RecordParser(source("sys_warehouse", timezone="America/New_York"), TemplateStore())
+    parser = RecordParser(
+        source("sys_warehouse", timezone="America/New_York"), TemplateStore(min_cluster_size=1)
+    )
     row = {
         "id": 1,
         "po_num": "88-210",
@@ -326,7 +330,7 @@ def test_parser_fields_records_rows_and_file_events_use_the_hint() -> None:
 
 
 def test_parser_fields_with_text_mines_the_text_as_the_message() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     record = parsed(
         parser.parse(
             raw(
@@ -343,7 +347,7 @@ def test_parser_fields_with_text_mines_the_text_as_the_message() -> None:
 
 
 def test_parser_webhook_without_message_uses_key_signature() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     record = parsed(
         parser.parse(
             raw(
@@ -358,7 +362,7 @@ def test_parser_webhook_without_message_uses_key_signature() -> None:
 
 
 def test_parser_missing_timestamp_falls_back_to_ingest_time() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     record = parsed(parser.parse(raw('{"msg": "no clock here"}')))
     assert record.observed_at == RECEIVED
     assert record.observed_at_quality == ObservedAtQuality.INGEST
@@ -368,7 +372,7 @@ def test_parser_missing_timestamp_falls_back_to_ingest_time() -> None:
 
 
 def test_parser_received_at_is_converted_to_utc() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     local = RECEIVED.astimezone(timezone(timedelta(hours=5)))
     record = parsed(
         parser.parse(
@@ -387,22 +391,22 @@ def test_parser_received_at_is_converted_to_utc() -> None:
 
 
 def test_parser_failures_are_values_not_exceptions() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     assert parser.parse(raw("")) == ParseFailure("empty")
     assert parser.parse(raw("   \n")) == ParseFailure("empty")
     assert parser.parse(raw(None)) == ParseFailure("empty")
     assert parser.parse(raw(fields={})) == ParseFailure("empty")
     assert parser.parse(raw(fields={"a": None})) == ParseFailure("empty")
-    strict = RecordParser(source(format=RecordFormat.JSON), TemplateStore())
+    strict = RecordParser(source(format=RecordFormat.JSON), TemplateStore(min_cluster_size=1))
     assert strict.parse(raw("not json")) == ParseFailure("unparseable")
-    strict = RecordParser(source(format=RecordFormat.XML), TemplateStore())
+    strict = RecordParser(source(format=RecordFormat.XML), TemplateStore(min_cluster_size=1))
     assert strict.parse(raw("<a>")) == ParseFailure("unparseable")
-    strict = RecordParser(source(format=RecordFormat.LOGFMT), TemplateStore())
+    strict = RecordParser(source(format=RecordFormat.LOGFMT), TemplateStore(min_cluster_size=1))
     assert strict.parse(raw("no pairs here")) == ParseFailure("unparseable")
 
 
 def test_parser_size_limit_is_enforced_before_parsing() -> None:
-    parser = RecordParser(source(max_record_bytes=256), TemplateStore())
+    parser = RecordParser(source(max_record_bytes=256), TemplateStore(min_cluster_size=1))
     big = json.dumps({"msg": "x" * 300})
     assert parser.parse(raw(big)) == ParseFailure("too_large")
     assert parser.parse(raw('{"msg": "x"}', size_bytes=1000)) == ParseFailure("too_large")
@@ -412,7 +416,7 @@ def test_parser_size_limit_is_enforced_before_parsing() -> None:
 
 
 def test_parser_auto_mode_falls_back_across_formats_per_line() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     assert parsed(parser.parse(raw('{"msg": "a"}'))).parse_format == "json"
     assert parsed(parser.parse(raw("ts=1 msg=b"))).parse_format == "logfmt"
     assert parsed(parser.parse(raw("<r><m>c</m></r>"))).parse_format == "xml"
@@ -424,13 +428,13 @@ def test_parser_auto_mode_falls_back_across_formats_per_line() -> None:
 
 
 def test_parser_configured_format_is_strict() -> None:
-    parser = RecordParser(source(format=RecordFormat.NDJSON), TemplateStore())
+    parser = RecordParser(source(format=RecordFormat.NDJSON), TemplateStore(min_cluster_size=1))
     assert parsed(parser.parse(raw('{"msg": "a"}'))).parse_format == "ndjson"
     assert parser.parse(raw("ts=1 msg=b")) == ParseFailure("unparseable")
 
 
 def test_parser_registers_templates_with_kind_and_seen_range() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     parser = RecordParser(source(), store)
     parsed(parser.parse(raw('{"ts": "2026-09-23T13:04:06Z", "msg": "cart created"}')))
     parsed(parser.parse(raw('{"ts": "2026-09-23T13:05:06Z", "msg": "cart created"}')))
@@ -451,11 +455,11 @@ def test_parser_registers_templates_with_kind_and_seen_range() -> None:
 
 def test_parser_unknown_timezone_is_a_config_error() -> None:
     with pytest.raises(ValueError, match="timezone"):
-        RecordParser(source(timezone="Mars/Olympus"), TemplateStore())
+        RecordParser(source(timezone="Mars/Olympus"), TemplateStore(min_cluster_size=1))
 
 
 def test_parser_notes_record_limits_hit() -> None:
-    parser = RecordParser(source(), TemplateStore())
+    parser = RecordParser(source(), TemplateStore(min_cluster_size=1))
     record = parsed(parser.parse(raw(json.dumps({"msg": "x", "items": list(range(40))}))))
     assert "array_limit" in record.parse_notes
 
@@ -478,7 +482,7 @@ def test_parser_every_simulator_source_parses_with_source_timestamps() -> None:
     for system, folder, pattern, extra, expected_format in specs:
         files = sorted((SIM_DIR / folder).glob(pattern))
         assert files, folder
-        parser = RecordParser(source(system, **extra), TemplateStore())
+        parser = RecordParser(source(system, **extra), TemplateStore(min_cluster_size=1))
         lines = files[0].read_text(encoding="utf-8").splitlines()[:300]
         for number, line in enumerate(lines, start=1):
             record = parsed(parser.parse(raw(line, locator=f"{files[0].name}:line:{number}")))
@@ -495,7 +499,7 @@ def test_parser_every_simulator_source_parses_with_source_timestamps() -> None:
 def test_parser_simulator_csv_sources_with_the_rename() -> None:
     parser = RecordParser(
         source("sys_warehouse", format=RecordFormat.CSV, timezone="America/New_York"),
-        TemplateStore(),
+        TemplateStore(min_cluster_size=1),
     )
     seen_po_fields: set[str] = set()
     for name in ("purchase_orders.csv", "purchase_orders.renamed.csv"):
@@ -515,7 +519,7 @@ def test_parser_simulator_csv_sources_with_the_rename() -> None:
 
 @pytest.mark.slow
 def test_parser_ndjson_throughput_floor() -> None:
-    parser = RecordParser(source("sys_webstore"), TemplateStore())
+    parser = RecordParser(source("sys_webstore"), TemplateStore(min_cluster_size=1))
     lines = [
         json.dumps(
             {

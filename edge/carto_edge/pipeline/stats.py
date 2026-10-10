@@ -16,6 +16,13 @@ estimate, null rate, shape histogram (...). Stats persist across restarts."
 - the number of secret-shaped values ever seen (rule 1,
   :func:`carto_edge.pipeline.pii.looks_like_secret`), counted at observation so the verdict
   survives reservoir eviction and restarts;
+- an exact count per distinct value, for the first :data:`MAX_COUNTED_VALUES` distinct values
+  (values longer than :data:`COUNTED_VALUE_MAX_LEN` characters are counted under a BLAKE2b
+  digest). The classifier lets a ``keep`` field's value travel in clear only once it was seen
+  :data:`carto_edge.pipeline.classify.MIN_KEPT_VALUE_COUNT` times. A field that goes past the
+  cap has too many distinct values to be an attribute: its counts are freed and no value of it
+  is kept again. Like the reservoir, the counts live in memory only and start empty after a
+  restart, so a kept value needs fresh sightings before it travels again;
 - a reservoir sample of values (Algorithm R, ``ClassifySettings.sample_values`` entries, each
   cut at :data:`SAMPLE_MAX_LEN` characters). The reservoir lives in memory only: it is **never**
   part of a snapshot, a file or a log line (spec 2.3 invariants 2 and 7). It is what the
@@ -52,7 +59,9 @@ from carto_edge.pipeline.pii import looks_like_secret
 from carto_schema.forms import shape
 
 __all__ = [
+    "COUNTED_VALUE_MAX_LEN",
     "HLL_PRECISION",
+    "MAX_COUNTED_VALUES",
     "MAX_SHAPES",
     "OVERFLOW_SHAPE",
     "SAMPLE_MAX_LEN",
@@ -69,10 +78,20 @@ OVERFLOW_SHAPE: Final = "<other>"
 """Histogram bucket for shapes beyond the cap. Letters map to ``A`` in a real shape, so no value
 can produce this string and the bucket can never collide with a real shape."""
 SAMPLE_MAX_LEN: Final = 512
+MAX_COUNTED_VALUES: Final = 2048
+"""Distinct values counted exactly per field; past this the field is not an attribute."""
+COUNTED_VALUE_MAX_LEN: Final = 64
+"""Longer values are counted under a 16-byte BLAKE2b digest to bound memory."""
 """Reservoir entries are cut at this many characters; statistics use the full value."""
 
 _HLL_M: Final = 1 << HLL_PRECISION
 _HLL_MAX_RANK: Final = 64 - HLL_PRECISION
+
+
+def _value_key(value: str) -> str | bytes:
+    if len(value) <= COUNTED_VALUE_MAX_LEN:
+        return value
+    return hashlib.blake2b(value.encode("utf-8", errors="surrogatepass"), digest_size=16).digest()
 
 
 def _hll_add(registers: bytearray, data: bytes) -> None:
@@ -120,6 +139,7 @@ class FieldStats:
         "_samples",
         "_secret_count",
         "_shapes",
+        "_values",
         "_whitespace_chars",
         "_whitespace_values",
         "count",
@@ -136,6 +156,8 @@ class FieldStats:
         self.null_count = 0
         self._registers = bytearray(_HLL_M)
         self._shapes: Counter[str] = Counter()
+        # None once the field went past MAX_COUNTED_VALUES distinct values (see the module).
+        self._values: Counter[str | bytes] | None = Counter()
         self._length_min = 0
         self._length_max = 0
         self._length_sum = 0
@@ -161,6 +183,13 @@ class FieldStats:
             self._shapes[value_shape] += 1
         else:
             self._shapes[OVERFLOW_SHAPE] += 1
+        counts = self._values
+        if counts is not None:
+            key = _value_key(value)
+            if key in counts or len(counts) < MAX_COUNTED_VALUES:
+                counts[key] += 1
+            else:
+                self._values = None
         length = len(value)
         non_null = self.non_null_count
         if non_null == 1:
@@ -242,6 +271,18 @@ class FieldStats:
     def samples(self) -> tuple[str, ...]:
         """The reservoir, in memory only. Never persist or log what this returns."""
         return tuple(self._samples)
+
+    def value_count(self, value: str) -> int:
+        """How many times ``value`` was observed since this process started (0 once the field
+        went past :data:`MAX_COUNTED_VALUES` distinct values). In memory only."""
+        counts = self._values
+        if counts is None:
+            return 0
+        return counts.get(_value_key(value), 0)
+
+    def shape_count(self, value_shape: str) -> int:
+        """How many non-null values had ``value_shape`` (0 when it fell past the cap)."""
+        return self._shapes.get(value_shape, 0)
 
     def top_shapes(self, n: int = 8) -> list[tuple[str, float]]:
         """The ``n`` most common shapes with their share of non-null values, most common first;

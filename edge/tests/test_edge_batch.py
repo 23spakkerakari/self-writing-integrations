@@ -362,7 +362,11 @@ def test_metrics_and_vault_entries(
     assert r.metrics.get("carto_edge_events_total", source_id="src_web") == 5
     assert r.metrics.get("carto_edge_vault_entries_total") == outcome.vault_entries
     event_ = r.buffered_events()[0]
-    raw = [identifier.token for identifier in event_.identifiers if identifier.form == "raw"]
+    raw = [
+        identifier.token
+        for identifier in event_.identifiers
+        if identifier.form == "raw" and identifier.field == "cart_id"
+    ]
     assert raw
     assert runtime.vault.reveal(raw, now=NOW) == dict.fromkeys(raw, "c-88001")
 

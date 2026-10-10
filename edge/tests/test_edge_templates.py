@@ -16,6 +16,7 @@ from hypothesis import strategies as st
 
 from carto_edge.pipeline.templates import (
     MASK,
+    MIN_CLUSTER_SIZE,
     TemplateStore,
     compute_template_id,
     generalize_name,
@@ -37,7 +38,7 @@ T0 = datetime(2026, 9, 23, 21, 12, 41, tzinfo=UTC)
 
 
 def test_templates_export_log_templates_and_params_from_the_first_sighting() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     text, params = store.mine("sys_warehouse", EXPORT_LINES[0])
     assert text == "PO export finished: <*> POs written to <*>"
     assert params == ["412", "SHIP_20260923_2112.csv"]
@@ -53,14 +54,14 @@ def test_templates_export_log_templates_and_params_from_the_first_sighting() -> 
 
 
 def test_templates_constant_messages_have_no_params() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     assert store.mine("sys_webstore", "cart created") == ("cart created", [])
     assert store.mine("sys_webstore", "checkout completed") == ("checkout completed", [])
     assert store.mine("sys_orders", "order created from cart") == ("order created from cart", [])
 
 
 def test_templates_variable_words_become_params_after_a_second_sighting() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     first, _ = store.mine("sys_x", "user alice logged in")
     assert first == "user alice logged in"
     second, params = store.mine("sys_x", "user bob logged in")
@@ -72,14 +73,14 @@ def test_templates_variable_words_become_params_after_a_second_sighting() -> Non
 
 
 def test_templates_emails_and_digit_tokens_are_masked_up_front() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     text, params = store.mine("sys_x", "mail sent to jane.smith@example.com id 77")
     assert text == f"mail sent to {MASK} id {MASK}"
     assert params == ["jane.smith@example.com", "77"]
 
 
 def test_templates_are_per_system() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     store.mine("sys_a", "user alice logged in")
     store.mine("sys_a", "user bob logged in")
     text, _ = store.mine("sys_b", "user carol logged in")
@@ -87,7 +88,7 @@ def test_templates_are_per_system() -> None:
 
 
 def test_templates_whitespace_is_normalised_and_long_messages_are_bounded() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     assert store.mine("sys_x", "  a   b\t c ")[0] == "a b c"
     text, params = store.mine("sys_x", " ".join(str(i) for i in range(5000)))
     assert len(text) <= MAX_TEMPLATE_TEXT_LEN
@@ -98,13 +99,15 @@ def test_templates_whitespace_is_normalised_and_long_messages_are_bounded() -> N
 def test_templates_id_is_sha256_of_system_and_text() -> None:
     expected = "tpl_" + hashlib.sha256(b"sys_warehouse\0cart created").hexdigest()[:12]
     assert compute_template_id("sys_warehouse", "cart created") == expected
-    assert TemplateStore().template_id("sys_warehouse", "cart created") == expected
+    assert (
+        TemplateStore(min_cluster_size=1).template_id("sys_warehouse", "cart created") == expected
+    )
     assert TEMPLATE_ID_PATTERN.match(expected)
     assert compute_template_id("sys_a", "x") != compute_template_id("sys_b", "x")
 
 
 def test_templates_registry_counts_and_seen_range() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     tid = store.template_id("sys_x", "cart created")
     store.register("sys_x", tid, "cart created", EventKind.LOG, T0)
     later = T0.replace(hour=22)
@@ -129,7 +132,7 @@ def test_templates_registry_counts_and_seen_range() -> None:
 
 
 def test_templates_persist_and_reload_with_the_same_ids(tmp_path: Path) -> None:
-    with TemplateStore(tmp_path) as store:
+    with TemplateStore(tmp_path, min_cluster_size=1) as store:
         ids_before = {}
         for line in EXPORT_LINES:
             text, _ = store.mine("sys_warehouse", line)
@@ -141,7 +144,7 @@ def test_templates_persist_and_reload_with_the_same_ids(tmp_path: Path) -> None:
     files = sorted(p.name for p in tmp_path.iterdir())
     assert files == ["sys_warehouse.json", "sys_x.json"]
     assert not list(tmp_path.glob("*.tmp"))
-    reloaded = TemplateStore(tmp_path)
+    reloaded = TemplateStore(tmp_path, min_cluster_size=1)
     for line in EXPORT_LINES:
         text, _ = reloaded.mine("sys_warehouse", line)
         assert reloaded.template_id("sys_warehouse", text) == ids_before[line]
@@ -153,7 +156,7 @@ def test_templates_persist_and_reload_with_the_same_ids(tmp_path: Path) -> None:
 
 
 def test_templates_persistence_file_is_plain_json_without_pickle(tmp_path: Path) -> None:
-    with TemplateStore(tmp_path) as store:
+    with TemplateStore(tmp_path, min_cluster_size=1) as store:
         store.mine("sys_x", "cart created 1")
     raw = (tmp_path / "sys_x.json").read_bytes()
     state = json.loads(raw)
@@ -169,7 +172,7 @@ def test_templates_corrupt_state_file_is_ignored_not_fatal(tmp_path: Path) -> No
         json.dumps({"version": 1, "clusters": "nope", "tree": [], "counter": -1, "registry": 3}),
         encoding="utf-8",
     )
-    store = TemplateStore(tmp_path)
+    store = TemplateStore(tmp_path, min_cluster_size=1)
     assert store.mine("sys_x", "a 1")[0] == f"a {MASK}"
     assert store.mine("sys_y", "a 1")[0] == f"a {MASK}"
     assert store.mine("sys_z", "a 1")[0] == f"a {MASK}"
@@ -182,12 +185,12 @@ def test_templates_oversized_state_file_is_ignored(tmp_path: Path) -> None:
     with big.open("wb") as handle:
         handle.seek(70 * 1024 * 1024)
         handle.write(b"\0")
-    store = TemplateStore(tmp_path)
+    store = TemplateStore(tmp_path, min_cluster_size=1)
     assert store.mine("sys_x", "a")[0] == "a"
 
 
 def test_templates_flush_is_periodic_and_only_when_dirty(tmp_path: Path) -> None:
-    store = TemplateStore(tmp_path, flush_interval_seconds=0.0)
+    store = TemplateStore(tmp_path, flush_interval_seconds=0.0, min_cluster_size=1)
     store.mine("sys_x", "a")
     first = (tmp_path / "sys_x.json").stat().st_mtime_ns
     store.flush()
@@ -196,7 +199,7 @@ def test_templates_flush_is_periodic_and_only_when_dirty(tmp_path: Path) -> None
 
 
 def test_templates_system_id_is_validated_before_it_names_a_file(tmp_path: Path) -> None:
-    store = TemplateStore(tmp_path)
+    store = TemplateStore(tmp_path, min_cluster_size=1)
     with pytest.raises(ValueError, match="system_id"):
         store.mine("../escape", "a")
     with pytest.raises(ValueError, match="system_id"):
@@ -209,7 +212,7 @@ def test_templates_memory_is_bounded_by_max_clusters() -> None:
     def word(n: int) -> str:
         return f"{letters[n % 26]}{letters[(n // 26) % 26]}x"
 
-    store = TemplateStore(max_clusters=50)
+    store = TemplateStore(max_clusters=50, min_cluster_size=1)
     for i in range(500):
         store.mine("sys_x", f"{word(i)} {word(i + 7)}q {word(i + 3)}z {word(i + 11)}w")
     assert store.cluster_count("sys_x") <= 50
@@ -233,7 +236,7 @@ def test_templates_file_arrived_template_text_pattern() -> None:
 def test_templates_no_stray_output_on_construction() -> None:
     code = (
         "from carto_edge.pipeline.templates import TemplateStore\n"
-        "s = TemplateStore()\n"
+        "s = TemplateStore(min_cluster_size=1)\n"
         "s.mine('sys_x', 'hello 1')\n"
     )
     result = subprocess.run(  # noqa: S603 - our own interpreter, fixed code
@@ -245,7 +248,7 @@ def test_templates_no_stray_output_on_construction() -> None:
 
 @needs_sim
 def test_templates_simulator_export_log_has_few_stable_templates() -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     lines = []
     for path in sorted((SIM_DIR / "warehouse").glob("export-job-*.log")):
         lines.extend(path.read_text(encoding="utf-8").splitlines())
@@ -264,8 +267,33 @@ def test_templates_simulator_export_log_has_few_stable_templates() -> None:
 @settings(max_examples=150, deadline=3000)
 @given(st.text(max_size=500))
 def test_templates_property_mine_never_raises_and_params_align(text: str) -> None:
-    store = TemplateStore()
+    store = TemplateStore(min_cluster_size=1)
     template, params = store.mine("sys_x", text)
     assert len(template) <= MAX_TEMPLATE_TEXT_LEN
     assert all(isinstance(p, str) for p in params)
     assert template.count(MASK) >= len(params) or len(template) == MAX_TEMPLATE_TEXT_LEN
+
+
+def test_words_seen_in_fewer_than_three_messages_are_never_constants() -> None:
+    """Drain3 keeps a one-member cluster verbatim; a word seen once (a name, a code word, free
+    text) must not become a template constant (spec 2.3 invariant 2)."""
+    store = TemplateStore()
+    assert MIN_CLUSTER_SIZE == 3
+    first, params = store.mine("sys_web", "delivery note leave behind the blue gate MKPINE")
+    assert first == "<*> <*> <*> <*> <*> <*> <*> <*>"
+    assert params == ["delivery", "note", "leave", "behind", "the", "blue", "gate", "MKPINE"]
+    second, _ = store.mine("sys_web", "delivery note leave behind the blue gate MKPINE")
+    assert second == first  # two members: still all parameters
+    third, third_params = store.mine("sys_web", "delivery note leave behind the blue gate MKPINE")
+    assert third == "delivery note leave behind the blue gate MKPINE"  # repeated three times
+    assert third_params == []
+
+
+def test_a_varying_word_stays_a_parameter_once_constants_appear() -> None:
+    store = TemplateStore()
+    for name in ("MKALPHA", "MKBRAVO"):
+        template, _ = store.mine("sys_web", f"voucher {name} redeemed by staff")
+        assert template == "<*> <*> <*> <*> <*>"
+    template, params = store.mine("sys_web", "voucher MKCHARLIE redeemed by staff")
+    assert template == "voucher <*> redeemed by staff"
+    assert params == ["MKCHARLIE"]

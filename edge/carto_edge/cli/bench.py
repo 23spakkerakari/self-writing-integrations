@@ -147,6 +147,7 @@ def _measure(
     for record in records:
         runtime.pipeline.observe_only(record)
     observe_seconds = time.perf_counter() - started
+    runtime.pipeline.reset_parsers()  # as the analyzer does between its passes
     started = time.perf_counter()
     # Warm-up outside the measurement: decide every field once (the PII model loads and the
     # samples are checked here, as at the end of the analyzer's pass 1), so the loop measures

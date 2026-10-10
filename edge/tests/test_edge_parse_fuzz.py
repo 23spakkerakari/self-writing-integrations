@@ -19,7 +19,7 @@ from carto_schema.event import MAX_TEMPLATE_TEXT_LEN, TEMPLATE_ID_PATTERN, Event
 
 RECEIVED = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
 FORMATS = list(RecordFormat)
-STORE = TemplateStore()
+STORE = TemplateStore(min_cluster_size=1)
 PARSERS = {
     fmt: RecordParser(
         SourceConfig(

@@ -9,10 +9,20 @@ pipeline can count it; nothing raises. :func:`stringify` fixes how scalars are r
 same value gives the same string whichever parser produced it (tokens are HMACs of these strings,
 spec 8.4). :func:`key_signature` builds the ``keys:<sorted top-level keys>`` template of
 structured records without a message (ADR 0016).
+
+Field names leave the edge in clear (attribute keys, identifier and dropped field names, the
+``keys:`` template), so a name must never carry a value (spec 2.3 invariant 2). JSON maps keyed
+by order id, a CSV data row read as a header, or a logfmt line with bare words would put values
+in names. :func:`safe_path` masks every path segment that looks like a value, with ``*``: an
+``@`` after the first character (``@attr`` is the XML attribute convention), a run of three or
+more digits, or more than :data:`MAX_SEGMENT_LEN` characters. The parser applies it to every
+field path and to the signature keys.
 """
 
 from __future__ import annotations
 
+import functools
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -33,6 +43,8 @@ __all__ = [
     "Flattened",
     "flatten",
     "key_signature",
+    "safe_path",
+    "safe_segment",
     "stringify",
     "utf8_len",
 ]
@@ -49,6 +61,10 @@ MAX_SIGNATURE_KEYS: Final = 32
 """Keys listed in a ``keys:`` template (ADR 0016)."""
 MAX_SIGNATURE_KEY_LEN: Final = 64
 
+MAX_SEGMENT_LEN: Final = 64
+"""A path segment longer than this is a value, not a name."""
+MASKED_SEGMENT: Final = "*"
+_DIGIT_RUN: Final = re.compile(r"[0-9]{3}")
 NOTE_DEPTH_LIMIT: Final = "depth_limit"
 NOTE_ARRAY_LIMIT: Final = "array_limit"
 NOTE_FIELD_LIMIT: Final = "field_limit"
@@ -181,3 +197,22 @@ def key_signature(keys: Iterable[str]) -> str:
     """``keys:<sorted top-level keys>`` (ADR 0016), at most :data:`MAX_SIGNATURE_KEYS` keys."""
     unique = sorted({_signature_key(key) for key in keys})
     return "keys:" + ",".join(unique[:MAX_SIGNATURE_KEYS])
+
+
+def safe_segment(segment: str) -> str:
+    """``*`` when a name segment looks like a value (see the module docstring)."""
+    if (
+        len(segment) > MAX_SEGMENT_LEN
+        or "@" in segment[1:]
+        or _DIGIT_RUN.search(segment) is not None
+    ):
+        return MASKED_SEGMENT
+    return segment
+
+
+@functools.lru_cache(maxsize=65_536)
+def safe_path(path: str) -> str:
+    """``path`` with every value-like segment masked (``stock.SKU-12345`` -> ``stock.*``)."""
+    if "." not in path:
+        return safe_segment(path)
+    return ".".join(safe_segment(segment) for segment in path.split("."))

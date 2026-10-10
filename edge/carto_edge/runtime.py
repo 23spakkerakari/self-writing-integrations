@@ -8,9 +8,9 @@ vault or a policy version is.
 
 The two modes differ exactly where ADR 0017 says they do: ``gateway`` streams with the spec's
 quarantine rule and persists field statistics under the state directory; ``analyze`` classifies
-with complete statistics (quarantine threshold 1, statistics in memory for the run, the
-pipeline told not to count pass-2 observations twice). Templates persist in both modes so
-``template_id`` is stable across runs of the same state directory (spec 8.2).
+with complete statistics (quarantine threshold 1, statistics and templates in memory for the
+run, the pipeline told not to count pass-2 observations twice). Template ids are hashes of system
+and text, so they are stable across runs in both modes (spec 8.2).
 
 Keys are never created here unless the caller asks (``init_local_keys``, the analyzer's
 convenience for a pilot without ``carto-ctl``): the gateway refuses to start without
@@ -162,8 +162,12 @@ def build_runtime(
     stats = FieldStatsStore.from_settings(classify, path=None if analyze else settings.stats_file)
     if not analyze:
         stats.load()
+    # The gateway persists Drain3 state so templates survive restarts (spec 8.2). The analyzer
+    # mines each run from scratch: a persisted store would let a second run see clusters the
+    # first one grew and mine different templates from the same input (ADR 0025).
     templates = TemplateStore(
-        settings.templates_dir, flush_interval_seconds=settings.gateway.stats_flush_seconds
+        None if analyze else settings.templates_dir,
+        flush_interval_seconds=settings.gateway.stats_flush_seconds,
     )
     classifier = Classifier(
         classify, sources.field_policies, pii, stats, policy_version=sources.policy_version

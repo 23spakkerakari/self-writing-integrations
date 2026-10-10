@@ -95,6 +95,8 @@ FORM_FAMILIES: Final = frozenset({"raw", "norm", "alnum", "digits", "date", "amo
 PII_SAMPLE_LIMIT: Final = 32
 PII_HIT_SHARE: Final = 0.3
 RECHECK_EVERY: Final = 1000
+MIN_KEPT_VALUE_COUNT: Final = 3
+"""A kept field's value travels in clear only once this exact value was seen this often."""
 MAJORITY: Final = 0.8
 """Share of samples a shape rule (temporal, amount, float) needs to claim a field."""
 FREE_TEXT_MIN_MEAN_LEN: Final = 32
@@ -817,6 +819,16 @@ class Classifier:
             self._cache[ref] = _Cached(decision, count, quarantined)
             return decision
 
+    def keeps(self, ref: str, value: str) -> bool:
+        """Whether a value of a ``keep`` field may travel in clear: the exact value must have
+        been seen at least :data:`MIN_KEPT_VALUE_COUNT` times in the field. A low-cardinality
+        field can still carry a rare value (``yes`` and ``no`` 290 times, then a customer's
+        name once); a value seen once or twice stays at the edge (spec 2.3 invariant 2)."""
+        stats = self._stats.get(ref)
+        if stats is None:
+            return False
+        return stats.value_count(value) >= MIN_KEPT_VALUE_COUNT
+
     def decisions(self) -> dict[str, FieldDecision]:
         """Every cached decision by ``field_ref``."""
         with self._lock:
@@ -1073,7 +1085,12 @@ class Classifier:
                 clean: set[str] = set()
                 for sample in stats.samples:
                     text = truncate_attribute(sample)
-                    if text and text not in clean and attribute_is_clean(text, self._detector):
+                    if (
+                        text
+                        and text not in clean
+                        and stats.value_count(sample) >= MIN_KEPT_VALUE_COUNT
+                        and attribute_is_clean(text, self._detector)
+                    ):
                         clean.add(text)
                 sample_values = sorted(clean)[:MAX_SAMPLE_VALUES]
             top_shapes = stats.top_shapes(MAX_TOP_SHAPES) if stats is not None else []

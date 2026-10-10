@@ -18,6 +18,7 @@ from carto_edge.config import (
     ClassifySettings,
     FieldPolicyPin,
     ParseConfig,
+    RecordFormat,
     SourceConfig,
     SourcesFile,
     SourceType,
@@ -75,8 +76,9 @@ def make(
     pins: list[FieldPolicyPin] | None = None,
     actor_field: str | None = None,
     observe_on_process: bool = True,
+    sources: SourcesFile | None = None,
 ) -> EdgePipeline:
-    sources = sources_file(pins, actor_field)
+    sources = sources or sources_file(pins, actor_field)
     classify = ClassifySettings(quarantine_samples=quarantine, distinct_threshold=10)
     stats = FieldStatsStore(sample_size=64)
     detector = RegexDetector()
@@ -159,7 +161,8 @@ def test_streaming_mode_quarantines_and_tokenizes_identifier_shaped_values() -> 
     assert event.kind is EventKind.LOG
     assert event.observed_at_quality is ObservedAtQuality.SOURCE
     assert event.ingested_at == RECEIVED
-    assert event.template_text == "cart created"
+    # One sighting: the message's words are parameters until its cluster has three members.
+    assert event.template_text == "<*> <*>"
     assert event.tenant_id == "default"
     assert event.redaction.policy_version
     assert event.actor is None
@@ -416,3 +419,114 @@ def test_property_derive_ulid_is_idempotent(locator: str, ms: int) -> None:
     assert first == derive_ulid(ms, "src_web", locator)
     assert is_ulid(first)
     assert first != derive_ulid(ms, "src_other", locator)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review findings: values must not leave through names, one-off messages or rare kept values
+# ---------------------------------------------------------------------------------------------
+
+
+def _event_text(pipeline: EdgePipeline, payload: dict[str, Any], line: int = 1) -> str:
+    event = pipeline.process(raw_line(json.dumps(payload), line=line)).event
+    assert event is not None
+    return event.model_dump_json()
+
+
+def test_json_map_keys_that_are_values_are_masked_in_every_name() -> None:
+    pipeline = make()
+    text = _event_text(
+        pipeline,
+        {
+            "ts": "2026-09-23T04:00:00Z",
+            "msg": "stock levels",
+            "stock": {"SKU-88231": 0, "SKU-55012": 2},
+            "c-88213": {"status": "open"},
+            "mei@example.com": "x",
+        },
+    )
+    for value in ("88231", "55012", "c-88213", "mei@example.com"):
+        assert value not in text, value
+
+
+def test_a_csv_data_row_is_never_taken_for_a_header() -> None:
+    sources = SourcesFile(
+        systems=[SystemConfig(id="sys_webstore", name="Webstore")],
+        sources=[
+            SourceConfig(
+                id="src_web",
+                system="sys_webstore",
+                type=SourceType.UPLOAD,
+                config={"paths": ["x.csv"]},
+                parse=ParseConfig(format=RecordFormat.CSV),
+            )
+        ],
+    )
+    pipeline = make(sources=sources)
+    row = "4471,c-88213,MKALICE Smith,mkalice@example.com,PENDING"
+    result = pipeline.process(raw_line(row, line=1))
+    assert result.event is not None  # the row is data, with positional names
+    text = result.event.model_dump_json()
+    for value in ("4471", "c-88213", "mkalice", "MKALICE"):
+        assert value not in text, value
+
+
+def test_logfmt_bare_words_never_become_field_names() -> None:
+    sources = SourcesFile(
+        systems=[SystemConfig(id="sys_webstore", name="Webstore")],
+        sources=[
+            SourceConfig(
+                id="src_web",
+                system="sys_webstore",
+                type=SourceType.UPLOAD,
+                config={"paths": ["x.log"]},
+                parse=ParseConfig(format=RecordFormat.LOGFMT),
+            )
+        ],
+    )
+    pipeline = make(sources=sources)
+    line = "ts=2026-09-23T04:00:00Z msg=refund approved for MKBOB Higgins order_id=4471"
+    result = pipeline.process(raw_line(line))
+    assert result.event is None
+    assert result.dropped_reason == "unparseable"
+
+
+def test_a_one_off_message_keeps_no_word_in_its_template() -> None:
+    pipeline = make()
+    text = _event_text(
+        pipeline,
+        {"ts": "2026-09-23T04:00:00Z", "msg": "leave behind the blue gate codeword MKPINEAPPLE"},
+    )
+    assert "pineapple" not in text.lower()
+    assert "blue gate" not in text
+
+
+def test_rare_values_of_a_kept_field_stay_at_the_edge() -> None:
+    """A low-cardinality field is kept, but a value seen fewer than three times stays at the
+    edge, even when its shape is common ("Bob" has the shape of "yes")."""
+    pipeline = make(quarantine=1, observe_on_process=False)
+    rare = {30: "customer asked to call back MKTAIL", 60: "Bob", 90: "Bob"}
+    records = [
+        raw_line(
+            json.dumps(
+                {
+                    "ts": "2026-09-23T04:00:00Z",
+                    "msg": "callback",
+                    "detail": rare.get(i, "yes" if i % 2 else "no"),
+                }
+            ),
+            line=i + 1,
+        )
+        for i in range(300)
+    ]
+    for record in records:
+        assert pipeline.observe_only(record)
+    common = pipeline.process(records[1]).event
+    assert common is not None
+    assert common.attributes.get("detail") == "yes"
+    for index in rare:
+        event = pipeline.process(records[index]).event
+        assert event is not None
+        assert "detail" not in event.attributes
+        text = event.model_dump_json()
+        assert "MKTAIL" not in text
+        assert "Bob" not in text
