@@ -35,6 +35,7 @@ from carto_common.logging import (
     JWT_MASK,
     MAX_DEPTH,
     PEM_MASK,
+    QUIET_LIBRARY_LOGGERS,
     REDACTED,
     REDACTION_ERROR,
     TOKEN_MASK,
@@ -802,6 +803,21 @@ def test_configure_logging_console_output_is_redacted_too(clean_structlog: None)
 def test_configure_logging_rejects_unknown_levels(clean_structlog: None) -> None:
     with pytest.raises(ValueError, match="unknown log level"):
         configure_logging("edge", level="loud")
+
+
+def test_http_client_request_lines_never_reach_the_log(clean_structlog: None) -> None:
+    """httpx logs ``HTTP Request: GET <url>`` at INFO, query string included (spec 14.12)."""
+    stream = io.StringIO()
+    configure_logging("edge", level="debug", stream=stream)
+    logging.getLogger("httpx").info('HTTP Request: GET https://h/x?member=quokka-77 "200 OK"')
+    logging.getLogger("httpcore.http11").debug("send_request_headers.started")
+    logging.getLogger("httpx").warning("retrying after a transport error")
+    text = stream.getvalue()
+    assert "quokka-77" not in text
+    assert "send_request_headers" not in text
+    assert "retrying after a transport error" in text
+    for name in QUIET_LIBRARY_LOGGERS:
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
 
 
 def test_contextvars_are_merged_and_masked(clean_structlog: None) -> None:

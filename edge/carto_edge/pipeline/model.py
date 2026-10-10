@@ -94,6 +94,13 @@ class RawRecord:
     template_hint: str | None = None
     """Template text supplied by the connector for records that carry no message to mine:
     ``row_change <query name>``, ``file_arrived <generalized file name>`` (ADR 0016)."""
+    timestamp_field: str | None = None
+    """Per-record override of ``ParseConfig.timestamp_field``: the column a row connector's
+    query names as its clock (``timestamp_column``, spec Appendix A). The parser tries it first."""
+    actor_field: str | None = None
+    """Per-record override of ``ParseConfig.actor_field``: the column a row connector's query
+    names as the actor (``actor_column``, spec Appendix A, 7.1). Its value becomes the event's
+    ``actor`` token and is never an attribute or an identifier."""
 
 
 @dataclass(slots=True)
@@ -119,6 +126,9 @@ class ParsedRecord:
     fields: dict[str, str]
     severity: Severity | None = None
     actor: str | None = None
+    actor_path: str | None = None
+    """The field path that held ``actor`` (the record's override, else the source's hint); the
+    pipeline never classifies, keeps or tokenizes that field as an ordinary field."""
     parse_format: str = ""
     parse_notes: tuple[str, ...] = ()
 

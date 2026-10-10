@@ -8,6 +8,7 @@ string function so the edge, core, the simulator and the eval harness share one 
 
 from __future__ import annotations
 
+import functools
 import re
 from typing import Annotated, Final, Literal
 
@@ -63,11 +64,13 @@ def is_form(name: str) -> bool:
     return FORM_PATTERN.fullmatch(name) is not None
 
 
+@functools.lru_cache(maxsize=256)
 def parse_form(name: str) -> tuple[str, int | None]:
     """Split a form name into its base and optional index (spec 8.4).
 
     ``"digits.1"`` gives ``("digits", 1)`` and ``"raw"`` gives ``("raw", None)``. Anything that is
-    not a form name raises :class:`ValueError`.
+    not a form name raises :class:`ValueError`. Cached: the form names are a small fixed set and
+    this runs for every identifier the edge emits.
     """
     if not is_form(name):
         msg = f"not a form name: {name!r}"
@@ -76,6 +79,7 @@ def parse_form(name: str) -> tuple[str, int | None]:
     return (base, int(index)) if separator else (base, None)
 
 
+@functools.lru_cache(maxsize=256)
 def token_domain(name: str) -> TokenDomain:
     """Return the HMAC domain of a form (spec 8.4).
 
@@ -117,8 +121,10 @@ def shape(value: str) -> str:
     return "".join(out)
 
 
+@functools.lru_cache(maxsize=4096)
 def _require_shape(value: str) -> str:
-    """Accept only a fixed point of :func:`shape`. The message never echoes the value."""
+    """Accept only a fixed point of :func:`shape`. The message never echoes the value. Cached:
+    shapes repeat across millions of identifiers; a rejection raises and is never cached."""
     if shape(value) != value:
         msg = "not a shape: expected the output of shape() (digits as '9', letters as 'A')"
         raise ValueError(msg)

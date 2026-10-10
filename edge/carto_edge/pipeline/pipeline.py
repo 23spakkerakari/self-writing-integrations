@@ -11,7 +11,8 @@
    listed by name in ``dropped_fields``. A kept value the hygiene check refuses is dropped too.
 3. The template text goes through :func:`~carto_edge.pipeline.redact.redact_template_text`;
    the number of masked entities is the event's ``redaction.entities_masked``.
-4. The configured actor field is never an attribute or an identifier: its value becomes
+4. The actor field (``ParsedRecord.actor_path``: a row connector's ``actor_column``, else the
+   source's ``actor_field`` hint) is never an attribute or an identifier: its value becomes
    ``actor.token`` (spec 7.1), ``kind`` ``service`` when the value looks like a service account
    (``svc_`` prefix or an ``api``, ``integration``, ``system``, ``bot``, ``daemon`` or
    ``service`` segment), else ``human``.
@@ -241,9 +242,8 @@ class EdgePipeline:
             parsed = parser.parse(raw)
             if isinstance(parsed, ParseFailure):
                 return False
-            actor_path = self._actor_path(parsed.source_id)
             for path, value in parsed.fields.items():
-                if path != actor_path:
+                if path != parsed.actor_path:
                     ref = field_ref(parsed.system_id, parsed.template_id, path)
                     self._classifier.observe(ref, path, value)
             self.counters.observed += 1
@@ -254,19 +254,14 @@ class EdgePipeline:
         Decisions are made only here, never in pass 1, so the classifier's decision cache
         never holds a verdict made on partial statistics."""
         decisions: dict[str, FieldDecision] = {}
-        actor_path = self._actor_path(parsed.source_id)
         for path, value in parsed.fields.items():
-            if path == actor_path:
+            if path == parsed.actor_path:
                 continue
             ref = field_ref(parsed.system_id, parsed.template_id, path)
             if self._observe_on_process:
                 self._classifier.observe(ref, path, value)
             decisions[path] = self._classifier.decide(ref, path)
         return decisions
-
-    def _actor_path(self, source_id: str) -> str | None:
-        source = self._sources.get(source_id)
-        return source.parse.actor_field if source is not None else None
 
     # -- streaming and pass 2 -------------------------------------------------------------------
 
@@ -291,9 +286,8 @@ class EdgePipeline:
         attributes: dict[str, str] = {}
         dropped: list[str] = []
         inputs: list[FieldInput] = []
-        actor_path = self._actor_path(parsed.source_id)
         for path, value in parsed.fields.items():
-            if path == actor_path:
+            if path == parsed.actor_path:
                 continue
             decision = decisions[path]
             name = path[:MAX_FIELD_NAME_LEN]

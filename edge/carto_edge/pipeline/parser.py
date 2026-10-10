@@ -15,8 +15,11 @@ class>`` for access logs, the mined template of an unstructured line (parameters
 ``param_0..n``), else ``keys:<sorted top-level keys>``. The source timestamp comes from the
 configured or default fields or the start of the line and is consumed; without one
 ``observed_at`` is the receive time with quality ``ingest``. Severity follows
-:mod:`carto_edge.pipeline.severity`; ``actor`` is the raw value of ``actor_field`` (left in the
-fields for the classifier).
+:mod:`carto_edge.pipeline.severity`; ``actor`` is the raw value of the actor field (the record's
+``actor_field`` override from a row connector's ``actor_column``, else the source's hint), left in
+the fields and named in ``actor_path`` so the pipeline can skip it. A record's
+``timestamp_field`` override (a query's ``timestamp_column``) is tried before the source's
+timestamp hint.
 
 Defensive by construction (spec 2.3 invariant 8): ``max_record_bytes`` is checked before any
 parser runs, every parser is bounded and returns ``None`` on bad input, a configured format
@@ -57,6 +60,7 @@ REASON_CSV_HEADER: Final = "csv_header"
 REASON_INTERNAL: Final = "internal_error"
 FORMAT_FIELDS: Final = "fields"
 _LINE_MARKER: Final = ":line:"
+_MAX_TIMESTAMP_OVERRIDES: Final = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +99,7 @@ class RecordParser:
         self._csv = CsvParser(self._config)
         self._detector = FormatDetector()
         self._current_file: str | None = None
+        self._timestamp_configs: dict[str, ParseConfig] = {}
         self.internal_errors = 0
         """Unexpected exceptions swallowed by :meth:`parse`; a non-zero count is a bug."""
 
@@ -299,7 +304,12 @@ class RecordParser:
         observed = draft.timestamp
         quality = ObservedAtQuality.SOURCE
         if observed is None:
-            found = find_timestamp(fields, config, zone=self._zone, reference=raw.received_at)
+            found = find_timestamp(
+                fields,
+                self._timestamp_config(raw.timestamp_field),
+                zone=self._zone,
+                reference=raw.received_at,
+            )
             if found is not None:
                 observed, consumed = found
                 del fields[consumed]
@@ -310,7 +320,8 @@ class RecordParser:
         severity: Severity | None = map_level(draft.level) if draft.level else None
         if severity is None:
             severity = detect_severity(fields, template_text, severity_field=config.severity_field)
-        actor = fields.get(config.actor_field) if config.actor_field else None
+        actor_path = raw.actor_field or config.actor_field
+        actor = fields.get(actor_path) if actor_path else None
 
         template_id = self._templates.template_id(system_id, template_text)
         kind = draft.kind or raw.kind
@@ -329,9 +340,22 @@ class RecordParser:
             fields=fields,
             severity=severity,
             actor=actor,
+            actor_path=actor_path,
             parse_format=draft.parse_format,
             parse_notes=draft.notes,
         )
+
+    def _timestamp_config(self, override: str | None) -> ParseConfig:
+        """The parse config with a record's timestamp column in front (cached per column)."""
+        if not override or override == self._config.timestamp_field:
+            return self._config
+        cached = self._timestamp_configs.get(override)
+        if cached is None:
+            if len(self._timestamp_configs) >= _MAX_TIMESTAMP_OVERRIDES:
+                self._timestamp_configs.clear()
+            cached = self._config.model_copy(update={"timestamp_field": override})
+            self._timestamp_configs[override] = cached
+        return cached
 
 
 def _utc(value: datetime) -> datetime:

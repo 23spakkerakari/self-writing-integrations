@@ -21,6 +21,12 @@ and at least the event retention) so new events are tokenized under both. Previo
 ``retire_at`` are ignored with a warning on load and removed on the next rotation. File writes
 go through a temporary file and ``os.replace`` so a crash leaves either the old or the new file.
 
+When the KMS key itself rotates, :meth:`KeyManager.rewrap` unwraps every wrapped key file under
+``keys/`` (tenant keys of every version, the vault data key, the local secret store data key)
+and wraps the same material under the new KMS key with the same context, in two phases: every
+file is re-wrapped into a staging file first and the staging files replace the originals only
+when all succeeded, so a KMS failure half way leaves the old set intact. Tokens do not change.
+
 Nothing here logs or returns key material; :meth:`KeyManager.status` reports versions,
 fingerprints and dates only (spec 2.3 invariant 7).
 """
@@ -362,6 +368,60 @@ class KeyManager:
             fingerprint=new_wrapped.fingerprint,
         )
         return self.load_keyring()
+
+    # -----------------------------------------------------------------------------------------
+    # rewrap (the KMS key rotates; the tenant key does not)
+    # -----------------------------------------------------------------------------------------
+
+    def wrapped_key_files(self) -> list[Path]:
+        """Every :class:`WrappedKey` file under ``keys/``, sorted (``rotation.json`` excluded)."""
+        if not self.keys_dir.is_dir():
+            return []
+        return sorted(
+            path
+            for path in self.keys_dir.glob("*.json")
+            if path.name != ROTATION_FILE and path.is_file()
+        )
+
+    def rewrap(self, new_kms: KeyWrapper) -> list[Path]:
+        """Re-wrap every wrapped key file with ``new_kms``; returns the files rewritten.
+
+        The material and the context of each key stay the same, which the fingerprint check
+        confirms before anything is replaced. ``new_kms`` may be the current KMS object when the
+        KMS rotated its own key version (Vault Transit wraps with the latest version)."""
+        old = self.kms
+        files = self.wrapped_key_files()
+        if not files:
+            msg = f"no wrapped key files in {self.keys_dir}; {INIT_HINT}"
+            raise KeyManagementError(msg)
+        staged: list[tuple[Path, Path]] = []
+        try:
+            for path in files:
+                wrapped = WrappedKey.read(path)
+                fresh = new_kms.wrap(old.unwrap(wrapped), wrapped.context)
+                if fresh.fingerprint != wrapped.fingerprint:
+                    msg = f"re-wrapping {path.name} changed its fingerprint"
+                    raise KeyManagementError(msg)
+                staging = path.with_name(path.name + ".rewrap")
+                _write_wrapped(staging, fresh)
+                staged.append((staging, path))
+        except (CryptoError, KeyManagementError, OSError) as exc:
+            for staging, _path in staged:
+                staging.unlink(missing_ok=True)
+            if isinstance(exc, KeyManagementError):
+                raise
+            msg = "re-wrapping failed; the existing key files are unchanged"
+            raise KeyManagementError(msg) from exc
+        for staging, path in staged:
+            staging.replace(path)
+        self._kms = new_kms
+        log.info(
+            "keys.rewrapped",
+            files=[path.name for _staging, path in staged],
+            old_kms_key_id=old.key_id,
+            new_kms_key_id=new_kms.key_id,
+        )
+        return [path for _staging, path in staged]
 
     # -----------------------------------------------------------------------------------------
     # vault data key, assertion key, status

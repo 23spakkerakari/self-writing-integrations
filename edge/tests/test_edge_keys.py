@@ -436,3 +436,59 @@ def test_key_manager_through_vault_transit(tmp_path: Path, clock: FakeClock) -> 
     with pytest.raises(CryptoError):
         kms.unwrap(replayed)
     assert canonical_context(wrapped.context) in b"".join(store.values())
+
+
+def test_rewrap_moves_every_wrapped_key_to_the_new_kms_and_keeps_tokens(tmp_path: Path) -> None:
+    settings = EdgeSettings(state_dir=tmp_path / "state")
+    manager = KeyManager(settings)
+    manager.init(create_local_kms=True)
+    manager.vault_data_key()
+    manager.rotate(overlap_days=30)
+    before = manager.load_keyring()
+    token = before.active.token("id", "SO-0004471")
+    previous_token = before.previous[0].token("id", "SO-0004471")
+    vault_key = manager.vault_data_key()
+    names = [path.name for path in manager.wrapped_key_files()]
+    assert names == ["tenant-key.json", "tenant-key.v1.json", "vault-data-key.json"]
+
+    new_kms = LocalKms.create(tmp_path / "new-master.key")
+    rewritten = manager.rewrap(new_kms)
+    assert [path.name for path in rewritten] == names
+    assert not list(settings.keys_dir.glob("*.rewrap"))
+    for path in rewritten:
+        assert WrappedKey.read(path).key_id == new_kms.key_id
+    reopened = KeyManager(settings, new_kms)
+    after = reopened.load_keyring()
+    assert after.active.token("id", "SO-0004471") == token
+    assert after.previous[0].token("id", "SO-0004471") == previous_token
+    assert reopened.vault_data_key() == vault_key
+    with pytest.raises(CryptoError):
+        KeyManager(settings, LocalKms.open(settings.local_kms_key_file)).load_keyring()
+
+
+def test_rewrap_failure_leaves_the_old_files_untouched(tmp_path: Path) -> None:
+    settings = EdgeSettings(state_dir=tmp_path / "state")
+    manager = KeyManager(settings)
+    manager.init(create_local_kms=True)
+    manager.vault_data_key()
+    originals = {path.name: path.read_bytes() for path in manager.wrapped_key_files()}
+
+    class Failing:
+        provider = "local"
+        key_id = "local:failing"
+        calls = 0
+
+        def wrap(self, material: bytes, context: dict[str, str]) -> WrappedKey:
+            self.calls += 1
+            if self.calls == 2:
+                raise CryptoError("KMS unavailable")
+            return LocalKms.create(tmp_path / f"k{self.calls}.key").wrap(material, context)
+
+        def unwrap(self, wrapped: WrappedKey) -> bytes:
+            raise AssertionError("never called")
+
+    with pytest.raises(KeyManagementError, match="unchanged"):
+        manager.rewrap(Failing())  # type: ignore[arg-type]
+    assert {path.name: path.read_bytes() for path in manager.wrapped_key_files()} == originals
+    assert not list(settings.keys_dir.glob("*.rewrap"))
+    assert manager.load_keyring().active.version == 1

@@ -531,6 +531,8 @@ class UploadConnector:
                     commit_cursor={"file": key, "line": number},
                     size_bytes=sum(len(value) for value in fields.values()),
                     template_hint=f"row_change {table}",
+                    timestamp_field=self.config.timestamp_column,
+                    actor_field=self.config.actor_column,
                 )
         finally:
             # The caller owns the binary stream: detach so the wrapper neither closes it nor

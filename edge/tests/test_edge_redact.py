@@ -12,6 +12,8 @@ from carto_edge.pipeline.pii import PiiHit, RegexDetector
 from carto_edge.pipeline.redact import (
     MAX_ATTRIBUTE_LEN,
     TEMPLATE_CACHE_SIZE,
+    attribute_cache_clear,
+    attribute_cache_info,
     attribute_is_clean,
     redact_template_text,
     template_cache_clear,
@@ -123,3 +125,34 @@ def test_truncate_attribute() -> None:
     assert len(truncate_attribute("x" * 1000)) == MAX_ATTRIBUTE_LEN
     assert MAX_ATTRIBUTE_LEN == 256
     assert truncate_attribute("é" * 300) == "é" * 256
+
+
+class EmailDetector:
+    """Hits on e-mail-looking text; counts calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def detect(self, text: str) -> list[PiiHit]:
+        self.calls += 1
+        if "@" in text:
+            return [PiiHit("EMAIL_ADDRESS", 0, len(text), 1.0)]
+        return []
+
+
+def test_attribute_verdicts_are_memoized_per_value_and_detector() -> None:
+    attribute_cache_clear()
+    detector = EmailDetector()
+    for _ in range(1000):
+        assert attribute_is_clean("us-east", detector)
+        assert not attribute_is_clean("ops@example.com", detector)
+    assert detector.calls == 2  # once per distinct value, not once per event
+    info = attribute_cache_info()
+    assert info.misses == 2 and info.hits == 1998
+    other = EmailDetector()
+    assert attribute_is_clean("us-east", other)
+    assert other.calls == 1  # another detector never reuses a verdict
+    assert attribute_is_clean("  us-east  ", detector)  # truncation first, then the cache
+    assert detector.calls == 2
+    attribute_cache_clear()
+    assert attribute_cache_info().currsize == 0

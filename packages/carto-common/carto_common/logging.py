@@ -105,6 +105,7 @@ __all__ = [
     "MASKS",
     "MAX_DEPTH",
     "PEM_MASK",
+    "QUIET_LIBRARY_LOGGERS",
     "REDACTED",
     "REDACTION_ERROR",
     "SECRET_KEY_PAIRS",
@@ -119,6 +120,12 @@ __all__ = [
     "mask_string",
     "redact",
 ]
+
+QUIET_LIBRARY_LOGGERS: Final[tuple[str, ...]] = ("httpx", "httpcore", "hpack", "urllib3")
+"""Third-party loggers held at WARNING: at INFO and DEBUG they write the full request URL with
+its query string (``HTTP Request: GET https://host/path?param=value``) or wire-level detail, which
+can carry identifier values the redaction masks are not guaranteed to recognise (spec 14.12, 2.3
+invariant 7). Their warnings and errors still flow through :func:`redact`."""
 
 REDACTED: Final = "[REDACTED]"
 DROPPED: Final = "[DROPPED]"
@@ -527,7 +534,9 @@ def configure_logging(
     of the root ``logging`` logger, replacing whatever was there: records from third-party
     libraries (uvicorn, httpx, database drivers) and stray ``logging.getLogger()`` calls are
     rendered through :func:`redact` too, never through ``logging.lastResort``. Libraries that
-    configure their own handlers must be told not to (uvicorn: ``log_config=None``).
+    configure their own handlers must be told not to (uvicorn: ``log_config=None``). The HTTP
+    client loggers of :data:`QUIET_LIBRARY_LOGGERS` are held at WARNING because their INFO lines
+    carry request URLs and query strings.
     """
     level_name = level.strip().lower()
     if level_name not in _LEVELS:
@@ -564,6 +573,8 @@ def configure_logging(
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(_LEVELS[level_name])
+    for name in QUIET_LIBRARY_LOGGERS:
+        logging.getLogger(name).setLevel(max(logging.WARNING, _LEVELS[level_name]))
 
 
 def get_logger(**initial_values: Any) -> FilteringBoundLogger:

@@ -406,6 +406,8 @@ class SqlConnector:
             sequence=self._sequence,
             size_bytes=sum(len(str(value)) for value in row.values() if value is not None),
             template_hint=f"row_change {query.name}",
+            timestamp_field=query.timestamp_column,
+            actor_field=query.actor_column,
         )
 
     @staticmethod
@@ -423,6 +425,8 @@ class SqlConnector:
             },
             size_bytes=record.size_bytes,
             template_hint=record.template_hint,
+            timestamp_field=record.timestamp_field,
+            actor_field=record.actor_field,
         )
 
     async def read(self, cursor: Cursor | None) -> AsyncIterator[RawRecord]:

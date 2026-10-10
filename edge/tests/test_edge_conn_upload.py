@@ -239,6 +239,8 @@ async def test_rows_from_csv(tmp_path: Path) -> None:
         "updated_at": "2026-09-23 22:04:03",
     }
     assert records[0].template_hint == "row_change purchase_orders"
+    assert records[0].timestamp_field == "updated_at"
+    assert records[0].actor_field == "created_by"
     assert records[0].text is None
     assert records[1].commit_cursor == {"file": str(path), "line": 2}
     rest = await collect(connector, {"file": str(path), "line": 1})

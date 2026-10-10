@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from pathlib import Path
 
 import httpx
@@ -306,3 +307,32 @@ def test_resolver_never_logs_values(
         with pytest.raises(SecretError):
             EdgeSecretResolver(settings, kms).resolve("local://missing")
     assert "the-secret-value-9f8e7d" not in caplog.text
+
+
+def test_local_store_and_resolver_work_from_other_threads(tmp_path: Path) -> None:
+    """The gateway resolves webhook secrets from a threadpool and the scheduler from worker
+    threads; SQLite's default same-thread check must not break either."""
+    settings = EdgeSettings(state_dir=tmp_path / "state")
+    kms = LocalKms.create(tmp_path / "kms.key")
+    with LocalSecretStore.open(settings, kms) as store:
+        store.put("hook-secret", "s3cret-value-0123456789")
+    resolver = EdgeSecretResolver(settings, kms)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            results.append(resolver.resolve("local://hook-secret"))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    closer = threading.Thread(target=resolver.close)
+    closer.start()
+    closer.join()
+    assert not errors
+    assert results == ["s3cret-value-0123456789"] * 4

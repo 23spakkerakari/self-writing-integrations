@@ -223,6 +223,43 @@ def test_actor_field_is_tokenized_never_kept() -> None:
         assert event.observed_at_quality is ObservedAtQuality.SOURCE
 
 
+def test_row_connector_overrides_name_the_actor_and_the_clock() -> None:
+    """A row connector's actor_column and timestamp_column (spec Appendix A) win over the
+    source's parse hints: the actor is tokenized into ``actor`` even when the source has no
+    actor hint, never kept as a low-cardinality attribute (spec 7.1, 2.3 invariant 2)."""
+    pipeline = make(quarantine=1, observe_on_process=False)
+    rows = [
+        RawRecord(
+            source_id="src_web",  # a source with no actor and no timestamp hint
+            system_id="sys_webstore",
+            kind=EventKind.ROW_CHANGE,
+            locator=f"purchase_orders:row:{i}",
+            received_at=RECEIVED,
+            fields={
+                "id": str(i),
+                "status": "CREATED",
+                "entered_by": ("jsmith", "mlopez")[i % 2],
+                "changed": "2026-09-23T04:05:06Z",
+            },
+            template_hint="row_change purchase_orders",
+            timestamp_field="changed",
+            actor_field="entered_by",
+        )
+        for i in range(30)
+    ]
+    for row in rows:
+        assert pipeline.observe_only(row)
+    event = pipeline.process(rows[2]).event
+    assert event is not None
+    assert event.actor is not None and event.actor.kind is ActorKind.HUMAN
+    assert "entered_by" not in event.attributes
+    assert "entered_by" not in {identifier.field for identifier in event.identifiers}
+    assert "jsmith" not in event.model_dump_json()
+    assert event.observed_at == datetime(2026, 9, 23, 4, 5, 6, tzinfo=UTC)
+    assert event.observed_at_quality is ObservedAtQuality.SOURCE
+    assert event.attributes["status"] == "CREATED"
+
+
 @pytest.mark.parametrize(
     ("value", "kind"),
     [

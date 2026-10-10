@@ -173,7 +173,8 @@ def token(material: bytes, key_version: int, domain: TokenDomain, form_value: st
     version = _require_version(key_version)
     key = _require_key(material, "token key")
     message = domain.encode("ascii") + TOKEN_SEPARATOR + form_value.encode("utf-8")
-    digest = hmac.new(key, message, hashlib.sha256).digest()
+    # hmac.digest is the one-shot C path of the same HMAC-SHA256 (no HMAC object per token).
+    digest = hmac.digest(key, message, "sha256")
     return f"t{version}.{b64url_encode(digest)[:TOKEN_BODY_LEN]}"
 
 

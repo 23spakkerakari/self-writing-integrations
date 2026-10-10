@@ -291,6 +291,36 @@ async def test_connection_string_read_only_intent_and_timeout() -> None:
     assert len(harness.network.calls) == len(harness.dbapi)
 
 
+async def test_query_timestamp_and_actor_columns_travel_with_every_record() -> None:
+    """Spec Appendix A: a query's timestamp_column and actor_column reach the parser (7.1)."""
+    harness = Harness()
+    connector = make(harness)
+    plain = await collect(connector)
+    assert all(r.timestamp_field is None and r.actor_field is None for r in plain)
+    harness = Harness()
+    connector = make(
+        harness,
+        config={
+            "queries": [
+                {
+                    "name": "purchase_orders",
+                    "sql": QUERY,
+                    "watermark_column": "updated_at",
+                    "primary_key": "id",
+                    "timestamp_column": "updated_at",
+                    "actor_column": "created_by",
+                }
+            ]
+        },
+    )
+    records = await collect(connector)
+    assert records
+    assert all(r.timestamp_field == "updated_at" for r in records)
+    assert all(r.actor_field == "created_by" for r in records)
+    # The cursor-carrying copies keep the overrides too.
+    assert any(r.commit_cursor is not None for r in records)
+
+
 async def test_polls_by_watermark_with_cursor_round_trip() -> None:
     harness = Harness()
     connector = make(harness)

@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -123,17 +124,21 @@ def _check_name(name: str) -> str:
 
 
 class LocalSecretStore:
-    """``local://`` secrets: SQLite rows of AES-256-GCM ciphertext under a KMS-wrapped data key."""
+    """``local://`` secrets: SQLite rows of AES-256-GCM ciphertext under a KMS-wrapped data key.
 
-    __slots__ = ("_box", "_db", "_path")
+    One connection shared across threads behind a lock (ADR 0014), so the gateway's threadpool
+    and the poll scheduler's worker threads can resolve through the same store."""
+
+    __slots__ = ("_box", "_db", "_lock", "_path")
 
     def __init__(self, path: Path, data_key: bytes) -> None:
         self._path = path
         self._box = AesGcmBox(data_key)
+        self._lock = threading.Lock()
         existed = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._db = sqlite3.connect(path, isolation_level=None)
+            self._db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS secrets ("
@@ -179,16 +184,18 @@ class LocalSecretStore:
         _check_name(name)
         blob = self._box.encrypt(value.encode("utf-8"), name.encode("utf-8"))
         now = datetime.now(UTC).isoformat()
-        self._db.execute(
-            "INSERT INTO secrets (name, blob, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET blob = excluded.blob, "
-            "updated_at = excluded.updated_at",
-            (name, blob, now),
-        )
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO secrets (name, blob, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET blob = excluded.blob, "
+                "updated_at = excluded.updated_at",
+                (name, blob, now),
+            )
 
     def get(self, name: str) -> str:
         _check_name(name)
-        row = self._db.execute("SELECT blob FROM secrets WHERE name = ?", (name,)).fetchone()
+        with self._lock:
+            row = self._db.execute("SELECT blob FROM secrets WHERE name = ?", (name,)).fetchone()
         if row is None:
             msg = f"unknown local secret {name!r}"
             raise SecretError(msg)
@@ -201,14 +208,17 @@ class LocalSecretStore:
     def delete(self, name: str) -> bool:
         """Remove ``name``; returns whether it existed (CLI use)."""
         _check_name(name)
-        cursor = self._db.execute("DELETE FROM secrets WHERE name = ?", (name,))
-        return cursor.rowcount > 0
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM secrets WHERE name = ?", (name,))
+            return cursor.rowcount > 0
 
     def names(self) -> list[str]:
-        return [row[0] for row in self._db.execute("SELECT name FROM secrets ORDER BY name")]
+        with self._lock:
+            return [row[0] for row in self._db.execute("SELECT name FROM secrets ORDER BY name")]
 
     def close(self) -> None:
-        self._db.close()
+        with self._lock:
+            self._db.close()
 
     def __enter__(self) -> Self:
         return self
@@ -248,6 +258,7 @@ class EdgeSecretResolver:
         self._cache_seconds = max(0.0, min(float(cache_seconds), float(MAX_CACHE_SECONDS)))
         self._cache: dict[str, _CacheEntry] = {}
         self._store: LocalSecretStore | None = None
+        self._lock = threading.RLock()
 
     def __repr__(self) -> str:
         return f"EdgeSecretResolver(cached={len(self._cache)})"
@@ -278,11 +289,16 @@ class EdgeSecretResolver:
     # -- resolution ---------------------------------------------------------------------------
 
     def resolve(self, secret_ref: str) -> str:
+        """The secret's value; thread-safe (one resolution at a time, cached per reference)."""
         try:
             validate_secret_ref(secret_ref)
         except ValueError as exc:
             msg = f"invalid secret_ref: {exc}"
             raise SecretError(msg) from exc
+        with self._lock:
+            return self._resolve_locked(secret_ref)
+
+    def _resolve_locked(self, secret_ref: str) -> str:
         now = self._clock()
         entry = self._cache.get(secret_ref)
         if entry is not None and entry.expires_at > now:
