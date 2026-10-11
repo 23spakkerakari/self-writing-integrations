@@ -29,6 +29,12 @@ a word that appeared once (a name, a code word, free text) would become a "const
 cluster has :data:`MIN_CLUSTER_SIZE` members every token of its messages is a parameter and the
 template is all ``<*>``; constants appear once the message shape has been seen that often.
 
+**Frozen replay.** The offline analyzer reads its input twice (ADR 0017). Mining the second
+pass would count every message again, so a message seen twice would reach
+:data:`MIN_CLUSTER_SIZE` and travel with its words as constants. After
+:meth:`TemplateStore.freeze` the store only matches messages against the clusters it already
+has and never grows them: the template of a message is the one its cluster ended pass 1 with.
+
 The registry (:meth:`TemplateStore.registry`) counts records per template with the event kind
 and the first and last ``observed_at``; the offline analyzer writes it as ``templates.json``
 (``carto_schema.bundle.BundleTemplate``). Memory is bounded by ``max_clusters`` per system
@@ -320,6 +326,7 @@ class TemplateStore:
         self._states: dict[str, _SystemState] = {}
         self._ids: dict[tuple[str, str], str] = {}
         self._last_flush = time.monotonic()
+        self._frozen = False
 
     def __enter__(self) -> Self:
         return self
@@ -350,7 +357,12 @@ class TemplateStore:
             tokens = tokens[:MAX_MESSAGE_TOKENS]
         masked = " ".join(MASK if _mask_token(token) else token for token in tokens)
         template = state.cache.get(masked)
-        if template is None:
+        if template is None and self._frozen:
+            template = self._match(state, masked, len(tokens))
+            if len(state.cache) >= self._cache_size:
+                state.cache.clear()
+            state.cache[masked] = template
+        elif template is None:
             result = state.miner.add_log_message(masked)
             template = str(result["template_mined"])
             if result["change_type"] == _CHANGED or len(state.cache) >= self._cache_size:
@@ -372,6 +384,25 @@ class TemplateStore:
         if len(template) > MAX_TEMPLATE_TEXT_LEN:
             template = template[:MAX_TEMPLATE_TEXT_LEN]
         return template, params
+
+    def freeze(self) -> None:
+        """Stop learning: :meth:`mine` matches against the existing clusters and never adds a
+        message to one (see "Frozen replay" in the module docstring). Irreversible."""
+        self._frozen = True
+        for state in self._states.values():
+            state.cache.clear()
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
+
+    def _match(self, state: _SystemState, masked: str, token_count: int) -> str:
+        """The template of the cluster ``masked`` belongs to, or all parameters when it has
+        none or fewer than ``min_cluster_size`` members."""
+        cluster = state.miner.match(masked, full_search_strategy="fallback")
+        if cluster is None or cluster.size < self._min_cluster_size:
+            return " ".join(MASK for _ in range(token_count))
+        return str(cluster.get_template())
 
     def template_id(self, system_id: str, template_text: str) -> str:
         """:func:`compute_template_id`, memoised per (system, text)."""

@@ -65,3 +65,12 @@ A JSON map keyed by a value with no digit run, such as a customer name (`{"Alice
 still puts that name in a field path. Closing it needs map detection: a parent path with many
 distinct child names is a map, and its keys become values. That changes the field model (spec
 8.2 flattening), so it is not done without a decision. Scenario A has no such map.
+
+## Addendum, 2026-10-11: the analyzer's second pass
+
+The analyzer reads its input twice (ADR 0017) and used to mine templates in both passes, so a
+message seen twice reached three cluster members in pass 2 and travelled with its words as
+constants (`parcel left with neighbour <name>` in clear in the events, `templates.json` and
+`MANIFEST.md`). The template store now freezes before pass 2: it matches messages against the
+clusters of pass 1 and never grows them. The gateway reads each record once and was not
+affected. The leak test plants a message seen twice.

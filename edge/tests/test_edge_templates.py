@@ -297,3 +297,40 @@ def test_a_varying_word_stays_a_parameter_once_constants_appear() -> None:
     template, params = store.mine("sys_web", "voucher MKCHARLIE redeemed by staff")
     assert template == "voucher <*> redeemed by staff"
     assert params == ["MKCHARLIE"]
+
+
+def test_a_frozen_store_never_grows_a_cluster() -> None:
+    """The analyzer mines its input twice (ADR 0017); pass 2 must not count a message again, or
+    a message seen twice reaches MIN_CLUSTER_SIZE and travels with its words as constants."""
+    store = TemplateStore()
+    message = "parcel left with neighbour MKTWICE"
+    for _ in range(2):
+        assert store.mine("sys_web", message)[0] == "<*> <*> <*> <*> <*>"
+    store.freeze()
+    assert store.frozen
+    for _ in range(3):
+        template, params = store.mine("sys_web", message)
+        assert template == "<*> <*> <*> <*> <*>"
+        assert params == ["parcel", "left", "with", "neighbour", "MKTWICE"]
+
+
+def test_a_frozen_store_uses_the_templates_pass_one_learned() -> None:
+    store = TemplateStore()
+    for name in ("MKALPHA", "MKBRAVO", "MKCHARLIE"):
+        store.mine("sys_web", f"voucher {name} redeemed by staff")
+    store.freeze()
+    # The first member of the cluster now gets the final template, not the all-parameter one.
+    assert store.mine("sys_web", "voucher MKALPHA redeemed by staff") == (
+        "voucher <*> redeemed by staff",
+        ["MKALPHA"],
+    )
+    assert store.mine("sys_web", "an unseen message shape") == (
+        "<*> <*> <*> <*>",
+        [
+            "an",
+            "unseen",
+            "message",
+            "shape",
+        ],
+    )
+    assert store.cluster_count("sys_web") == 1

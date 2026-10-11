@@ -458,8 +458,9 @@ def test_leak_full_scenario_bundle(request: pytest.FixtureRequest) -> None:
 
 def _plant_probes(sim: Path) -> dict[str, list[str]]:
     """Records that exercise the leak classes the simulator does not generate (review): a JSON
-    map keyed by a value, free text in a field, a one-off message, a logfmt line whose message
-    runs on unquoted, and rare free text in an otherwise low-cardinality field. Returns the
+    map keyed by a value, free text in a field, a one-off message, a message seen twice (the
+    analyzer reads its input twice), a logfmt line whose message runs on unquoted, and rare free
+    text in an otherwise low-cardinality field. Returns the
     probe markers, which are scanned like the simulator's own."""
     webstore = min((sim / "webstore").glob("app-*.ndjson"))
     orders = min((sim / "orders").glob("order-svc-*.log"))
@@ -468,6 +469,7 @@ def _plant_probes(sim: Path) -> dict[str, list[str]]:
         "map_key": [f"mkprobe{n:03d}key" for n in range(3)],
         "free_text": [f"please call mrs mkprobe{n:03d}note back tomorrow" for n in range(3)],
         "one_off": ["mkprobeoneoffword"],
+        "twice": ["mkprobetwiceword"],
         "logfmt_words": ["mkprobebareword"],
         "rare_kept": [f"refund issued by mkprobe{n:03d}rare after review" for n in range(2)],
     }
@@ -480,6 +482,9 @@ def _plant_probes(sim: Path) -> dict[str, list[str]]:
     lines.append(
         json.dumps({"ts": f"{day}T05:20:00.000Z", "msg": "gate code mkprobeoneoffword today"})
     )
+    for minute in ("21", "22"):
+        message = "parcel left with neighbour mkprobetwiceword"
+        lines.append(json.dumps({"ts": f"{day}T05:{minute}:00.000Z", "msg": message}))
     for n in range(60):
         detail = probes["rare_kept"][n // 30] if n % 30 == 7 else "ok"
         lines.append(
