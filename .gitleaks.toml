@@ -21,6 +21,7 @@ paths = [
   '''packages/carto-schema/tests/.*''',
   '''tools/semgrep/.*''',
   # The previous product kept under legacy/ (ADR 0005) is frozen reference code with mock
-  # OAuth fixtures; it predates carto and is not built or shipped.
+  # OAuth fixtures; it predates carto and is not built or shipped. A one-off audit of the whole
+  # history (2026-10-11, docs/plans/M1.md) found no real credential in it.
   '''legacy/.*''',
 ]

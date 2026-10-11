@@ -1,6 +1,6 @@
 # ADR 0011: The scenario B leak run waits for scenario B (M4)
 
-Status: accepted, 2026-10-08 (spec 18.3, 21; spec 0.1 item 10)
+Status: accepted, 2026-10-08; confirmed by the founder 2026-10-11 (spec 18.3, 21; spec 0.1 item 10)
 
 ## Context
 

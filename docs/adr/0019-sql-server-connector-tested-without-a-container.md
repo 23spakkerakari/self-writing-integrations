@@ -1,6 +1,7 @@
 # ADR 0019: The SQL Server connector is tested against a fake connection in M1
 
-Status: accepted, 2026-10-08 (spec 8.1.4, 18.2, 21 "PostgreSQL first, then SQL Server and MySQL")
+Status: accepted, 2026-10-08; driver packaging decided by the founder 2026-10-11 (spec 8.1.4, 18.2,
+21 "PostgreSQL first, then SQL Server and MySQL")
 
 ## Context
 
@@ -27,3 +28,10 @@ with the ODBC driver installed in that CI job only.
 
 `docs/install` marks SQL Server support as "implemented, verified against a live server at the
 first deployment". The read-only grant script for SQL Server ships with the other two.
+
+## Driver packaging (founder, 2026-10-11)
+
+The edge image stays open-source only and does not install Microsoft's ODBC Driver 18, whose
+licence must be accepted to install it. When the payer partner needs SQL Server, a separate
+edge image variant installs the driver, its licence is reviewed then, and the live container
+test above comes with it.
