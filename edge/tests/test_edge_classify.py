@@ -23,6 +23,7 @@ from carto_edge.pipeline.classify import (
     PHONETIC_FORMS,
     RECHECK_EVERY,
     Classifier,
+    has_digit_run,
     is_amount_value,
     is_secret_name,
     name_segments,
@@ -547,6 +548,75 @@ def test_scenario_a_attributes_are_kept(path: str, values: list[str]) -> None:
     assert decision.policy is Policy.KEEP
     assert decision.forms == ()
     assert decision.reason == "low_card"
+
+
+# ADR 0029: a run of four or more digits marks an identifier whatever the cardinality.
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("MAN-20260923-01", True),
+        ("SHIP_20260923_2112.csv", True),
+        ("2026", True),
+        ("DC-03", False),
+        ("200", False),
+        ("v12", False),
+        ("us-east", False),
+        ("1.2.3", False),
+        ("٣٤٥٦", False),  # non-ASCII digits are not a run
+    ],
+)
+def test_has_digit_run(value: str, expected: bool) -> None:
+    assert has_digit_run(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "values"),
+    [
+        ("manifest_id", [f"MAN-202609{20 + i % 4:02d}-01" for i in range(1_000)]),
+        ("file", [f"SHIP_202609{20 + i % 4:02d}_2112.csv" for i in range(1_000)]),
+        ("store", [["1042", "1043", "DC-03"][i % 3] for i in range(1_000)]),
+    ],
+)
+def test_low_card_field_with_digit_runs_is_a_tokenized_identifier(
+    path: str, values: list[str]
+) -> None:
+    decision = decide(make(), path, values)
+    assert decision.field_class is FieldClass.IDENTIFIER
+    assert decision.policy is Policy.TOKENIZE
+    assert decision.forms == IDENTIFIER_FORMS
+    assert decision.reason == "identifier:digit_run"
+
+
+def test_kept_field_does_not_keep_a_value_with_a_digit_run() -> None:
+    classifier = make()
+    values = [["CREATED", "RELEASED", "SHIPPED", "HOLD-20260923"][i % 4] for i in range(1_000)]
+    ref = feed(classifier, "status", values)
+    decision = classifier.decide(ref, "status")
+    assert decision.policy is Policy.KEEP
+    assert classifier.keeps(ref, "CREATED")
+    assert not classifier.keeps(ref, "HOLD-20260923")
+    summary = classifier.field_summary(ref)
+    assert "HOLD-20260923" not in summary["sample_values"]
+    assert "CREATED" in summary["sample_values"]
+
+
+def test_pinned_keep_field_keeps_digit_runs() -> None:
+    pins = [FieldPolicyPin(field=f"{SYS}/*/year", field_class="low_card_attribute", policy="keep")]
+    classifier = make(pins=pins)
+    ref = feed(classifier, "year", [["2025", "2026"][i % 2] for i in range(1_000)])
+    decision = classifier.decide(ref, "year")
+    assert decision.policy is Policy.KEEP
+    assert decision.pinned
+    assert classifier.keeps(ref, "2026", pinned=True)
+    assert classifier.field_summary(ref)["sample_values"] == ["2025", "2026"]
+
+
+def test_unpinned_year_field_is_tokenized() -> None:
+    decision = decide(make(), "year", [["2025", "2026"][i % 2] for i in range(1_000)])
+    assert decision.policy is Policy.TOKENIZE
+    assert decision.reason == "identifier:digit_run"
 
 
 def test_low_card_with_detector_hits_is_not_kept() -> None:

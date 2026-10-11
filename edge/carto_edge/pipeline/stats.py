@@ -311,13 +311,13 @@ class FieldStats:
         }
 
     @classmethod
-    def restore(cls, data: Any, sample_size: int) -> FieldStats:
+    def restore(cls, data: Any, sample_size: int, *, seed: int | None = None) -> FieldStats:
         """Inverse of :meth:`snapshot`; the reservoir starts empty. Raises
         :class:`StatsFormatError` on anything unexpected."""
         if not isinstance(data, Mapping):
             msg = "field snapshot must be a mapping"
             raise StatsFormatError(msg)
-        stats = cls(sample_size)
+        stats = cls(sample_size, seed=seed)
         stats.count = _require_int(data, "count")
         stats.null_count = _require_int(data, "null_count")
         if stats.null_count > stats.count:
@@ -361,6 +361,12 @@ class FieldStats:
         return stats
 
 
+def _reservoir_seed(ref: str) -> int:
+    """A seed per field, so the same input gives the same samples and the same decisions on
+    every run (the PII verdict of rule 6 looks only at the samples)."""
+    return int.from_bytes(hashlib.blake2b(ref.encode("utf-8"), digest_size=8).digest(), "big")
+
+
 class FieldStatsStore:
     """All field statistics of one edge, keyed by ``field_ref`` (spec 7.2), with persistence.
 
@@ -400,7 +406,7 @@ class FieldStatsStore:
         with self._lock:
             stats = self._fields.get(ref)
             if stats is None:
-                stats = FieldStats(self.sample_size)
+                stats = FieldStats(self.sample_size, seed=_reservoir_seed(ref))
                 self._fields[ref] = stats
             return stats
 
@@ -451,7 +457,9 @@ class FieldStatsStore:
             if not isinstance(ref, str) or not ref:
                 msg = "snapshot field refs must be non-empty strings"
                 raise StatsFormatError(msg)
-            restored[ref] = FieldStats.restore(field_data, self.sample_size)
+            restored[ref] = FieldStats.restore(
+                field_data, self.sample_size, seed=_reservoir_seed(ref)
+            )
         with self._lock:
             self._fields = restored
             self._dirty = False

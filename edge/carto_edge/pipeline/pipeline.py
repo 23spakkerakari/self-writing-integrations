@@ -301,7 +301,7 @@ class EdgePipeline:
                 ref = field_ref(parsed.system_id, parsed.template_id, path)
                 if (
                     len(attributes) < MAX_ATTRIBUTES
-                    and self._classifier.keeps(ref, value)
+                    and self._classifier.keeps(ref, value, pinned=decision.pinned)
                     and attribute_is_clean(value, self._detector)
                 ):
                     attributes[path[:MAX_ATTRIBUTE_KEY_LEN]] = truncate_attribute(value)

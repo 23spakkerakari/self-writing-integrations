@@ -848,9 +848,11 @@ refuses to start when the chain is broken. Check it with
   an environment variable, an image or a log.
 - **What reaches core.** Tokens, shapes, templates with parameters removed, low-cardinality
   attributes and timestamps; raw identifier values only in the edge vault (spec 2.3 invariant 2).
-  An identifier whose values repeat a lot (a nightly batch or manifest id) looks like a
-  low-cardinality attribute and is kept in clear unless pinned (ADR 0026): review the kept
-  fields and pin such identifiers to `tokenize` (Field policy pins, step 7). The leak test (spec
+  An identifier whose values repeat a lot (a nightly batch or manifest id) has few distinct
+  values; when its values contain a run of four or more digits it is tokenized anyway (ADR
+  0029). One without digits (`MAN-ALPHA`) is kept in clear unless pinned: review the kept fields
+  and pin such identifiers to `tokenize` (Field policy pins, step 7). The reverse also holds: a
+  harmless field with four digits (a year, a port) is tokenized until you pin it to `keep`. The leak test (spec
   18.3, `make leak`) checks bundles, forwarded batches, logs and ClickHouse rows for planted
   marker values, and CI replays the simulator through this stack and scans ClickHouse and the
   service logs the same way.
@@ -890,4 +892,5 @@ These are things this guide or the spec expects that the M1 build does not do ye
 4. The listeners authorise any certificate from the install CA (see Security notes), and the
    reveal service keeps its nonce and rate-limit state in memory, so a gateway restart resets
    them; both matter from M3, when core calls the internal endpoints.
-5. Identifiers with naturally low cardinality are kept in clear unless pinned (ADR 0026).
+5. Identifiers with naturally low cardinality and no run of four digits are kept in clear
+   unless pinned (ADR 0026, ADR 0029).

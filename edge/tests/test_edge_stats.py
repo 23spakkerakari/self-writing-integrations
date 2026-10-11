@@ -330,3 +330,16 @@ def test_value_counts_stop_when_the_field_has_too_many_distinct_values() -> None
         stats.observe(f"id-{n}")
     assert stats.value_count("yes") == 0
     assert stats.value_count("id-1") == 0
+
+
+def test_reservoir_is_reproducible_per_field_and_differs_across_fields() -> None:
+    def samples(ref: str) -> tuple[str, ...]:
+        store = FieldStatsStore(sample_size=16)
+        for i in range(5_000):
+            store.observe(ref, f"v{i}")
+        stats = store.get(ref)
+        assert stats is not None
+        return stats.samples
+
+    assert samples("sys_a/tpl_1/region") == samples("sys_a/tpl_1/region")
+    assert samples("sys_a/tpl_1/region") != samples("sys_a/tpl_1/status")

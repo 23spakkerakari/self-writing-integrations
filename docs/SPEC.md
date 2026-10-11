@@ -612,7 +612,7 @@ Classification rules (in order):
 3. **timestamp / date:** parseable as date/time. Kept as `observed_at` candidate or a `date` form token.
 4. **amount:** decimal numbers with 2 fractional digits or currency hints. Default: tokenized `amount` form only (for composite matching), never kept in clear (payroll amounts are sensitive).
 5. **identifier:** string or integer, length 3 to 128, distinct estimate above threshold (default 1,000 or above 20% of count), not mostly whitespace. **Tokenized** with forms.
-6. **low_card_attribute:** distinct estimate at or below threshold and passes PII checks. **Kept in clear** (status codes, environment names, warehouse codes).
+6. **low_card_attribute:** distinct estimate at or below threshold and passes PII checks. **Kept in clear** (status codes, environment names, warehouse codes). A field where half the samples contain a run of four or more digits is an `identifier` instead, and such a value in a kept field is not sent in clear, unless an admin pinned the field (ADR 0029).
 7. **free_text:** long strings with spaces. Only its template constants survive; the raw text is dropped.
 8. **unknown / quarantined:** fewer than 200 samples seen. Tokenized if identifier-shaped, else dropped, until enough samples exist. Re-classified automatically later; re-classification is logged.
 

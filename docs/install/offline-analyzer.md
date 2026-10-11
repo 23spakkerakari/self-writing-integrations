@@ -268,10 +268,16 @@ grep -c 'SO-0004471' bundle.carto/fields.json bundle.carto/templates.json bundle
 ```
 
 Look hardest for identifiers that repeat across many records: a nightly batch number, a carrier
-manifest id, a file name with a date in it. They have few distinct values, so the classifier
-treats them as low-cardinality attributes and keeps them in clear (spec 8.3 rule 6, ADR 0026).
-Pin each one to `field_class: identifier`, `policy: tokenize`; `simulator/analyze.shop.yaml`
-pins `manifest_id`, `file` and `name` in the shipping system for exactly this reason.
+manifest id, a file name. They have few distinct values. When most of their values contain a run
+of four or more digits (`MAN-20260923-01`, `SHIP_20260923.csv`) the classifier tokenizes them
+anyway (ADR 0029); one without such digits looks like a low-cardinality attribute and is kept in
+clear (spec 8.3 rule 6, ADR 0026). Pin each one to `field_class: identifier`, `policy:
+tokenize`; `simulator/analyze.shop.yaml` pins `manifest_id`, `file` and `name` in the shipping
+system as examples.
+
+The rule errs on the safe side: a harmless field whose values have four digits (a year, a port,
+a store number) is tokenized, and a four-digit value in a kept field is left out of the event.
+Pin such a field to `field_class: low_card_attribute`, `policy: keep` to send it in clear.
 
 If a value shows up, pin the field (or remove the lines from the export) and re-run with the same
 state directory. Tell us too: the classifier should have caught it.

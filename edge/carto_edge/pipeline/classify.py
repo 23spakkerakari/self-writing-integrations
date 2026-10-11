@@ -24,7 +24,11 @@ The rules of spec 8.3 run in order:
    of the non-null count, mean length within the identifier range, not mostly whitespace, not
    floats. Tokenized with :data:`IDENTIFIER_FORMS`.
 6. ``low_card_attribute``: at or below both thresholds and no detector hit in the samples.
-   Kept in clear.
+   Kept in clear, except (ADR 0029): when at least :data:`DIGIT_RUN_SHARE` of the samples
+   contain a digit run (:func:`has_digit_run`, four or more digits: batch keys such as
+   ``MAN-20260923-01``), the field is an ``identifier`` (reason ``identifier:digit_run``) and
+   tokenized; in a kept field, a single value with a digit run does not travel in clear
+   (:meth:`Classifier.keeps`). Admin pins skip both.
 7. ``free_text``: mean length above 32 and most values containing whitespace. Dropped.
 8. Quarantine (checked before 5 to 7): fewer than ``quarantine_samples`` non-null values.
    Tokenized with :data:`IDENTIFIER_FORMS` when identifier-shaped, dropped otherwise; class
@@ -70,6 +74,7 @@ from carto_schema.forms import is_form
 __all__ = [
     "AMOUNT_FORMS",
     "DATE_FORMS",
+    "DIGIT_RUN_SHARE",
     "FORM_FAMILIES",
     "IDENTIFIER_FORMS",
     "PHONETIC_FORMS",
@@ -77,6 +82,7 @@ __all__ = [
     "PII_SAMPLE_LIMIT",
     "RECHECK_EVERY",
     "Classifier",
+    "has_digit_run",
     "is_amount_value",
     "is_secret_name",
     "name_segments",
@@ -96,6 +102,8 @@ PII_SAMPLE_LIMIT: Final = 32
 PII_HIT_SHARE: Final = 0.3
 RECHECK_EVERY: Final = 1000
 MIN_KEPT_VALUE_COUNT: Final = 3
+DIGIT_RUN_SHARE: Final = 0.5
+"""Share of samples with a digit run that makes a low-cardinality field an identifier."""
 """A kept field's value travels in clear only once this exact value was seen this often."""
 MAJORITY: Final = 0.8
 """Share of samples a shape rule (temporal, amount, float) needs to claim a field."""
@@ -662,6 +670,7 @@ _NUMERIC: Final = re.compile(
     rf"[-+]?{_CURRENCY_PREFIX}[-+]?(?:\d{{1,3}}(?:,\d{{3}})+|\d+)(?:\.\d+)?{_CURRENCY_SUFFIX}"
 )
 _FLOAT: Final = re.compile(r"[-+]?\d+\.\d+")
+_DIGIT_RUN: Final = re.compile(r"[0-9]{4}")
 _IDENTIFIER_SHAPED: Final = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/#+=-]*[A-Za-z0-9])?")
 
 
@@ -669,6 +678,13 @@ def is_amount_value(value: str) -> bool:
     """A decimal with exactly two fraction digits, optionally signed, grouped and with a
     currency symbol or code (``129.99``, ``$1,299.00``, ``EUR 10.00``)."""
     return _AMOUNT.fullmatch(value.strip()) is not None
+
+
+def has_digit_run(value: str) -> bool:
+    """Whether ``value`` holds four or more consecutive ASCII digits (ADR 0029): the mark of
+    an identifier even in a low-cardinality field (``MAN-20260923-01``, ``SHIP_20260923.csv``).
+    Short codes (``DC-03``, ``200``) do not have one."""
+    return _DIGIT_RUN.search(value) is not None
 
 
 def _is_numeric(value: str) -> bool:
@@ -819,11 +835,15 @@ class Classifier:
             self._cache[ref] = _Cached(decision, count, quarantined)
             return decision
 
-    def keeps(self, ref: str, value: str) -> bool:
+    def keeps(self, ref: str, value: str, *, pinned: bool = False) -> bool:
         """Whether a value of a ``keep`` field may travel in clear: the exact value must have
         been seen at least :data:`MIN_KEPT_VALUE_COUNT` times in the field. A low-cardinality
         field can still carry a rare value (``yes`` and ``no`` 290 times, then a customer's
-        name once); a value seen once or twice stays at the edge (spec 2.3 invariant 2)."""
+        name once); a value seen once or twice stays at the edge (spec 2.3 invariant 2). Unless
+        the field is ``pinned`` to keep, a value with a digit run stays at the edge too (ADR
+        0029)."""
+        if not pinned and has_digit_run(value):
+            return False
         stats = self._stats.get(ref)
         if stats is None:
             return False
@@ -962,6 +982,14 @@ class Classifier:
                     reason="low_card:pii_hits",
                     samples_seen=non_null,
                 )
+            if _share(samples, has_digit_run) >= DIGIT_RUN_SHARE:
+                return FieldDecision(
+                    FieldClass.IDENTIFIER,
+                    Policy.TOKENIZE,
+                    IDENTIFIER_FORMS,
+                    reason="identifier:digit_run",
+                    samples_seen=non_null,
+                )
             return FieldDecision(
                 FieldClass.LOW_CARD_ATTRIBUTE, Policy.KEEP, reason="low_card", samples_seen=non_null
             )
@@ -1088,7 +1116,7 @@ class Classifier:
                     if (
                         text
                         and text not in clean
-                        and stats.value_count(sample) >= MIN_KEPT_VALUE_COUNT
+                        and self.keeps(ref, sample, pinned=decision.pinned)
                         and attribute_is_clean(text, self._detector)
                     ):
                         clean.add(text)

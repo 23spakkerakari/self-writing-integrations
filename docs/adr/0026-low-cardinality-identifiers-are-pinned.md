@@ -1,7 +1,7 @@
 # ADR 0026: Low-cardinality identifiers (batch keys) are pinned in M1; a default safeguard is a founder question
 
 Status: accepted for M1, 2026-10-10 (spec 8.3 rules 5 and 6, 9.7, 2.3 invariant 2, 18.3).
-Open question for the founder recorded below.
+The open question below was answered by the founder on 2026-10-11: ADR 0029.
 
 ## Context
 
