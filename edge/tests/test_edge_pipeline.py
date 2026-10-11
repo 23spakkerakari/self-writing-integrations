@@ -157,7 +157,10 @@ def test_streaming_mode_quarantines_and_tokenizes_identifier_shaped_values() -> 
     assert event is not None
     text = event.model_dump_json()
     assert "c-88001" not in text
-    assert "cart_id" in {identifier.field for identifier in event.identifiers}
+    # First sighting of the names (ADR 0030): cart_id, items and region travel as "*" (the
+    # first value is kept); ts, level and msg are configured names, trusted from the start.
+    assert "cart_id" not in text
+    assert "*" in {identifier.field for identifier in event.identifiers}
     assert event.kind is EventKind.LOG
     assert event.observed_at_quality is ObservedAtQuality.SOURCE
     assert event.ingested_at == RECEIVED

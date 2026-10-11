@@ -379,6 +379,12 @@ class ClassifySettings(_Frozen):
     identifier_max_len: int = Field(default=128, ge=8)
     sample_values: int = Field(default=64, ge=8, le=1024, description="Reservoir per field.")
     stats_flush_seconds: float = Field(default=30.0, ge=1)
+    map_min_keys: int = Field(
+        default=256,
+        ge=16,
+        le=65_536,
+        description="Distinct child names that make a parent path a map (ADR 0030).",
+    )
 
 
 class BufferSettings(_Frozen):
@@ -470,6 +476,10 @@ class EdgeSettings(ProductSettings):
     @property
     def templates_dir(self) -> Path:
         return self.state_dir / "templates"
+
+    @property
+    def names_dir(self) -> Path:
+        return self.state_dir / "names"
 
     @property
     def audit_file(self) -> Path:

@@ -343,6 +343,7 @@ def _run(
         ) as writer:
             runtime.pipeline.reset_parsers()  # pass 2 reads each file from its first line
             runtime.templates.freeze()  # pass 2 must not count a message a second time
+            runtime.pipeline.names.freeze()  # nor a field name (ADR 0030)
             second = _connectors(runtime, sources)
             for source, connector in zip(sources, second, strict=True):
                 handle = functools.partial(_emit_chunk, runtime, writer, source.id)

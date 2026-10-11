@@ -456,17 +456,26 @@ def test_leak_full_scenario_bundle(request: pytest.FixtureRequest) -> None:
     report.assert_clean()
 
 
+def _letters(n: int) -> str:
+    """``n`` written with the letters a to z only (probe keys must not hold digits, which
+    ADR 0027 would mask anyway)."""
+    return "".join(chr(97 + (n // 26**place) % 26) for place in (2, 1, 0))
+
+
 def _plant_probes(sim: Path) -> dict[str, list[str]]:
     """Records that exercise the leak classes the simulator does not generate (review): a JSON
-    map keyed by a value, free text in a field, a one-off message, a message seen twice (the
-    analyzer reads its input twice), a logfmt line whose message runs on unquoted, and rare free
-    text in an otherwise low-cardinality field. Returns the
+    map keyed by a value, maps keyed by names without digits (rare keys, and enough distinct keys
+    to make the parent a map, ADR 0030), free text in a field, a one-off message, a message seen
+    twice (the analyzer reads its input twice), a logfmt line whose message runs on unquoted,
+    and rare free text in an otherwise low-cardinality field. Returns the
     probe markers, which are scanned like the simulator's own."""
     webstore = min((sim / "webstore").glob("app-*.ndjson"))
     orders = min((sim / "orders").glob("order-svc-*.log"))
     day = webstore.stem.removeprefix("app-")
     probes = {
         "map_key": [f"mkprobe{n:03d}key" for n in range(3)],
+        "rare_name_key": [f"mkprobekeyowner{_letters(n)}" for n in range(2)],
+        "map_name_key": [f"mkprobemapowner{_letters(n)}" for n in range(300)],
         "free_text": [f"please call mrs mkprobe{n:03d}note back tomorrow" for n in range(3)],
         "one_off": ["mkprobeoneoffword"],
         "twice": ["mkprobetwiceword"],
@@ -477,14 +486,23 @@ def _plant_probes(sim: Path) -> dict[str, list[str]]:
     for n, key in enumerate(probes["map_key"]):
         stock = {key: n}
         lines.append(json.dumps({"ts": f"{day}T05:0{n}:00.000Z", "msg": "stock", "stock": stock}))
+    for n, owner in enumerate(probes["rare_name_key"]):
+        held = {"held_by": {owner: n + 1}}
+        lines.append(json.dumps({"ts": f"{day}T04:0{n}:00.000Z", "msg": "hold", **held}))
+    for n, owner in enumerate(probes["map_name_key"]):
+        minute, second = divmod(n, 60)
+        by_owner = {"stock_by_owner": {owner: n % 7, probes["map_name_key"][n - 1]: 1}}
+        lines.append(
+            json.dumps({"ts": f"{day}T07:{minute:02d}:{second:02d}.000Z", "msg": "own", **by_owner})
+        )
     for n, note in enumerate(probes["free_text"]):
         lines.append(json.dumps({"ts": f"{day}T05:1{n}:00.000Z", "msg": "note", "note": note}))
     lines.append(
         json.dumps({"ts": f"{day}T05:20:00.000Z", "msg": "gate code mkprobeoneoffword today"})
     )
-    for minute in ("21", "22"):
+    for twice_minute in ("21", "22"):
         message = "parcel left with neighbour mkprobetwiceword"
-        lines.append(json.dumps({"ts": f"{day}T05:{minute}:00.000Z", "msg": message}))
+        lines.append(json.dumps({"ts": f"{day}T05:{twice_minute}:00.000Z", "msg": message}))
     for n in range(60):
         detail = probes["rare_kept"][n // 30] if n % 30 == 7 else "ok"
         lines.append(

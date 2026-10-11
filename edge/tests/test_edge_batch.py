@@ -361,14 +361,14 @@ def test_metrics_and_vault_entries(
     assert r.metrics.get("carto_edge_records_total", source_id="src_web") == 5
     assert r.metrics.get("carto_edge_events_total", source_id="src_web") == 5
     assert r.metrics.get("carto_edge_vault_entries_total") == outcome.vault_entries
-    event_ = r.buffered_events()[0]
+    event_ = r.buffered_events()[-1]  # names are in clear from the third record (ADR 0030)
     raw = [
         identifier.token
         for identifier in event_.identifiers
         if identifier.form == "raw" and identifier.field == "cart_id"
     ]
     assert raw
-    assert runtime.vault.reveal(raw, now=NOW) == dict.fromkeys(raw, "c-88001")
+    assert runtime.vault.reveal(raw, now=NOW) == dict.fromkeys(raw, "c-88005")
 
 
 def test_full_buffer_never_advances_the_cursor_and_asks_for_a_re_read(

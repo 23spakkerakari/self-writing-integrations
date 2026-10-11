@@ -66,6 +66,7 @@ from carto_edge.pipeline.model import (
     VaultEntry,
     field_ref,
 )
+from carto_edge.pipeline.parse.names import FieldNameStore
 from carto_edge.pipeline.parser import ParseFailure, RecordParser
 from carto_edge.pipeline.pii import PiiDetector
 from carto_edge.pipeline.redact import (
@@ -168,6 +169,14 @@ class PipelineCounters:
         }
 
 
+def pin_paths(sources: SourcesFile) -> list[str]:
+    """The field paths named by field policy pins (``system/template/path``): an admin named
+    them, so the name gate trusts them from the first record (ADR 0030)."""
+    return [
+        pin.field.split("/", 2)[2] for pin in sources.field_policies if pin.field.count("/") >= 2
+    ]
+
+
 class EdgePipeline:
     """Parser, classifier, redaction and tokenizer for every source of one edge."""
 
@@ -183,10 +192,17 @@ class EdgePipeline:
         retention_days: int,
         clock: Callable[[], datetime] | None = None,
         observe_on_process: bool = True,
+        names: FieldNameStore | None = None,
     ) -> None:
         self._sources = {source.id: source for source in sources.sources}
         self._observe_on_process = observe_on_process
         self._templates = templates
+        # The name gate (ADR 0030); in memory unless the runtime passes a persisted one.
+        self._names = (
+            names
+            if names is not None
+            else FieldNameStore(detector, trusted_paths=pin_paths(sources))
+        )
         self._classifier = classifier
         self._detector = detector
         self._tokenizer = tokenizer
@@ -207,6 +223,10 @@ class EdgePipeline:
     @property
     def templates(self) -> TemplateStore:
         return self._templates
+
+    @property
+    def names(self) -> FieldNameStore:
+        return self._names
 
     @property
     def tokenizer(self) -> Tokenizer:
@@ -232,7 +252,7 @@ class EdgePipeline:
             source = self._sources.get(source_id)
             if source is None:
                 return None
-            parser = RecordParser(source, self._templates)
+            parser = RecordParser(source, self._templates, self._names)
             self._parsers[source_id] = parser
         return parser
 
@@ -375,9 +395,11 @@ class EdgePipeline:
     # -- maintenance --------------------------------------------------------------------------
 
     def flush(self) -> None:
-        """Persist templates; the caller flushes the statistics store on its own clock."""
+        """Persist templates and field names; the caller flushes the statistics store on its
+        own clock."""
         with self._lock:
             self._templates.flush()
+            self._names.flush()
 
     def parser_internal_errors(self) -> int:
         return sum(parser.internal_errors for parser in self._parsers.values())

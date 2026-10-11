@@ -36,7 +36,13 @@ from datetime import UTC, datetime
 from typing import Final
 
 from carto_common.logging import get_logger
-from carto_edge.config import DEFAULT_MESSAGE_FIELDS, ParseConfig, RecordFormat, SourceConfig
+from carto_edge.config import (
+    DEFAULT_MESSAGE_FIELDS,
+    DEFAULT_TIMESTAMP_FIELDS,
+    ParseConfig,
+    RecordFormat,
+    SourceConfig,
+)
 from carto_edge.pipeline.model import ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.access_log import AccessLogParser
 from carto_edge.pipeline.parse.common import flatten, key_signature, safe_path, utf8_len
@@ -44,9 +50,16 @@ from carto_edge.pipeline.parse.csv import CsvHeader, CsvParser, looks_like_csv_h
 from carto_edge.pipeline.parse.detect import FormatDetector
 from carto_edge.pipeline.parse.json import parse_json
 from carto_edge.pipeline.parse.logfmt import parse_logfmt
+from carto_edge.pipeline.parse.names import FieldNameStore
 from carto_edge.pipeline.parse.text import parse_text
 from carto_edge.pipeline.parse.xml import parse_xml
-from carto_edge.pipeline.severity import detect_severity, map_level
+from carto_edge.pipeline.severity import (
+    LEVEL_FIELDS,
+    OTEL_NUMBER_FIELDS,
+    STATUS_FIELDS,
+    detect_severity,
+    map_level,
+)
 from carto_edge.pipeline.templates import TemplateStore
 from carto_edge.pipeline.timestamps import find_timestamp, resolve_zone
 from carto_schema.event import (
@@ -95,10 +108,35 @@ class _Draft:
 class RecordParser:
     """Parse records of one source (spec 8.2); see the module docstring for the rules."""
 
-    def __init__(self, source: SourceConfig, templates: TemplateStore) -> None:
+    def __init__(
+        self,
+        source: SourceConfig,
+        templates: TemplateStore,
+        names: FieldNameStore | None = None,
+    ) -> None:
         self._source = source
         self._config: ParseConfig = source.parse
         self._templates = templates
+        # The pipeline always passes the name gate (ADR 0030); without one, names are only
+        # masked when they look like values (ADR 0027), which parser unit tests rely on.
+        self._names = names
+        self._trusted: frozenset[str] = frozenset()
+        self._record_trusted: dict[tuple[str | None, str | None], frozenset[str]] = {}
+        if names is not None:
+            config = self._config
+            self._trusted = names.trusted_set(
+                (
+                    config.timestamp_field,
+                    config.message_field,
+                    config.severity_field,
+                    config.actor_field,
+                    *DEFAULT_TIMESTAMP_FIELDS,
+                    *DEFAULT_MESSAGE_FIELDS,
+                    *LEVEL_FIELDS,
+                    *OTEL_NUMBER_FIELDS,
+                    *STATUS_FIELDS,
+                )
+            )
         self._zone = resolve_zone(self._config.timezone)
         self._format = self._config.format
         self._access = AccessLogParser(self._config.access_log_pattern)
@@ -293,9 +331,17 @@ class RecordParser:
         return None
 
     def _finish(self, raw: RawRecord, draft: _Draft) -> ParsedRecord:
-        fields = _safe_fields(draft.fields)
         config = self._config
         system_id = raw.system_id
+        top_keys: Sequence[str]
+        if self._names is None:
+            fields = _safe_fields(draft.fields)
+            top_keys = tuple(safe_path(key) for key in draft.top_keys)
+        else:
+            gated = self._names.apply(
+                system_id, draft.fields, draft.top_keys, self._trusted_for(raw)
+            )
+            fields, top_keys = gated.fields, gated.top_keys
         template_text = draft.template_text
         if draft.mine_message is not None:
             mined, params = self._templates.mine(system_id, draft.mine_message)
@@ -304,7 +350,7 @@ class RecordParser:
             if template_text is None:
                 template_text = mined
         if template_text is None:
-            template_text = key_signature(tuple(safe_path(key) for key in draft.top_keys))
+            template_text = key_signature(top_keys)
         if len(template_text) > MAX_TEMPLATE_TEXT_LEN:
             template_text = template_text[:MAX_TEMPLATE_TEXT_LEN]
 
@@ -351,6 +397,20 @@ class RecordParser:
             parse_format=draft.parse_format,
             parse_notes=draft.notes,
         )
+
+    def _trusted_for(self, raw: RawRecord) -> frozenset[str]:
+        """The parser's trusted paths plus a record's own actor and timestamp columns (a row
+        connector's ``actor_column`` and ``timestamp_column``), cached per pair."""
+        if self._names is None or (raw.actor_field is None and raw.timestamp_field is None):
+            return self._trusted
+        key = (raw.actor_field, raw.timestamp_field)
+        trusted = self._record_trusted.get(key)
+        if trusted is None:
+            if len(self._record_trusted) >= _MAX_TIMESTAMP_OVERRIDES:
+                self._record_trusted.clear()
+            trusted = self._trusted | self._names.trusted_set(key)
+            self._record_trusted[key] = trusted
+        return trusted
 
     def _timestamp_config(self, override: str | None) -> ParseConfig:
         """The parse config with a record's timestamp column in front (cached per column)."""

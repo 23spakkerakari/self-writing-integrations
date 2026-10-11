@@ -34,8 +34,9 @@ from carto_edge.keys import ROTATION_FILE, KeyManagementError, KeyManager
 from carto_edge.net.ssrf import DefaultNetworkPolicy
 from carto_edge.pipeline.classify import Classifier
 from carto_edge.pipeline.model import PipelineResult
+from carto_edge.pipeline.parse.names import FieldNameStore
 from carto_edge.pipeline.pii import PiiDetector, detector_from_settings
-from carto_edge.pipeline.pipeline import EdgePipeline
+from carto_edge.pipeline.pipeline import EdgePipeline, pin_paths
 from carto_edge.pipeline.stats import FieldStatsStore
 from carto_edge.pipeline.templates import TemplateStore
 from carto_edge.pipeline.tokenize import Tokenizer
@@ -172,6 +173,15 @@ def build_runtime(
     classifier = Classifier(
         classify, sources.field_policies, pii, stats, policy_version=sources.policy_version
     )
+    # Field names: the gateway persists them like templates; the analyzer starts each run
+    # from scratch and freezes them for its second pass (ADR 0030).
+    names = FieldNameStore(
+        pii,
+        None if analyze else settings.names_dir,
+        map_min_keys=classify.map_min_keys,
+        trusted_paths=pin_paths(sources),
+        flush_interval_seconds=settings.gateway.stats_flush_seconds,
+    )
     pipeline = EdgePipeline(
         sources=sources,
         templates=templates,
@@ -182,6 +192,7 @@ def build_runtime(
         retention_days=settings.retention.events_days,
         clock=clock,
         observe_on_process=not analyze,
+        names=names,
     )
     audit = EdgeAudit(settings.audit_file)
     runtime = EdgeRuntime(
