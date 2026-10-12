@@ -143,6 +143,8 @@ def test_postgres_pins_hostaddr_and_keeps_host_for_verify_full() -> None:
     assert kwargs["sslrootcert"] == "/etc/carto/ca.pem"
     assert "default_transaction_read_only=on" in kwargs["options"]
     assert "statement_timeout=30000" in kwargs["options"]
+    # ADR 0035 item 6: naive watermarks compare in UTC, whatever the server's default zone.
+    assert "-c TimeZone=UTC" in kwargs["options"]
     assert kwargs["password"] == "p}w;d"  # noqa: S105
 
 

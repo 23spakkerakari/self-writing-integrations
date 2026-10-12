@@ -7,8 +7,8 @@ query template and anything other than one ``SELECT`` (or ``WITH ... SELECT``) i
 write or stall (``nextval``, ``pg_sleep``, ``xp_cmdshell`` ...), and only the two named bind
 parameters ``:watermark`` and ``:batch``; string formatting markers are refused outright.
 
-Layer 2 is the session: PostgreSQL connects with ``default_transaction_read_only=on`` and a
-``statement_timeout`` and polls inside ``BEGIN READ ONLY`` (set through SQLAlchemy's
+Layer 2 is the session: PostgreSQL connects with ``default_transaction_read_only=on``, a
+``statement_timeout`` and ``TimeZone=UTC`` and polls inside ``BEGIN READ ONLY`` (set through SQLAlchemy's
 ``postgresql_readonly`` option, which psycopg turns into the read-only transaction); MySQL sets
 ``max_execution_time`` and polls inside ``START TRANSACTION READ ONLY``; SQL Server has no
 read-only transaction mode, so the connection string carries ``ApplicationIntent=ReadOnly``
@@ -242,7 +242,10 @@ def postgres_connect_kwargs(
     query_timeout_seconds: int,
 ) -> dict[str, Any]:
     """psycopg keyword arguments: ``hostaddr`` pins the policy's address, ``host`` keeps the
-    name for ``verify-full``, ``options`` makes every transaction read-only with a timeout."""
+    name for ``verify-full``, ``options`` makes every transaction read-only with a timeout and
+    pins the session time zone to UTC, so a naive watermark compares with ``timestamptz``
+    columns in UTC whatever the server's default zone is (ADR 0035 item 6; MySQL sessions set
+    ``time_zone = '+00:00'``)."""
     kwargs: dict[str, Any] = {
         "host": host,
         "hostaddr": resolved.address,
@@ -255,7 +258,8 @@ def postgres_connect_kwargs(
         "application_name": "carto-edge",
         "options": (
             "-c default_transaction_read_only=on "
-            f"-c statement_timeout={query_timeout_seconds * 1000}"
+            f"-c statement_timeout={query_timeout_seconds * 1000} "
+            "-c TimeZone=UTC"
         ),
     }
     if ca_file:

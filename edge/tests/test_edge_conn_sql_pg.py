@@ -225,6 +225,7 @@ async def test_insert_through_the_connector_session_is_refused(postgres: dict[st
         with connector._read_only_session() as connection:
             assert connection.execute(text("SHOW default_transaction_read_only")).scalar() == "on"
             assert connection.execute(text("SHOW statement_timeout")).scalar() == "5s"
+            assert connection.execute(text("SHOW TimeZone")).scalar() == "UTC"
             connection.execute(text("INSERT INTO purchase_orders (po_num) VALUES ('x')"))
 
     try:
