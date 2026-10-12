@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import uvicorn
 
 from carto_common.logging import configure_logging, get_logger
+from carto_common.mtls import peer_role_h11_protocol
 from carto_core.db.clickhouse import ClickHouseWriter, create_client
 from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.app import create_app
@@ -86,7 +87,8 @@ def build_uvicorn_config(
         access_log=True,
         # h11 bounds a request line plus headers at 16 KiB; httptools (the "auto" choice when
         # installed) accepts any size (spec 2.3 invariant 8).
-        http="h11",
+        # h11, recording each connection's certificate role for the routes (ADR 0031).
+        http=peer_role_h11_protocol(),
         h11_max_incomplete_event_size=16 * 1024,
         limit_concurrency=256,
         server_header=False,

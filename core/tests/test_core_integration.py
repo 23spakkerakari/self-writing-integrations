@@ -28,6 +28,7 @@ from testcontainers.core.config import testcontainers_config
 
 from carto_common.crypto import SigningKey, b64url_encode
 from carto_common.ids import derive_ulid, new_ulid
+from carto_common.mtls import ActAsRole
 from carto_common.settings import RetentionSettings
 from carto_core.bundle import LoadResult, iter_events, load_bundle, verify_bundle
 from carto_core.db.clickhouse import ClickHouseWriter, create_client
@@ -339,7 +340,7 @@ def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
         message="splunk export slow",
     )
     body = batch.model_dump_json().encode("utf-8")
-    with TestClient(app) as test_client:
+    with TestClient(ActAsRole(app, "edge-gateway")) as test_client:  # ADR 0031
         assert test_client.get("/readyz").status_code == 200
         first = test_client.post("/internal/ingest", content=body, headers=JSON)
         assert first.status_code == 200, first.text

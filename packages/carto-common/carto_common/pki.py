@@ -3,7 +3,9 @@
 ``carto-ctl pki init`` creates the CA and the per-service certificates for Compose
 (cert-manager does the same on Kubernetes, M6). Tests use the same functions to build throwaway
 CAs for the edge-to-core mTLS checks. ECDSA P-256 keys, SHA-256 signatures, 90-day leaf
-certificates by default (spec 14.4 "90-day certificates, automated rotation").
+certificates by default (spec 14.4 "90-day certificates, automated rotation"). A leaf can name
+its service role in a ``urn:carto:role:<role>`` URI SAN, which the listeners check per route
+(:mod:`carto_common.mtls`, ADR 0031).
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+from carto_common.mtls import role_uri
 
 __all__ = [
     "CA_VALID_DAYS",
@@ -127,13 +131,19 @@ def issue_certificate(
     ip_addresses: tuple[str, ...] = (),
     server: bool = True,
     client: bool = True,
+    role: str | None = None,
     valid_days: int = LEAF_VALID_DAYS,
     now: dt.datetime | None = None,
 ) -> CertificatePair:
-    """A leaf certificate signed by ``ca`` for server and/or client authentication."""
+    """A leaf certificate signed by ``ca`` for server and/or client authentication, naming
+    ``role`` (one of :data:`carto_common.mtls.ROLES`) when given."""
     if not server and not client:
         msg = "a certificate must allow server or client authentication"
         raise PkiError(msg)
+    try:
+        role_name = role_uri(role) if role is not None else None
+    except ValueError as exc:
+        raise PkiError(str(exc)) from exc
     start = (now or dt.datetime.now(dt.UTC)) - _BACKDATE
     ca_certificate = ca.certificate
     ca_key = ca.private_key
@@ -147,6 +157,8 @@ def issue_certificate(
             raise PkiError(msg) from exc
     if not sans:
         sans.append(x509.DNSName(common_name))
+    if role_name is not None:
+        sans.append(x509.UniformResourceIdentifier(role_name))
     usages: list[x509.ObjectIdentifier] = []
     if server:
         usages.append(ExtendedKeyUsageOID.SERVER_AUTH)

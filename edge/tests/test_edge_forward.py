@@ -25,6 +25,7 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from carto_common.ids import is_ulid, new_ulid
+from carto_common.mtls import ActAsRole
 from carto_common.pki import create_ca, issue_certificate, write_pem
 from carto_core.db.clickhouse import WriteResult
 from carto_core.ingest.app import create_app
@@ -390,7 +391,7 @@ def test_ingest_api_accepts_what_the_forwarder_sends(buffer: DiskBuffer) -> None
     writer = FakeWriter()
     health = InMemorySourceHealthStore()
     app = create_app(CoreSettings(), writer, InMemoryBatchLedger(), health, clock=lambda: NOW)
-    client = TestClient(app)
+    client = TestClient(ActAsRole(app, "edge-gateway"))
     try:
         sent = batch(events=3)
         buffer.append(sent)

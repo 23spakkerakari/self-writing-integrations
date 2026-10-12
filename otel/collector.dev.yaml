@@ -97,9 +97,9 @@ exporters:
   otlphttp/edge:
     endpoint: https://edge-gateway:8443 # path /v1/logs is appended
     tls:
-      ca_file: /etc/carto/pki/ca.crt # carto-ctl pki init (the pki volume)
-      cert_file: /etc/carto/pki/otel-collector.crt
-      key_file: /etc/carto/pki/otel-collector.key
+      ca_file: /etc/carto/pki/ca.crt # carto-ctl pki init (the pki-otel-collector volume)
+      cert_file: /etc/carto/pki/tls.crt # role otel-collector (ADR 0031)
+      key_file: /etc/carto/pki/tls.key
       min_version: "1.2"
     compression: zstd
     timeout: 30s

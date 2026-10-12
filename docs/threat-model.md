@@ -50,11 +50,12 @@ step-up for reveal).
     already tokenized, up to 20 GiB); connector credentials, referenced by `secret_ref` and
     resolved at use (`vault://` against Vault KV v2; `local://` against the KMS-wrapped
     `secrets.sqlite`); the edge audit file (`audit.ndjson`, hash-chained; ADR 0014); the internal
-    service keys in the Compose `pki` volume and the CA key in the separate `pki-ca` volume that
-    only the `pki-init` job mounts; the analyzer's state directory, as
+    service keys, each in its own Compose volume mounted only by its service (ADR 0031), and the
+    CA key in the separate `pki-ca` volume that only the `pki-init` job mounts; the analyzer's state directory, as
     sensitive as an installed edge (ADR 0025).
   - *Trust boundary changes:* collector to `edge-gateway` over mutual TLS (OTLP/HTTP, client
-    certificate from the install CA); `edge-gateway` to `ingest-api` over mutual TLS (TLS 1.2
+    certificate from the install CA with the `otel-collector` or `collector` role, ADR 0031);
+    `edge-gateway` to `ingest-api` over mutual TLS (role `edge-gateway`; TLS 1.2
     floor, client certificate required; `carto_core.ingest.server`); core to edge through
     `/internal/tokenize` and `/internal/reveal`, which accept only Ed25519-signed internal
     assertions (audience, permission, purpose, nonce, at most 5 minutes; plan decision 13;
@@ -101,13 +102,13 @@ step-up for reveal).
     protection is the volume and disk encryption (Vault Transit for production); the nonce cache
     and the reveal rate-limit windows are in memory and reset on a gateway restart (see
     `carto_edge.reveal`); MySQL and SQL Server connect by name after validation, leaving a
-    rebinding window (ADR 0018); `ingest-api` and the gateway authorise any certificate from the
-    install CA rather than a named service, and the Compose `pki` volume exposes every service
-    key to the three services that mount it (the CA key is on its own volume); webhook replay protection depends on
+    rebinding window (ADR 0018); the listeners trust the role a certificate names, so whoever
+    holds the CA key (the `pki-ca` volume, the operator) can issue any role; webhook replay protection depends on
     the sender's timestamp header; the Vault address is an operator setting and does not pass the
-    SSRF policy (`carto_edge.secrets`); certificate rotation is manual until M6; the edge
-    pipeline measured about 1,800 events/s in one process on a development laptop, under the spec
-    17 target of 2,000 (plan M1 demo note; the reference node figure is the founder's).
+    SSRF policy (`carto_edge.secrets`); certificate rotation is manual until M6; the full
+    gateway path measured 2,398 to 3,600 events/s in one process on a development laptop, above
+    the spec 17 target of 2,000 but with about 20% margin on a slow core (ADR 0028; the reference
+    node figure is the founder's).
   - *Spec 15 rows touched:* 1 (secret references, read-only verification), 2 (tokenized events,
     leak test), 3 and 8 (edge side: tokenize and reveal rate limits, assertions and audit; core
     side M3), 6 (SSRF suite), 7 (archive limits, `defusedxml`, RE2), 9 (first service images,

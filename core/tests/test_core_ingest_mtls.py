@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from carto_common.ids import new_ulid
 from carto_common.pki import create_ca, issue_certificate, write_pem
@@ -54,6 +55,10 @@ class Pki:
     client_key: Path
     stranger_cert: Path
     stranger_key: Path
+    collector_cert: Path
+    collector_key: Path
+    roleless_cert: Path
+    roleless_key: Path
 
 
 @dataclass
@@ -73,8 +78,12 @@ def pki(tmp_path_factory: pytest.TempPathFactory) -> Pki:
         ca, "ingest-api", dns_names=("localhost",), ip_addresses=("127.0.0.1",), client=False
     )
     write_pem(server, root / "ingest-api.crt", root / "ingest-api.key")
-    client = issue_certificate(ca, "edge-gateway", server=False)
+    client = issue_certificate(ca, "edge-gateway", server=False, role="edge-gateway")
     write_pem(client, root / "edge-gateway.crt", root / "edge-gateway.key")
+    collector = issue_certificate(ca, "otel-collector", server=False, role="otel-collector")
+    write_pem(collector, root / "otel-collector.crt", root / "otel-collector.key")
+    roleless = issue_certificate(ca, "edge-gateway-old", server=False)
+    write_pem(roleless, root / "roleless.crt", root / "roleless.key")
     stranger_ca = create_ca("someone else's CA")
     stranger = issue_certificate(stranger_ca, "stranger", server=False)
     write_pem(stranger, root / "stranger.crt", root / "stranger.key")
@@ -86,6 +95,10 @@ def pki(tmp_path_factory: pytest.TempPathFactory) -> Pki:
         client_key=root / "edge-gateway.key",
         stranger_cert=root / "stranger.crt",
         stranger_key=root / "stranger.key",
+        collector_cert=root / "otel-collector.crt",
+        collector_key=root / "otel-collector.key",
+        roleless_cert=root / "roleless.crt",
+        roleless_key=root / "roleless.key",
     )
 
 
@@ -155,6 +168,26 @@ def test_client_with_a_certificate_from_the_ca_is_served(served: Served, pki: Pk
         assert accepted.status_code == 200, accepted.text
         assert accepted.json() == {"accepted": 1, "duplicate": False}
     assert len(served.writer.batches) == 1
+
+
+@pytest.mark.parametrize("who", ["collector", "roleless"])
+def test_a_certificate_from_the_ca_without_the_edge_role_cannot_send_batches(
+    served: Served, pki: Pki, who: str
+) -> None:
+    """ADR 0031 over a real TLS connection: the install CA signed both certificates, but only
+    the edge-gateway role may post batches; health stays open to any install certificate."""
+    pair = (
+        (pki.collector_cert, pki.collector_key)
+        if who == "collector"
+        else (pki.roleless_cert, pki.roleless_key)
+    )
+    before = len(served.writer.batches)
+    with httpx.Client(verify=_context(pki, pair)) as client:
+        assert client.get(f"{served.url}/healthz").status_code == 200
+        refused = client.post(f"{served.url}/internal/ingest", content=_batch_body(), headers=JSON)
+        assert refused.status_code == 403
+        assert refused.json()["title"] == "forbidden"
+    assert len(served.writer.batches) == before
 
 
 def test_without_a_client_certificate_the_handshake_is_refused(served: Served, pki: Pki) -> None:
@@ -257,6 +290,7 @@ def test_uvicorn_config_bounds_headers_and_connections(pki: Pki) -> None:
     settings = CoreSettings(ingest=_listener(pki, _free_port()))
     app = create_app(settings, FakeWriter(), InMemoryBatchLedger(), InMemorySourceHealthStore())
     config = build_uvicorn_config(app, settings.ingest)
-    assert config.http == "h11"
+    assert isinstance(config.http, type)
+    assert issubclass(config.http, H11Protocol)  # h11, recording the certificate role
     assert config.h11_max_incomplete_event_size == 16 * 1024
     assert config.limit_concurrency == 256

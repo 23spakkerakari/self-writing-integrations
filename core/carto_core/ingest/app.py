@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog.contextvars
 import zstandard
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -41,6 +41,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from carto_common.ids import new_ulid
 from carto_common.logging import get_logger
+from carto_common.mtls import ANY_ROLE, peer_role, role_allowed
 from carto_core.db.clickhouse import WriterError
 from carto_core.ingest.health import HealthStoreError, SourceHealthRecord
 from carto_core.ingest.ledger import LedgerEntry, LedgerError
@@ -56,6 +57,7 @@ __all__ = [
     "METRIC_NAMES",
     "PROBLEM_CONTENT_TYPE",
     "REQUEST_ID_HEADER",
+    "ROUTE_ROLES",
     "IngestMetrics",
     "Problem",
     "RequestIdMiddleware",
@@ -75,7 +77,16 @@ METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_ingest_duplicates_total", "Batches acknowledged as already in the ledger."),
     ("carto_ingest_errors_total", "Internal requests answered with a problem (4xx or 5xx)."),
     ("carto_heartbeats_total", "Source heartbeats recorded."),
+    ("carto_ingest_mtls_refused_total", "Requests refused for the client certificate's role."),
 )
+ROUTE_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
+    ("POST", "/internal/ingest"): frozenset({"edge-gateway"}),
+    ("POST", "/internal/heartbeat"): frozenset({"edge-gateway"}),
+    ("GET", "/healthz"): frozenset({ANY_ROLE}),
+    ("GET", "/readyz"): frozenset({ANY_ROLE}),
+    ("GET", "/metrics"): frozenset({ANY_ROLE}),
+}
+"""The service roles each route accepts (ADR 0031); a route missing here is refused."""
 
 log = get_logger(component="ingest-api")
 
@@ -246,7 +257,25 @@ def create_app(
     listener = settings.ingest
     tenant_id = settings.tenant_id
     metrics = IngestMetrics()
-    app = FastAPI(title="carto ingest-api", docs_url=None, redoc_url=None, openapi_url=None)
+
+    async def authorize(request: Request) -> None:
+        """Every route: the connection's certificate role must be one the route lists."""
+        route = getattr(request.scope.get("route"), "path", None)
+        role = peer_role(request.scope)
+        if not role_allowed(ROUTE_ROLES, request.method, route, role):
+            metrics.inc("carto_ingest_mtls_refused_total")
+            log.warning(
+                "request.role_refused", method=request.method, route=route, role=role or "none"
+            )
+            raise Problem(403, "forbidden", "this client certificate may not call this route")
+
+    app = FastAPI(
+        title="carto ingest-api",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        dependencies=[Depends(authorize)],
+    )
     app.add_middleware(RequestIdMiddleware)
     app.state.metrics = metrics
 

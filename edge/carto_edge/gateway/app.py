@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog.contextvars
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
 from pydantic import BaseModel, ValidationError
@@ -63,6 +63,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from carto_common.ids import new_ulid
 from carto_common.logging import get_logger
+from carto_common.mtls import ANY_ROLE, peer_role, role_allowed
 from carto_edge.config import EdgeSettings, SourceType
 from carto_edge.connectors.base import ConnectorContext, InvalidConfigError
 from carto_edge.connectors.registry import build_connector
@@ -87,10 +88,12 @@ from carto_edge.runtime import EdgeRuntime, build_connector_context
 __all__ = [
     "FULL_RETRY_AFTER_SECONDS",
     "INTERNAL_MAX_BODY_BYTES",
+    "MTLS_REFUSED_METRIC",
     "OTLP_MEDIA_TYPE",
     "PROBLEM_CONTENT_TYPE",
     "REQUESTS_METRIC",
     "REQUEST_ID_HEADER",
+    "ROUTE_ROLES",
     "SLOW_RETRY_AFTER_SECONDS",
     "UNMATCHED_ROUTE",
     "GatewayMiddleware",
@@ -110,6 +113,17 @@ MIN_WEBHOOK_SECRET_LEN: Final = 16
 OTLP_CONCURRENCY: Final = 4
 """OTLP requests decoded and ingested at the same time."""
 UNMATCHED_ROUTE: Final = "unmatched"
+MTLS_REFUSED_METRIC: Final = "carto_edge_mtls_refused_total"
+ROUTE_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
+    ("POST", "/v1/logs"): frozenset({"otel-collector", "collector"}),
+    ("POST", "/webhooks/{source_id}"): frozenset({"proxy"}),
+    ("POST", "/internal/tokenize"): frozenset({"api"}),
+    ("POST", "/internal/reveal"): frozenset({"api"}),
+    ("GET", "/healthz"): frozenset({ANY_ROLE}),
+    ("GET", "/readyz"): frozenset({ANY_ROLE}),
+    ("GET", "/metrics"): frozenset({ANY_ROLE}),
+}
+"""The service roles each route accepts (ADR 0031); a route missing here is refused."""
 SLOW_RETRY_AFTER_SECONDS: Final = 5
 FULL_RETRY_AFTER_SECONDS: Final = 30
 INTERNAL_MAX_BODY_BYTES: Final = 64 * 1024
@@ -465,6 +479,19 @@ def create_gateway_app(
     webhooks, context = _webhook_connectors(runtime)
     metrics.counter(REQUESTS_METRIC, "HTTP requests answered, by route and status.")
 
+    metrics.counter(MTLS_REFUSED_METRIC, "Requests refused for the client certificate's role.")
+
+    async def authorize(request: Request) -> None:
+        """Every route: the connection's certificate role must be one the route lists."""
+        route = getattr(request.scope.get("route"), "path", None)
+        role = peer_role(request.scope)
+        if not role_allowed(ROUTE_ROLES, request.method, route, role):
+            metrics.inc(MTLS_REFUSED_METRIC, route=route or UNMATCHED_ROUTE)
+            log.warning(
+                "request.role_refused", method=request.method, route=route, role=role or "none"
+            )
+            raise Problem(403, "forbidden", "this client certificate may not call this route")
+
     otlp_slots = asyncio.Semaphore(OTLP_CONCURRENCY)
     app = FastAPI(
         title="carto edge-gateway",
@@ -473,6 +500,7 @@ def create_gateway_app(
         openapi_url=None,
         redirect_slashes=False,
         lifespan=lifespan,
+        dependencies=[Depends(authorize)],
     )
     app.add_middleware(GatewayMiddleware, metrics=metrics)
 

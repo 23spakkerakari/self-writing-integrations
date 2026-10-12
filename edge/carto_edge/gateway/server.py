@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Final
 import uvicorn
 
 from carto_common.logging import configure_logging, get_logger
+from carto_common.mtls import peer_role_h11_protocol
 from carto_edge.audit import AuditChainError
 from carto_edge.config import ConfigError, EdgeSettings, GatewaySettings, load_sources_file
 from carto_edge.gateway.app import create_gateway_app
@@ -129,7 +130,8 @@ def build_uvicorn_config(
         access_log=False,  # the app logs its own access line without paths or queries
         # h11 bounds a request line plus headers at 16 KiB; httptools (the "auto" choice when
         # installed) accepts any size. limit_concurrency answers 503 beyond it (spec 2.3 #8).
-        http="h11",
+        # h11, recording each connection's certificate role for the routes (ADR 0031).
+        http=peer_role_h11_protocol(),
         h11_max_incomplete_event_size=MAX_HEADER_BYTES,
         limit_concurrency=MAX_CONNECTIONS,
         server_header=False,

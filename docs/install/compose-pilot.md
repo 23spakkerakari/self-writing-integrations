@@ -101,16 +101,24 @@ runs:
 
 ```
 carto-ctl pki init --out /etc/carto/pki --ca-key-dir /etc/carto/pki-ca \
-  --services ingest-api,edge-gateway,otel-collector --if-missing
+  --services ingest-api,edge-gateway,otel-collector --layout per-service --if-missing
 ```
 
 It writes:
 
 | File | Volume | Content |
 | --- | --- | --- |
-| `ca.crt` | `pki` | The private CA certificate (valid 3,650 days) |
-| `ca.key` | `pki-ca` | The CA private key, on a volume that no running service mounts |
-| `<service>.crt`, `<service>.key` | `pki` | One pair per service, valid 90 days, usable for both server and client authentication, with SANs for the service name, `localhost` and any `--dns` or `--ip` given |
+| `ca.crt`, `ca.key` | `pki-ca` | The private CA certificate (valid 3,650 days) and its key, on a volume that no running service mounts |
+| `<service>/tls.crt`, `tls.key`, `ca.crt` | `pki-<service>` | One pair per service, valid 90 days, usable for both server and client authentication, with SANs for the service name, `localhost` and any `--dns` or `--ip` given, and a copy of the CA certificate. Each service mounts only its own volume, so it can read only its own key |
+
+Each certificate names its service role (`urn:carto:role:<service>`), and each route accepts
+only the roles listed for it (ADR 0031): `ingest-api` takes batches and heartbeats only from
+`edge-gateway`; `edge-gateway` takes OTLP only from `otel-collector` (and from collectors on
+other hosts, `collector`), `/internal/tokenize` and `/internal/reveal` only from core's `api`, and
+webhooks only from the reverse proxy (`proxy`). `/healthz`, `/readyz` and `/metrics` accept any
+certificate from the install CA. Anything else is answered 403 and counted in
+`carto_edge_mtls_refused_total` or `carto_ingest_mtls_refused_total`. A service name that is not
+a role (a scraper, say) gets a certificate without a role: enough for health and metrics only.
 
 Keys are written with owner-only permissions and never overwritten, and the output lists
 certificate fingerprints only. With `--if-missing` a complete earlier run is a success that
@@ -123,6 +131,7 @@ certificate) is refused. Options:
 | `--ca-key-dir DIR` | `--out` | Directory for `ca.key` |
 | `--if-missing` | off | Succeed without writing when every file is already present |
 | `--services NAME[,NAME...]` | `edge-gateway,ingest-api,otel-collector,api` | Services to issue a pair for |
+| `--layout flat\|per-service` | `flat` | `flat` writes `<service>.crt`/`.key` and `ca.crt` into `--out`; `per-service` writes `<out>/<service>/tls.crt`, `tls.key` and `ca.crt` (the Compose stack) |
 | `--dns NAME` | none | Extra DNS SAN on every service certificate (repeatable) |
 | `--ip ADDR` | none | Extra IP SAN on every service certificate (repeatable) |
 | `--days N` | `90` | Service certificate lifetime, 1 to 3,650 |
@@ -133,15 +142,16 @@ the first start so the names are in the certificates:
 
 ```sh
 docker compose -f deploy/compose/compose.yaml run --rm pki-init \
-  pki init --out /etc/carto/pki --ca-key-dir /etc/carto/pki-ca \
+  pki init --out /etc/carto/pki --ca-key-dir /etc/carto/pki-ca --layout per-service \
   --services ingest-api,edge-gateway,otel-collector --dns edge-gateway.example.internal
 ```
 
 **Rotation.** Service certificates expire after 90 days and this build has no command that
 reissues them from the existing CA; automated rotation (spec 14.4) arrives with M6. Before day
 90, remove the containers with `docker compose ... down` (never with `-v`, which deletes every
-volume), remove the PKI volumes with `docker volume rm carto_pki carto_pki-ca`, and start again
-so `pki-init` creates a new CA and new pairs. Copy the new `ca.crt` and collector pair to any collector outside
+volume), remove the PKI volumes with `docker volume rm carto_pki-ingest-api
+carto_pki-edge-gateway carto_pki-otel-collector carto_pki-ca`, and start again so `pki-init`
+creates a new CA and new pairs. Copy the new `ca.crt` and collector pair to any collector outside
 the stack.
 
 ## Step 5: Create the tokenization key (`carto-ctl key init`)
@@ -538,9 +548,9 @@ at most `max_records` (1,000) objects, at most `max_body_bytes` (1 MB) and `max_
 deep; `event_type_field` names the field whose value becomes the template. The gateway answers
 401 for a bad or missing signature, 404 for an unknown or non-webhook source, 413 above the size
 limit, 400 for a bad body, 503 when the secret cannot be resolved, and 429 or 503 under
-backpressure. In M1 the gateway listener requires a client certificate from the
-install CA on every route and Compose publishes no port, so only senders inside the stack can
-reach it (see the known gaps).
+backpressure. In M1 the gateway accepts webhooks only from the reverse proxy's certificate
+(role `proxy`, ADR 0031) and Compose publishes no port, so webhook sources cannot be reached yet
+(see the known gaps).
 
 #### OTLP through the OpenTelemetry Collector (spec 8.1.2)
 
@@ -571,8 +581,9 @@ Copy the template [`otel/collector.yaml`](../../otel/collector.yaml) to
   without it are dropped by the `filter/require_source` processor, and the gateway rejects
   records whose id is not an enabled `otlp` source.
 - Keep the receivers you use in `service.pipelines.logs.receivers` and delete the others.
-- The `otlphttp/edge` exporter uses `ca_file`, `cert_file` and `key_file` from the `pki` volume
-  (`/etc/carto/pki/ca.crt`, `otel-collector.crt`, `otel-collector.key`) and the endpoint
+- The `otlphttp/edge` exporter uses `ca_file`, `cert_file` and `key_file` from the
+  `pki-otel-collector` volume (`/etc/carto/pki/ca.crt`, `tls.crt`, `tls.key`; role
+  `otel-collector`) and the endpoint
   `https://edge-gateway:8443` (the collector appends `/v1/logs`).
 
 The gateway accepts `application/x-protobuf` with `gzip` or `zstd`, at most 4 MiB after
@@ -663,7 +674,7 @@ $COMPOSE exec -T -e SVC=$svc $svc python - <<'EOF'
 import os, ssl, urllib.request
 svc, pki = os.environ["SVC"], "/etc/carto/pki/"
 ctx = ssl.create_default_context(cafile=pki + "ca.crt")
-ctx.load_cert_chain(pki + svc + ".crt", pki + svc + ".key")
+ctx.load_cert_chain(pki + "tls.crt", pki + "tls.key")
 for path in ("/healthz", "/readyz"):
     print(svc, path, urllib.request.urlopen("https://localhost:8443" + path, context=ctx).status)
 text = urllib.request.urlopen("https://localhost:8443/metrics", context=ctx).read().decode()
@@ -674,11 +685,12 @@ done
 
 | Service | Metrics (Prometheus text, `GET /metrics`, internal network only; spec 16) |
 | --- | --- |
-| `edge-gateway` | Counters `carto_edge_records_total`, `carto_edge_events_total`, `carto_edge_dropped_total` (by source and reason), `carto_edge_vault_entries_total`, `carto_edge_batches_sealed_total`, `carto_edge_batches_sent_total`, `carto_edge_batches_parked_total`, `carto_edge_send_errors_total`, `carto_edge_heartbeats_total`, `carto_edge_requests_total`, `carto_edge_connector_errors_total`; gauges `carto_edge_buffer_bytes`, `carto_edge_buffer_depth`, `carto_edge_buffer_oldest_age_seconds`, `carto_edge_backpressure` (0 ok, 1 above 80%, 2 full), `carto_edge_connector_lag_seconds`, `carto_edge_key_versions` |
-| `ingest-api` | `carto_ingest_batches_total`, `carto_ingest_events_total`, `carto_ingest_duplicates_total`, `carto_ingest_errors_total`, `carto_heartbeats_total` |
+| `edge-gateway` | Counters `carto_edge_records_total`, `carto_edge_events_total`, `carto_edge_dropped_total` (by source and reason), `carto_edge_vault_entries_total`, `carto_edge_batches_sealed_total`, `carto_edge_batches_sent_total`, `carto_edge_batches_parked_total`, `carto_edge_send_errors_total`, `carto_edge_heartbeats_total`, `carto_edge_requests_total`, `carto_edge_mtls_refused_total` (by route), `carto_edge_connector_errors_total`; gauges `carto_edge_buffer_bytes`, `carto_edge_buffer_depth`, `carto_edge_buffer_oldest_age_seconds`, `carto_edge_backpressure` (0 ok, 1 above 80%, 2 full), `carto_edge_connector_lag_seconds`, `carto_edge_key_versions` |
+| `ingest-api` | `carto_ingest_batches_total`, `carto_ingest_events_total`, `carto_ingest_duplicates_total`, `carto_ingest_errors_total`, `carto_heartbeats_total`, `carto_ingest_mtls_refused_total` |
 
 The stack has no Prometheus server in M1. A scraper needs a client certificate from the install
-CA, so name it in `--services` when you run `pki init` (step 4).
+CA, so name it in `--services` when you run `pki init` (step 4); a name that is not a service role
+gets a certificate that reaches health and metrics only.
 
 **Events in ClickHouse.**
 
@@ -839,10 +851,9 @@ refuses to start when the chain is broken. Check it with
   adds egress for `edge-gateway` (step 8).
 - **Mutual TLS.** Both listeners require a client certificate signed by the install CA (TLS 1.2
   minimum). The CA key lives on the `pki-ca` volume, which only `pki-init` mounts, so no running
-  service can mint certificates. In M1 the listeners authorise by CA membership, not by
-  certificate name, and the `pki` volume (every service key) is mounted read-only into
-  `ingest-api`, `edge-gateway` and `otel-collector`: treat those three containers as one trust
-  domain. Kubernetes installs use cert-manager with one secret per service (M6).
+  service can mint certificates. Each certificate names its service role and each route accepts
+  only the roles listed for it (ADR 0031, step 4); each service mounts only its own key's
+  volume. Kubernetes installs use cert-manager with one secret per service (M6).
 - **Secrets and keys.** Database passwords come from files; connector credentials from Vault
   references; key material exists only wrapped, in the `edge-state` volume. None of them is in
   an environment variable, an image or a log.
@@ -887,14 +898,13 @@ These are things this guide or the spec expects that the M1 build does not do ye
    sources cannot run from it (installing the driver means accepting Microsoft's licence terms in
    the image build; ADR 0019).
 2. With both networks internal and no published port, push sources on other hosts (syslog,
-   Splunk HEC, OTLP from applications, webhooks) cannot reach the stack; webhook senders would
-   also need a client certificate from the install CA, because the gateway requires one on every
-   route. Pull sources work through the override's egress network.
+   Splunk HEC, OTLP from applications, webhooks) cannot reach the stack; the gateway accepts
+   webhooks only through the reverse proxy, which the stack does not have yet. Pull sources work
+   through the override's egress network.
 3. No pilot override file ships with the repository, and there is no Prometheus scraper, no
    command to reissue service certificates from the existing CA, and no command to inspect or
    clear parked batches.
-4. The listeners authorise any certificate from the install CA (see Security notes), and the
-   reveal service keeps its nonce and rate-limit state in memory, so a gateway restart resets
-   them; both matter from M3, when core calls the internal endpoints.
+4. The reveal service keeps its nonce and rate-limit state in memory, so a gateway restart
+   resets them; this matters from M3, when core calls the internal endpoints.
 5. Identifiers with naturally low cardinality and no run of four digits are kept in clear
    unless pinned (ADR 0026, ADR 0029).

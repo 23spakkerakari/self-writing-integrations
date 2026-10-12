@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 import zstandard
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 with warnings.catch_warnings():
     # starlette 1.7 deprecates httpx (vs httpx2) under its TestClient at import time; the
@@ -25,8 +27,9 @@ with warnings.catch_warnings():
 
 from carto_common.ids import ULID_PATTERN, new_ulid
 from carto_common.logging import configure_logging
+from carto_common.mtls import ROLES, ActAsRole
 from carto_core.db.clickhouse import WriterError, WriteResult
-from carto_core.ingest.app import PROBLEM_CONTENT_TYPE, create_app
+from carto_core.ingest.app import PROBLEM_CONTENT_TYPE, ROUTE_ROLES, create_app
 from carto_core.ingest.health import InMemorySourceHealthStore
 from carto_core.ingest.ledger import InMemoryBatchLedger, LedgerEntry, LedgerError
 from carto_core.settings import CoreSettings, IngestListenerSettings
@@ -79,7 +82,7 @@ def _world(
     ledger = ledger if ledger is not None else InMemoryBatchLedger()
     health = InMemorySourceHealthStore()
     app = create_app(settings or _settings(), writer, ledger, health, clock=lambda: NOW)
-    return World(TestClient(app), writer, ledger, health)
+    return World(TestClient(ActAsRole(app, "edge-gateway")), writer, ledger, health)
 
 
 @pytest.fixture
@@ -410,3 +413,46 @@ def test_request_bodies_and_event_contents_never_reach_the_logs() -> None:
     assert not re.search(r"\"(events|identifiers|attributes)\"\s*:\s*[\[{]", logs), (
         "a serialized body reached the logs"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Service roles (ADR 0031)
+# ---------------------------------------------------------------------------------------------
+
+
+def _inner_app(client: TestClient) -> FastAPI:
+    """The FastAPI app behind a test client's role wrapper."""
+    app = client.app
+    inner = app.app if isinstance(app, ActAsRole) else app
+    assert isinstance(inner, FastAPI)
+    return inner
+
+
+def test_every_ingest_route_lists_its_roles(world: World) -> None:
+    inner = _inner_app(world.client)
+    routes = {
+        (method, route.path)
+        for route in inner.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(ROUTE_ROLES)
+
+
+@pytest.mark.parametrize("path", ["/internal/ingest", "/internal/heartbeat"])
+def test_only_the_edge_gateway_may_send_batches_and_heartbeats(world: World, path: str) -> None:
+    inner = _inner_app(world.client)
+    for role in [*sorted(ROLES - {"edge-gateway"}), None]:
+        response = TestClient(ActAsRole(inner, role)).post(path, content=b"{}")
+        assert response.status_code == 403, role
+        assert response.json()["title"] == "forbidden"
+    assert world.writer is not None
+    metrics = inner.state.metrics
+    assert metrics.get("carto_ingest_mtls_refused_total") == len(ROLES)
+
+
+def test_ingest_health_accepts_any_install_certificate(world: World) -> None:
+    inner = _inner_app(world.client)
+    client = TestClient(ActAsRole(inner, None))
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/metrics").status_code == 200

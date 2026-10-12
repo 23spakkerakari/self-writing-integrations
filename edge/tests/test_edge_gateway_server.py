@@ -7,16 +7,23 @@ from __future__ import annotations
 
 import asyncio
 import io
+import socket
 import ssl
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
-from fastapi import FastAPI
+import uvicorn
+from fastapi import FastAPI, Request
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from carto_common.logging import configure_logging
-from carto_common.pki import create_ca, issue_certificate, write_pem
+from carto_common.mtls import peer_role
+from carto_common.pki import CertificatePair, create_ca, issue_certificate, write_pem
 from carto_edge.config import EdgeSettings, GatewaySettings, PiiSettings
 from carto_edge.gateway import server
 from carto_edge.gateway.server import (
@@ -47,6 +54,7 @@ class Pki:
     ca: Path
     cert: Path
     key: Path
+    authority: CertificatePair
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +66,7 @@ def pki(tmp_path_factory: pytest.TempPathFactory) -> Pki:
         ca, "edge-gateway", dns_names=("localhost",), ip_addresses=("127.0.0.1",)
     )
     write_pem(leaf, root / "edge-gateway.crt", root / "edge-gateway.key")
-    return Pki(root / "ca.crt", root / "edge-gateway.crt", root / "edge-gateway.key")
+    return Pki(root / "ca.crt", root / "edge-gateway.crt", root / "edge-gateway.key", ca)
 
 
 def listener(pki: Pki, **overrides: object) -> GatewaySettings:
@@ -235,7 +243,8 @@ async def test_housekeeping_returns_promptly_when_stopped() -> None:
 def test_uvicorn_config_bounds_headers_and_connections(pki: Pki) -> None:
     """httptools accepts unbounded headers; h11 caps a request head (review finding)."""
     config = build_uvicorn_config(FastAPI(), listener(pki), log_level="warning")
-    assert config.http == "h11"
+    assert isinstance(config.http, type)
+    assert issubclass(config.http, H11Protocol)  # h11, recording the certificate role
     assert config.h11_max_incomplete_event_size == 16 * 1024
     assert config.limit_concurrency == 256
 
@@ -250,3 +259,46 @@ def test_run_gateway_with_a_broken_audit_chain_exits_cleanly(
     settings.audit_file.write_text("not an audit row\n", encoding="utf-8")
     assert run_gateway(settings) == EXIT_FAILURE
     assert "gateway.audit_chain_broken" in logs.getvalue()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port: int = sock.getsockname()[1]
+        return port
+
+
+def test_the_listener_records_each_connections_certificate_role(pki: Pki, tmp_path: Path) -> None:
+    """ADR 0031: the role reaches the app through uvicorn's protocol, per connection (a
+    connection without a role never sees the previous connection's)."""
+    app = FastAPI()
+
+    @app.get("/whoami")
+    async def whoami(request: Request) -> dict[str, str | None]:
+        return {"role": peer_role(request.scope)}
+
+    port = _free_port()
+    config = build_uvicorn_config(app, listener(pki, port=port), log_level="warning")
+    uvicorn_server = uvicorn.Server(config)
+    thread = threading.Thread(target=uvicorn_server.run, name="gateway-role-test", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not uvicorn_server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            pytest.fail("uvicorn did not start")
+        time.sleep(0.05)
+    try:
+        seen: list[str | None] = []
+        for name, role in [("collector-a", "collector"), ("probe", None), ("api", "api")]:
+            leaf = issue_certificate(pki.authority, name, server=False, role=role)
+            write_pem(leaf, tmp_path / f"{name}.crt", tmp_path / f"{name}.key")
+            context = ssl.create_default_context(cafile=str(pki.ca))
+            context.load_cert_chain(str(tmp_path / f"{name}.crt"), str(tmp_path / f"{name}.key"))
+            with httpx.Client(verify=context) as client:
+                response = client.get(f"https://127.0.0.1:{port}/whoami")
+            assert response.status_code == 200
+            seen.append(response.json()["role"])
+        assert seen == ["collector", None, "api"]
+    finally:
+        uvicorn_server.should_exit = True
+        thread.join(timeout=10)

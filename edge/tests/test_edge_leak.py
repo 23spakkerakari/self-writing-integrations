@@ -61,6 +61,7 @@ with warnings.catch_warnings():
 
 from carto_common.ids import new_ulid
 from carto_common.logging import configure_logging
+from carto_common.mtls import ActAsRole
 from carto_core.bundle import iter_events, verify_bundle
 from carto_core.db.clickhouse import WriteResult, event_row, identifier_rows
 from carto_core.ingest.app import create_app
@@ -418,7 +419,7 @@ def test_leak_scenario_a_small_run(tmp_path: Path, restore_logging: None) -> Non
     # What the edge would forward, and what ingest-api would write.
     writer = FakeWriter()
     app = create_app(CoreSettings(), writer, InMemoryBatchLedger(), InMemorySourceHealthStore())
-    client = TestClient(app)
+    client = TestClient(ActAsRole(app, "edge-gateway"))  # the edge forwards (ADR 0031)
     for batch in batches_of(events, manifest.tenant_id):
         payload = compress_batch(batch)
         decompressed = zstandard.ZstdDecompressor().decompress(payload)

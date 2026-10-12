@@ -200,3 +200,58 @@ def test_help_lists_the_options_and_no_longer_says_it_is_a_stub(
         assert option in out
     assert "Arrives in" not in out
     assert "(spec 14.4)" in out
+
+
+def _role_uris(leaf: x509.Certificate) -> list[str]:
+    sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    return sans.get_values_for_type(x509.UniformResourceIdentifier)
+
+
+def test_service_certificates_carry_their_role(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR 0031: a service named like a role gets that role; any other service gets none."""
+    out = tmp_path / "pki"
+    assert main(["pki", "init", "--out", str(out), "--services", "edge-gateway,batch-tool"]) == 0
+    assert _role_uris(load_certificate(out / "edge-gateway.crt")) == ["urn:carto:role:edge-gateway"]
+    assert _role_uris(load_certificate(out / "batch-tool.crt")) == []
+    printed = capsys.readouterr().out
+    assert "role edge-gateway" in printed
+    assert "batch-tool.crt" in printed and "no role" in printed
+
+
+def test_per_service_layout_gives_each_service_only_its_own_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "pki"
+    ca_dir = tmp_path / "pki-ca"
+    argv = [
+        "pki",
+        "init",
+        "--out",
+        str(out),
+        "--ca-key-dir",
+        str(ca_dir),
+        "--layout",
+        "per-service",
+        "--services",
+        "ingest-api,edge-gateway,otel-collector",
+        "--if-missing",
+    ]
+    assert main(argv) == EXIT_OK
+    assert _files(out) == {"ingest-api", "edge-gateway", "otel-collector"}
+    assert _files(ca_dir) == {"ca.crt", "ca.key"}
+    ca = load_certificate(ca_dir / "ca.crt")
+    for service in ("ingest-api", "edge-gateway", "otel-collector"):
+        folder = out / service
+        assert _files(folder) == {"tls.crt", "tls.key", "ca.crt"}
+        assert (folder / "ca.crt").read_bytes() == (ca_dir / "ca.crt").read_bytes()
+        leaf = load_certificate(folder / "tls.crt")
+        _signed_by(leaf, ca)
+        assert _role_uris(leaf) == [f"urn:carto:role:{service}"]
+        load_private_key(folder / "tls.key")
+    assert "edge-gateway/tls.crt" in capsys.readouterr().out
+    assert main(argv) == EXIT_OK  # complete: the Compose job's second start writes nothing
+    assert "nothing written" in capsys.readouterr().out
+    (out / "otel-collector" / "ca.crt").unlink()
+    assert main(argv) == EXIT_FAILURE  # partial: refused, keys untouched

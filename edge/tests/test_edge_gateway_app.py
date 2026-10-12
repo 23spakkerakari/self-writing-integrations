@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 import pytest
 import zstandard
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
 from opentelemetry.proto.common.v1 import common_pb2
 from opentelemetry.proto.logs.v1 import logs_pb2
@@ -36,6 +38,7 @@ with warnings.catch_warnings():
 from carto_common.crypto import InternalAssertion, SigningKey, sign_assertion
 from carto_common.ids import ULID_PATTERN
 from carto_common.logging import configure_logging
+from carto_common.mtls import ROLES, ActAsRole
 from carto_edge.config import (
     EdgeSettings,
     PiiSettings,
@@ -45,7 +48,12 @@ from carto_edge.config import (
     SourceType,
     SystemConfig,
 )
-from carto_edge.gateway.app import PROBLEM_CONTENT_TYPE, create_gateway_app
+from carto_edge.gateway.app import (
+    MTLS_REFUSED_METRIC,
+    PROBLEM_CONTENT_TYPE,
+    ROUTE_ROLES,
+    create_gateway_app,
+)
 from carto_edge.gateway.otlp import MAX_WIRE_RECORDS
 from carto_edge.keys import ASSERTION_PUBLIC_KEY_FILE
 from carto_edge.metrics import EdgeMetrics, default_metrics
@@ -198,7 +206,25 @@ def make_world(
         clock=lambda: NOW,
         health=health,
     )
-    return World(TestClient(app), ingestor, metrics, runtime)
+    return World(TestClient(ActAsCaller(app)), ingestor, metrics, runtime)
+
+
+class ActAsCaller(ActAsRole):
+    """Act as the service each route expects (ADR 0031): the tests above are about other
+    behaviour; the role checks are tested below with :class:`ActAsRole` directly."""
+
+    def __init__(self, app: Any) -> None:
+        super().__init__(app, None)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        path = str(scope.get("path", ""))
+        if path.startswith("/webhooks/"):
+            self.role = "proxy"
+        elif path.startswith("/internal/"):
+            self.role = "api"
+        else:
+            self.role = "otel-collector"
+        await super().__call__(scope, receive, send)
 
 
 @pytest.fixture
@@ -805,3 +831,67 @@ def test_otlp_floods_are_refused_before_parsing(world: World) -> None:
     response = world.client.post("/v1/logs", content=flood, headers=PROTOBUF)
     assert_problem(response, 413)
     assert world.ingestor.calls == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Service roles (ADR 0031)
+# ---------------------------------------------------------------------------------------------
+
+
+def _inner_app(client: TestClient) -> FastAPI:
+    """The FastAPI app behind a test client's role wrapper."""
+    app = client.app
+    inner = app.app if isinstance(app, ActAsRole) else app
+    assert isinstance(inner, FastAPI)
+    return inner
+
+
+def _as(world: World, role: str | None) -> TestClient:
+    inner = _inner_app(world.client)
+    return TestClient(ActAsRole(inner, role))
+
+
+def test_every_route_lists_its_roles(world: World) -> None:
+    inner = _inner_app(world.client)
+    routes = {
+        (method, route.path)
+        for route in inner.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(ROUTE_ROLES)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "allowed"),
+    [
+        ("POST", "/v1/logs", {"otel-collector", "collector"}),
+        ("POST", "/webhooks/src_hooks", {"proxy"}),
+        ("POST", "/internal/tokenize", {"api"}),
+        ("POST", "/internal/reveal", {"api"}),
+    ],
+)
+def test_data_routes_refuse_every_other_role(
+    world: World, method: str, path: str, allowed: set[str]
+) -> None:
+    for role in [*sorted(ROLES - allowed), None]:
+        response = _as(world, role).request(method, path, content=b"{}")
+        assert response.status_code == 403, (role, response.status_code)
+        assert response.headers["content-type"].startswith(PROBLEM_CONTENT_TYPE)
+        assert response.json()["title"] == "forbidden"
+    for role in sorted(allowed):
+        response = _as(world, role).request(method, path, content=b"{}")
+        assert response.status_code != 403, role
+    assert world.metrics.get(MTLS_REFUSED_METRIC, route=path.replace("src_hooks", "{source_id}"))
+
+
+def test_health_and_metrics_accept_any_install_certificate(world: World) -> None:
+    for role in [None, "otel-collector", "edge-gateway"]:
+        client = _as(world, role)
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/readyz").status_code == 200
+        assert client.get("/metrics").status_code == 200
+
+
+def test_unknown_paths_stay_404(world: World) -> None:
+    assert _as(world, None).get("/nowhere").status_code == 404

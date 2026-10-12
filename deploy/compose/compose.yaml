@@ -8,8 +8,9 @@
 #
 # One-shot jobs run in this order on every `up` and are idempotent:
 #   volumes-init  chowns the named volumes to the carto uid (a new volume is root-owned)
-#   pki-init      carto-ctl pki init --if-missing; the CA key goes to the pki-ca volume, which no
-#                 running service mounts (spec 14.4)
+#   pki-init      carto-ctl pki init --layout per-service --if-missing: one volume per service
+#                 holding only its own key and role certificate (ADR 0031); the CA key goes to
+#                 the pki-ca volume, which no running service mounts (spec 14.4)
 #   key-init      carto-ctl key init --if-missing (local KMS; production uses Vault Transit)
 #   migrate       carto-core migrate
 #
@@ -43,7 +44,10 @@ volumes:
   pg-data:
   ch-data:
   edge-state:
-  pki:
+  # One volume per service, each holding only that service's key (ADR 0031).
+  pki-ingest-api:
+  pki-edge-gateway:
+  pki-otel-collector:
   pki-ca:
   sim-data:
   otel-queue:
@@ -118,9 +122,13 @@ services:
     network_mode: none
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - chown 10001:10001 /mnt/pki /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
+      - >-
+        chown 10001:10001 /mnt/pki-ingest-api /mnt/pki-edge-gateway /mnt/pki-otel-collector
+        /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
     volumes:
-      - pki:/mnt/pki
+      - pki-ingest-api:/mnt/pki-ingest-api
+      - pki-edge-gateway:/mnt/pki-edge-gateway
+      - pki-otel-collector:/mnt/pki-otel-collector
       - pki-ca:/mnt/pki-ca
       - edge-state:/mnt/edge-state
       - sim-data:/mnt/sim-data
@@ -135,7 +143,9 @@ services:
     depends_on:
       volumes-init: { condition: service_completed_successfully }
     volumes:
-      - pki:/etc/carto/pki
+      - pki-ingest-api:/etc/carto/pki/ingest-api
+      - pki-edge-gateway:/etc/carto/pki/edge-gateway
+      - pki-otel-collector:/etc/carto/pki/otel-collector
       - pki-ca:/etc/carto/pki-ca
     command:
       - pki
@@ -146,6 +156,8 @@ services:
       - /etc/carto/pki-ca
       - --services
       - ingest-api,edge-gateway,otel-collector
+      - --layout
+      - per-service
       - --if-missing
 
   migrate:
@@ -186,12 +198,12 @@ services:
       <<: *core-env
       CARTO_INGEST__HOST: 0.0.0.0
       CARTO_INGEST__PORT: "8443"
-      CARTO_INGEST__TLS_CERT_FILE: /etc/carto/pki/ingest-api.crt
-      CARTO_INGEST__TLS_KEY_FILE: /etc/carto/pki/ingest-api.key
+      CARTO_INGEST__TLS_CERT_FILE: /etc/carto/pki/tls.crt
+      CARTO_INGEST__TLS_KEY_FILE: /etc/carto/pki/tls.key
       CARTO_INGEST__CLIENT_CA_FILE: /etc/carto/pki/ca.crt
     secrets: [pg_password, ch_password]
     volumes:
-      - pki:/etc/carto/pki:ro
+      - pki-ingest-api:/etc/carto/pki:ro
     command: ["ingest-api"]
     healthcheck:
       # Mutual TLS: the probe presents the service's own certificate (carto-core healthcheck).
@@ -237,17 +249,17 @@ services:
       CARTO_SOURCES_FILE: /etc/carto/sources.yaml
       CARTO_CORE__URL: https://ingest-api:8443
       CARTO_CORE__CA_FILE: /etc/carto/pki/ca.crt
-      CARTO_CORE__CERT_FILE: /etc/carto/pki/edge-gateway.crt
-      CARTO_CORE__KEY_FILE: /etc/carto/pki/edge-gateway.key
+      CARTO_CORE__CERT_FILE: /etc/carto/pki/tls.crt
+      CARTO_CORE__KEY_FILE: /etc/carto/pki/tls.key
       CARTO_GATEWAY__HOST: 0.0.0.0
       CARTO_GATEWAY__PORT: "8443"
-      CARTO_GATEWAY__TLS_CERT_FILE: /etc/carto/pki/edge-gateway.crt
-      CARTO_GATEWAY__TLS_KEY_FILE: /etc/carto/pki/edge-gateway.key
+      CARTO_GATEWAY__TLS_CERT_FILE: /etc/carto/pki/tls.crt
+      CARTO_GATEWAY__TLS_KEY_FILE: /etc/carto/pki/tls.key
       CARTO_GATEWAY__TLS_CLIENT_CA_FILE: /etc/carto/pki/ca.crt
       CARTO_KMS__PROVIDER: local
     volumes:
       - edge-state:/var/lib/carto
-      - pki:/etc/carto/pki:ro
+      - pki-edge-gateway:/etc/carto/pki:ro
       - ./sources.dev.yaml:/etc/carto/sources.yaml:ro
       - sim-data:/data/sim:ro
     command: ["gateway"]
@@ -262,7 +274,7 @@ services:
     user: "10001:10001"
     volumes:
       - ../../otel/collector.dev.yaml:/etc/otelcol-contrib/config.yaml:ro
-      - pki:/etc/carto/pki:ro
+      - pki-otel-collector:/etc/carto/pki:ro
       - sim-data:/data/sim:ro
       - otel-queue:/var/lib/otelcol/storage
     command: ["--config", "/etc/otelcol-contrib/config.yaml"]
