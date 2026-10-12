@@ -45,7 +45,8 @@ def test_defaults_require_tls_and_listen_on_loopback() -> None:
     assert settings.ingest.port == 8443
     assert settings.ingest.require_client_cert is True
     assert settings.ingest.max_body_bytes == 5 * MIB
-    assert settings.ingest.max_decompressed_bytes == 64 * MIB
+    assert settings.ingest.max_decompressed_bytes == 16 * MIB
+    assert settings.ingest.max_inflight_batches == 8
     assert settings.retention.events_days == 30
     assert settings.log_level == "info"
     assert settings.log_json is True

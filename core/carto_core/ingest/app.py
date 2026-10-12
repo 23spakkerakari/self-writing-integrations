@@ -4,10 +4,14 @@ Endpoints, all internal (mutual TLS, never behind the ingress; see :mod:`.server
 
 - ``POST /internal/ingest``: one :class:`~carto_schema.ingest.IngestBatch` as JSON, optionally
   ``Content-Encoding: zstd``. The body is capped on the wire and after decompression (spec 2.3
-  invariant 8). Only the contract models are accepted, so a raw value cannot arrive in a slot the
-  schema does not have (spec 2.3 invariant 2). A batch whose id the ledger knows is acknowledged
-  as a duplicate and not rewritten; otherwise the order is ledger lookup, ClickHouse write,
-  ledger insert (ADR 0015), and a failed write is a 503 so the edge retries.
+  invariant 8); a zstd body is exactly one frame whose window is at most
+  :data:`ZSTD_MAX_WINDOW_BYTES`, and decompression and validation run in the threadpool, never
+  on the event loop. At most ``ingest.max_inflight_batches`` requests are decoded or written at
+  once; the next is answered 429 with ``Retry-After``. Only the contract models are accepted,
+  so a raw value cannot arrive in a slot the schema does not have (spec 2.3 invariant 2). A
+  batch whose id the ledger knows is acknowledged as a duplicate and not rewritten; otherwise
+  the order is ledger lookup, ClickHouse write, ledger insert (ADR 0015), and a failed write is
+  a 503 so the edge retries.
 - ``POST /internal/heartbeat``: one :class:`~carto_schema.ingest.SourceHeartbeat`, upserted into
   the source health store.
 - ``GET /healthz``, ``GET /readyz`` (no detail in the body), ``GET /metrics`` (Prometheus text).
@@ -24,7 +28,8 @@ from __future__ import annotations
 import io
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -58,6 +63,7 @@ __all__ = [
     "PROBLEM_CONTENT_TYPE",
     "REQUEST_ID_HEADER",
     "ROUTE_ROLES",
+    "ZSTD_MAX_WINDOW_BYTES",
     "IngestMetrics",
     "Problem",
     "RequestIdMiddleware",
@@ -70,6 +76,17 @@ REQUEST_ID_HEADER: Final = "x-request-id"
 _REQUEST_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _DECOMPRESS_CHUNK: Final = 64 * 1024
 _JSON_MEDIA_TYPE: Final = "application/json"
+ZSTD_MAX_WINDOW_BYTES: Final = 8 * 1024 * 1024
+"""Largest zstd window a body may ask for. The window is allocated before any output, so a
+tiny frame declaring a 2 GiB window would otherwise cost that much memory; the edge compresses
+at level 3 (a 2 MiB window at most)."""
+_ZSTD_MAGIC: Final = b"\x28\xb5\x2f\xfd"
+_BLOCK_HEADER_BYTES: Final = 3
+_CHECKSUM_BYTES: Final = 4
+_RLE_BLOCK: Final = 1
+_RESERVED_BLOCK: Final = 3
+RETRY_AFTER_SECONDS: Final = 1
+"""``Retry-After`` on a 429 (in-flight cap) and a 503: the edge honours it, capped."""
 
 METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_ingest_batches_total", "Batches accepted and written to ClickHouse."),
@@ -78,6 +95,7 @@ METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_ingest_errors_total", "Internal requests answered with a problem (4xx or 5xx)."),
     ("carto_heartbeats_total", "Source heartbeats recorded."),
     ("carto_ingest_mtls_refused_total", "Requests refused for the client certificate's role."),
+    ("carto_ingest_busy_total", "Requests answered 429 because too many were in flight."),
 )
 ROUTE_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
     ("POST", "/internal/ingest"): frozenset({"edge-gateway"}),
@@ -101,12 +119,14 @@ class Problem(Exception):  # noqa: N818 - an RFC 7807 problem document, raised t
         detail: str = "",
         *,
         errors: list[dict[str, Any]] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(f"{status} {title}")
         self.status = status
         self.title = title
         self.detail = detail
         self.errors = errors
+        self.headers = headers
 
 
 class IngestMetrics:
@@ -161,11 +181,49 @@ class RequestIdMiddleware:
             structlog.contextvars.reset_contextvars(**tokens)
 
 
+def _zstd_frame_size(data: bytes) -> int:
+    """The compressed size of the zstd frame at the start of ``data``, read from its block
+    headers (RFC 8878 section 3.1.1). Raises :class:`zstandard.ZstdError` or ``ValueError`` on
+    anything that is not a well-formed frame (a skippable frame included)."""
+    if not data.startswith(_ZSTD_MAGIC):
+        msg = "not a zstd frame"
+        raise ValueError(msg)
+    position = zstandard.frame_header_size(data)
+    has_checksum = zstandard.get_frame_parameters(data).has_checksum
+    while True:
+        header = data[position : position + _BLOCK_HEADER_BYTES]
+        if len(header) < _BLOCK_HEADER_BYTES:
+            msg = "truncated zstd block header"
+            raise ValueError(msg)
+        value = int.from_bytes(header, "little")
+        last, block_type, size = value & 1, (value >> 1) & 3, value >> 3
+        if block_type == _RESERVED_BLOCK:
+            msg = "reserved zstd block type"
+            raise ValueError(msg)
+        position += _BLOCK_HEADER_BYTES + (1 if block_type == _RLE_BLOCK else size)
+        if last:
+            break
+    position += _CHECKSUM_BYTES if has_checksum else 0
+    if position > len(data):
+        msg = "truncated zstd frame"
+        raise ValueError(msg)
+    return position
+
+
 def decompress_capped(data: bytes, limit: int) -> bytes:
-    """zstd-decompress ``data``; a result above ``limit`` bytes is a 413, a bad frame a 400."""
-    out = bytearray()
+    """zstd-decompress ``data``: exactly one frame, a window of at most
+    :data:`ZSTD_MAX_WINDOW_BYTES`, at most ``limit`` bytes out. Anything after the frame (a
+    second frame, a skippable frame, stray bytes) and any malformed frame is a 400; a result
+    above ``limit`` is a 413."""
     try:
-        with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+        if _zstd_frame_size(data) != len(data):
+            raise Problem(400, "bad request", "a zstd body must be exactly one frame")
+    except (zstandard.ZstdError, ValueError) as exc:
+        raise Problem(400, "bad request", "malformed zstd body") from exc
+    out = bytearray()
+    decompressor = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW_BYTES)
+    try:
+        with decompressor.stream_reader(io.BytesIO(data), read_across_frames=False) as reader:
             while True:
                 chunk = reader.read(_DECOMPRESS_CHUNK)
                 if not chunk:
@@ -194,7 +252,9 @@ def _problem_response(request: Request, problem: Problem) -> JSONResponse:
     }
     if problem.errors is not None:
         body["errors"] = problem.errors
-    return JSONResponse(body, status_code=problem.status, media_type=PROBLEM_CONTENT_TYPE)
+    return JSONResponse(
+        body, status_code=problem.status, media_type=PROBLEM_CONTENT_TYPE, headers=problem.headers
+    )
 
 
 def _validation_problem(exc: ValidationError) -> Problem:
@@ -215,8 +275,15 @@ def _parse[T: BaseModel](model: type[T], data: bytes) -> T:
         raise _validation_problem(exc) from None
 
 
-async def _read_body(request: Request, listener: IngestListenerSettings) -> bytes:
-    """Read a capped body; honour ``Content-Encoding: zstd`` with the decompressed cap."""
+def _decode[T: BaseModel](model: type[T], data: bytes, zstd: bool, limit: int) -> T:
+    """Decompress (when ``zstd``) and validate: CPU-bound, so it runs in the threadpool."""
+    if zstd:
+        data = decompress_capped(data, limit)
+    return _parse(model, data)
+
+
+async def _read_body(request: Request, listener: IngestListenerSettings) -> tuple[bytes, bool]:
+    """Read a body capped on the wire; return it with whether it is zstd-compressed."""
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type and media_type != _JSON_MEDIA_TYPE:
         raise Problem(415, "unsupported media type", f"send {_JSON_MEDIA_TYPE}")
@@ -238,10 +305,7 @@ async def _read_body(request: Request, listener: IngestListenerSettings) -> byte
             raise Problem(413, "payload too large", "body exceeds the wire cap")
     if not buffer:
         raise Problem(400, "bad request", "empty body")
-    data = bytes(buffer)
-    if encoding == "zstd":
-        data = decompress_capped(data, listener.max_decompressed_bytes)
-    return data
+    return bytes(buffer), encoding == "zstd"
 
 
 def create_app(
@@ -278,6 +342,28 @@ def create_app(
     )
     app.add_middleware(RequestIdMiddleware)
     app.state.metrics = metrics
+    # A threading semaphore, not an asyncio one: it is only ever tried, never waited on, and it
+    # stays correct whichever event loop or thread serves the request.
+    inflight = threading.BoundedSemaphore(listener.max_inflight_batches)
+
+    @contextmanager
+    def admitted() -> Iterator[None]:
+        if not inflight.acquire(blocking=False):
+            metrics.inc("carto_ingest_busy_total")
+            raise Problem(
+                429,
+                "too many requests",
+                "too many batches in flight, retry later",
+                headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+            )
+        try:
+            yield
+        finally:
+            inflight.release()
+
+    async def receive[T: BaseModel](request: Request, model: type[T]) -> T:
+        raw, zstd = await _read_body(request, listener)
+        return await run_in_threadpool(_decode, model, raw, zstd, listener.max_decompressed_bytes)
 
     def process_batch(batch: IngestBatch) -> bool:
         """Ledger lookup, write, ledger insert (ADR 0015). Returns True for a duplicate."""
@@ -331,19 +417,17 @@ def create_app(
 
     @app.post("/internal/ingest")
     async def ingest(request: Request) -> Response:
-        body = await _read_body(request, listener)
-        batch = _parse(IngestBatch, body)
-        del body
-        if batch.tenant_id != tenant_id:
-            raise Problem(403, "forbidden", "batch is for a tenant this core does not serve")
-        duplicate = await run_in_threadpool(process_batch, batch)
+        with admitted():
+            batch = await receive(request, IngestBatch)
+            if batch.tenant_id != tenant_id:
+                raise Problem(403, "forbidden", "batch is for a tenant this core does not serve")
+            duplicate = await run_in_threadpool(process_batch, batch)
         return JSONResponse({"accepted": len(batch.events), "duplicate": duplicate})
 
     @app.post("/internal/heartbeat")
     async def heartbeat(request: Request) -> Response:
-        body = await _read_body(request, listener)
-        beat = _parse(SourceHeartbeat, body)
-        del body
+        with admitted():
+            beat = await receive(request, SourceHeartbeat)
         if beat.tenant_id != tenant_id:
             raise Problem(403, "forbidden", "heartbeat is for a tenant this core does not serve")
         record = SourceHealthRecord.from_heartbeat(beat, now())

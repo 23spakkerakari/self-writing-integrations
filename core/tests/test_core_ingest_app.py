@@ -5,9 +5,11 @@ body."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import re
+import threading
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,14 +27,22 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from fastapi.testclient import TestClient
 
+import carto_core.ingest.app as ingest_app_module
 from carto_common.ids import ULID_PATTERN, new_ulid
 from carto_common.logging import configure_logging
 from carto_common.mtls import ROLES, ActAsRole
 from carto_core.db.clickhouse import WriterError, WriteResult
-from carto_core.ingest.app import PROBLEM_CONTENT_TYPE, ROUTE_ROLES, create_app
+from carto_core.ingest.app import (
+    PROBLEM_CONTENT_TYPE,
+    ROUTE_ROLES,
+    ZSTD_MAX_WINDOW_BYTES,
+    Problem,
+    create_app,
+    decompress_capped,
+)
 from carto_core.ingest.health import InMemorySourceHealthStore
 from carto_core.ingest.ledger import InMemoryBatchLedger, LedgerEntry, LedgerError
-from carto_core.settings import CoreSettings, IngestListenerSettings
+from carto_core.settings import MIB, CoreSettings, IngestListenerSettings
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
 
@@ -300,6 +310,134 @@ def test_malformed_zstd_is_a_400_problem(world: World) -> None:
         headers=JSON | {"content-encoding": "zstd"},
     )
     _assert_problem(response, 400)
+
+
+def _large_window_frame() -> bytes:
+    """A few dozen bytes whose header asks for a 128 MiB window: decompressing it allocates
+    the window before a byte comes out (the review measured +129 MiB per request)."""
+    params = zstandard.ZstdCompressionParameters(window_log=27, enable_ldm=True)
+    buffer = io.BytesIO()
+    with zstandard.ZstdCompressor(compression_params=params).stream_writer(
+        buffer, closefd=False
+    ) as writer:
+        writer.write(b"{" + b" " * 1000)
+    frame = buffer.getvalue()
+    assert zstandard.get_frame_parameters(frame).window_size == 128 * MIB
+    return frame
+
+
+def test_a_frame_asking_for_a_window_above_8_mib_is_refused() -> None:
+    with pytest.raises(Problem) as info:
+        decompress_capped(_large_window_frame(), 16 * MIB)
+    assert info.value.status == 400
+    assert ZSTD_MAX_WINDOW_BYTES == 8 * MIB
+
+
+def test_a_default_level_frame_is_well_inside_the_window_cap() -> None:
+    data = json.dumps(_payload()).encode() * 2000
+    frame = zstandard.ZstdCompressor(level=3).compress(data)
+    assert decompress_capped(frame, 64 * MIB) == data
+
+
+@pytest.mark.parametrize(
+    "trailer",
+    [
+        zstandard.ZstdCompressor(level=3).compress(b'{"forged": true}'),  # a second frame
+        b"junk",  # bytes after the frame
+        b"\x50\x2a\x4d\x18\x04\x00\x00\x00skip",  # a skippable frame
+    ],
+)
+def test_a_body_with_anything_after_its_one_frame_is_a_400(world: World, trailer: bytes) -> None:
+    """The edge sends one frame. Core read only the first and ignored the rest, while the edge
+    reads across frames: the two must agree, so anything after the frame is refused."""
+    frame = zstandard.ZstdCompressor(level=3).compress(json.dumps(_payload()).encode())
+    response = world.client.post(
+        "/internal/ingest", content=frame + trailer, headers=JSON | {"content-encoding": "zstd"}
+    )
+    _assert_problem(response, 400)
+    assert world.writer.batches == []
+
+
+def test_a_frame_with_a_checksum_and_unknown_size_is_accepted() -> None:
+    data = json.dumps(_payload()).encode()
+    buffer = io.BytesIO()
+    compressor = zstandard.ZstdCompressor(level=3, write_checksum=True)
+    with compressor.stream_writer(buffer, closefd=False) as writer:
+        writer.write(data)
+    assert decompress_capped(buffer.getvalue(), MIB) == data
+    with pytest.raises(Problem):
+        decompress_capped(buffer.getvalue()[:-1], MIB)
+
+
+def test_decompression_and_validation_run_off_the_event_loop(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 5 MB batch takes about a second to decompress and validate; on the event loop it
+    stalls every other request, health checks included."""
+    seen: list[bool] = []
+    original = ingest_app_module._decode
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            seen.append(False)
+        else:
+            seen.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_app_module, "_decode", recording)
+    compressed = zstandard.ZstdCompressor(level=3).compress(json.dumps(_payload()).encode())
+    response = world.client.post(
+        "/internal/ingest", content=compressed, headers=JSON | {"content-encoding": "zstd"}
+    )
+    assert response.status_code == 200, response.text
+    assert _post(world, "/internal/heartbeat", _heartbeat()).status_code == 200
+    assert seen == [False, False], "decoded on the event loop"
+
+
+class BlockingWriter(FakeWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write_events(self, events: Sequence[CanonicalEvent]) -> WriteResult:
+        self.entered.set()
+        assert self.release.wait(10)
+        return super().write_events(events)
+
+
+def test_batches_in_flight_are_bounded_and_the_rest_get_429() -> None:
+    writer = BlockingWriter()
+    settings = _settings(max_inflight_batches=1)
+    app = create_app(
+        settings, writer, InMemoryBatchLedger(), InMemorySourceHealthStore(), clock=lambda: NOW
+    )
+    client = TestClient(ActAsRole(app, "edge-gateway"))
+    first: dict[str, Any] = {}
+
+    def send_first() -> None:
+        first["response"] = client.post(
+            "/internal/ingest", content=json.dumps(_payload()).encode(), headers=JSON
+        )
+
+    thread = threading.Thread(target=send_first)
+    thread.start()
+    try:
+        assert writer.entered.wait(10)
+        refused = client.post(
+            "/internal/ingest", content=json.dumps(_payload()).encode(), headers=JSON
+        )
+        body = _assert_problem(refused, 429)
+        assert refused.headers["retry-after"] == "1"
+        assert "retry" in body["detail"]
+    finally:
+        writer.release.set()
+        thread.join(10)
+    assert first["response"].status_code == 200
+    again = client.post("/internal/ingest", content=json.dumps(_payload()).encode(), headers=JSON)
+    assert again.status_code == 200, again.text
 
 
 # --- heartbeats --------------------------------------------------------------------------------

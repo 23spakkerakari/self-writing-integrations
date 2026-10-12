@@ -195,10 +195,22 @@ class IngestListenerSettings(_Frozen):
         description="Largest request body on the wire (spec 8.5: batches of at most 5 MB).",
     )
     max_decompressed_bytes: int = Field(
-        default=64 * MIB,
+        default=16 * MIB,
         ge=64 * 1024,
-        le=512 * MIB,
-        description="Largest body after zstd decompression (spec 2.3 invariant 8: no zip bombs).",
+        le=128 * MIB,
+        description=(
+            "Largest body after zstd decompression (spec 2.3 invariant 8: no zip bombs). A full "
+            "batch of 5,000 events is a few MiB of JSON."
+        ),
+    )
+    max_inflight_batches: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description=(
+            "Ingest and heartbeat requests decoded or written at once; more are answered 429 "
+            "with Retry-After, which bounds the memory that decoded batches take."
+        ),
     )
     require_client_cert: bool = Field(
         default=True,
