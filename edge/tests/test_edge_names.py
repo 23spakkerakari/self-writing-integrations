@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from carto_edge.pipeline.parse.common import SegmentPath, flatten
 from carto_edge.pipeline.parse.names import (
     MAX_MAP_ENTRIES,
     MIN_NAME_RECORDS,
@@ -44,11 +45,20 @@ def store(**kwargs: object) -> FieldNameStore:
     return FieldNameStore(detector, **kwargs)  # type: ignore[arg-type]
 
 
+def segments_of(path: str) -> SegmentPath:
+    """A dotted test path as the flattener would report it: every part a key, except one or
+    two ASCII digits, which stand for an array index."""
+    return tuple(
+        (part, len(part) <= 2 and part.isascii() and part.isdigit()) for part in path.split(".")
+    )
+
+
 def gate(
     names: FieldNameStore, fields: dict[str, str], trusted: frozenset[str] = frozenset()
 ) -> GatedRecord:
     top = tuple(dict.fromkeys(path.split(".")[0] for path in fields))
-    return names.apply(SYS, fields, top, trusted)
+    structure = {path: segments_of(path) for path in fields if "." in path}
+    return names.apply(SYS, fields, top, trusted, structure=structure)
 
 
 def test_a_name_travels_once_seen_in_three_records() -> None:
@@ -109,11 +119,12 @@ def test_value_like_segments_stay_masked_when_trusted() -> None:
     assert gated.fields == {"stock.*": "1"}
 
 
-@pytest.mark.parametrize("segment", ["١٢", "123", "007x"])
-def test_only_short_ascii_numbers_are_array_indexes(segment: str) -> None:
+@pytest.mark.parametrize("segment", ["١٢", "12", "123", "007x"])
+def test_a_numeric_key_is_a_name_not_an_array_index(segment: str) -> None:
     names = store()
-    gated = gate(names, {f"items.{segment}": "1"})
-    assert gated.fields == {"items.*": "1"} or gated.fields == {"*.*": "1"}
+    flat = flatten({"items": {segment: 1}})
+    gated = names.apply(SYS, flat.fields, flat.top_keys, structure=flat.structure)
+    assert gated.fields == {"*.*": "1"}
 
 
 def test_a_parent_with_many_names_becomes_a_map_whose_keys_are_values() -> None:

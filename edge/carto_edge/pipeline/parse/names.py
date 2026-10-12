@@ -40,7 +40,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from carto_common.logging import get_logger
-from carto_edge.pipeline.parse.common import MASKED_SEGMENT, clean_text, safe_path, safe_segment
+from carto_edge.pipeline.parse.common import (
+    MASKED_SEGMENT,
+    SegmentPath,
+    clean_text,
+    safe_path,
+    safe_segment,
+)
 from carto_edge.pipeline.pii import PiiDetector
 from carto_schema.event import MAX_FIELD_NAME_LEN, SOURCE_ID_PATTERN
 
@@ -116,7 +122,7 @@ class _Parent:
 @dataclass(slots=True)
 class _System:
     parents: dict[str, _Parent] = field(default_factory=dict)
-    cache: dict[tuple[str, frozenset[str]], str] = field(default_factory=dict)
+    cache: dict[tuple[str | SegmentPath, frozenset[str]], str] = field(default_factory=dict)
     dirty: bool = False
 
 
@@ -176,28 +182,36 @@ class FieldNameStore:
         fields: Mapping[str, str],
         top_keys: Sequence[str],
         trusted: frozenset[str] = frozenset(),
+        *,
+        structure: Mapping[str, SegmentPath] | None = None,
     ) -> GatedRecord:
         """Gate one record's flattened ``fields`` and its ``top_keys``. ``trusted`` comes from
-        :meth:`trusted_set`; a path in it is used in clear from the first record. Value-like
-        segments are masked as before (ADR 0027); when two paths end up with the same name the
-        first value is kept; a name longer than the canonical event allows is dropped."""
+        :meth:`trusted_set`; a path in it is used in clear from the first record. ``structure``
+        gives the segments of nested paths (:class:`~carto_edge.pipeline.parse.common.Flattened`);
+        a path without an entry is one segment. Value-like segments are masked as before (ADR
+        0027); when two paths end up with the same name the first value is kept; a name longer
+        than the canonical event allows is dropped."""
         system = self._system(system_id)
         seen: set[tuple[str, str]] = set()
         entries: dict[str, dict[str, int]] = {}
         out: dict[str, str] = {}
         for path, value in fields.items():
-            cached = system.cache.get((path, trusted))
+            segments = structure.get(path) if structure else None
+            key: str | SegmentPath = path if segments is None else segments
+            cached = system.cache.get((key, trusted))
             if cached is not None:
                 if cached not in out:
                     out[cached] = value
                 continue
-            name, cacheable = self._gate_path(system, path, trusted, seen, entries, out)
+            if segments is None:
+                segments = ((path, False),)
+            name, cacheable = self._gate_path(system, segments, trusted, seen, entries, out)
             if name is None:
                 continue
             if cacheable:
                 if len(system.cache) >= _MAX_CACHE:
                     system.cache.clear()
-                system.cache[(path, trusted)] = name
+                system.cache[(key, trusted)] = name
             if name not in out:
                 out[name] = value
         gated_keys: list[str] = []
@@ -214,7 +228,7 @@ class FieldNameStore:
     def _gate_path(
         self,
         system: _System,
-        path: str,
+        segments: SegmentPath,
         trusted: frozenset[str],
         seen: set[tuple[str, str]],
         entries: dict[str, dict[str, int]],
@@ -223,11 +237,12 @@ class FieldNameStore:
         """The gated name of one path, and whether it may be cached (every segment trusted and
         no map on the way: a trusted name stays trusted, so the answer cannot change until a
         parent becomes a map, which clears the cache)."""
-        segments = path.split(".")
         out_segments: list[str] = []
+        raw_segments: list[str] = []
         parent_key = ""
         cacheable = True
-        for position, segment in enumerate(segments):
+        for segment, is_index in segments:
+            raw_segments.append(segment)
             parent = system.parents.get(parent_key)
             if parent is not None and parent.is_map:
                 cacheable = False
@@ -245,11 +260,11 @@ class FieldNameStore:
                 out_segments += [str(index), MAP_VALUE]
                 parent_key = _join(_join(parent_key, INDEX), MAP_VALUE)
                 continue
-            if _is_index(segment):  # an array index from flatten
+            if is_index:  # an array index from the flattener, never a key
                 out_segments.append(segment)
                 parent_key = _join(parent_key, INDEX)
                 continue
-            raw_prefix = ".".join(segments[: position + 1])
+            raw_prefix = ".".join(raw_segments)
             if raw_prefix in trusted or self._name_trusted(system, parent_key, segment, seen):
                 masked = safe_segment(segment)
                 out_segments.append(masked)
@@ -415,12 +430,6 @@ class FieldNameStore:
                 error=type(exc).__name__,
             )
             system.parents = {}
-
-
-def _is_index(segment: str) -> bool:
-    """An index :func:`~carto_edge.pipeline.parse.common.flatten` wrote (below 20): one or two
-    ASCII digits. Anything else is a name and goes through the gate."""
-    return 0 < len(segment) <= 2 and segment.isascii() and segment.isdigit()
 
 
 def _string_list(value: Any, what: str) -> set[str]:

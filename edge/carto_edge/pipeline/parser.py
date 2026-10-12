@@ -46,6 +46,7 @@ from carto_edge.config import (
 from carto_edge.pipeline.model import ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.access_log import AccessLogParser
 from carto_edge.pipeline.parse.common import (
+    SegmentPath,
     clean_text,
     flatten,
     key_signature,
@@ -109,6 +110,7 @@ class _Draft:
     level: str | None = None
     mine_message: str | None = None
     param_prefix: str = "msg."
+    structure: dict[str, SegmentPath] | None = None
 
 
 class RecordParser:
@@ -205,6 +207,7 @@ class RecordParser:
             parse_format=FORMAT_FIELDS,
             notes=flat.notes,
             mine_message=message,
+            structure=flat.structure,
         )
         return self._finish(raw, draft)
 
@@ -255,6 +258,7 @@ class RecordParser:
                 parse_format=fmt.value,
                 notes=flat.notes,
                 mine_message=self._take_message(fields),
+                structure=flat.structure,
             )
         if fmt == RecordFormat.XML:
             xml = parse_xml(line)
@@ -266,6 +270,7 @@ class RecordParser:
                 top_keys=(),
                 parse_format=fmt.value,
                 notes=xml.notes,
+                structure=xml.structure,
             )
         if fmt == RecordFormat.LOGFMT:
             pairs = parse_logfmt(line)
@@ -345,7 +350,11 @@ class RecordParser:
             top_keys = tuple(safe_path(key) for key in draft.top_keys)
         else:
             gated = self._names.apply(
-                system_id, draft.fields, draft.top_keys, self._trusted_for(raw)
+                system_id,
+                draft.fields,
+                draft.top_keys,
+                self._trusted_for(raw),
+                structure=draft.structure,
             )
             fields, top_keys = gated.fields, gated.top_keys
         template_text = draft.template_text

@@ -24,7 +24,7 @@ from __future__ import annotations
 import functools
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -41,6 +41,8 @@ __all__ = [
     "NOTE_DEPTH_LIMIT",
     "NOTE_FIELD_LIMIT",
     "Flattened",
+    "Segment",
+    "SegmentPath",
     "clean_text",
     "flatten",
     "key_signature",
@@ -74,13 +76,25 @@ _SURROGATE: Final = re.compile("[\\ud800-\\udfff]")
 REPLACEMENT_CHARACTER: Final = chr(0xFFFD)
 
 
+Segment = tuple[str, bool]
+"""One step of a field path: the key (or array index as text) and whether it is an index."""
+SegmentPath = tuple[Segment, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class Flattened:
-    """A flattened record: ``fields`` by path, the top-level keys in input order, limit notes."""
+    """A flattened record: ``fields`` by path, the top-level keys in input order, limit notes.
+
+    ``structure`` gives the segments of every path with more than one: the dotted path is only
+    a label, since a key may itself contain a dot (``{"m": {"x.y": 1}}`` and ``{"m.x": {"y":
+    1}}`` both read ``m.x.y``) and a key may be all digits (``{"stock": {"42": 1}}`` is not an
+    array). The name gate works on the segments (ADR 0030 amendment); a path absent from
+    ``structure`` is one segment, not an index."""
 
     fields: dict[str, str]
     top_keys: tuple[str, ...]
     notes: tuple[str, ...]
+    structure: dict[str, SegmentPath] = field(default_factory=dict)
 
 
 def utf8_len(text: str) -> int:
@@ -139,7 +153,7 @@ def flatten(
     """Flatten a nested mapping to dotted paths (spec 8.2 item 1).
 
     Iterative (no recursion, so adversarial nesting cannot exhaust the stack): a work stack of
-    ``(prefix, depth, value)``. Mappings contribute ``prefix.key``; sequences contribute
+    ``(prefix, segments, depth, value)``. Mappings contribute ``prefix.key``; sequences contribute
     ``prefix.<index>`` for the first ``max_items`` elements; scalars are rendered with
     :func:`stringify` and nulls are skipped. Values nested deeper than ``max_depth`` levels,
     elements past ``max_items`` and fields past ``max_fields`` are dropped and noted. Keys are
@@ -148,6 +162,7 @@ def flatten(
     longer than :data:`MAX_KEY_LEN` are dropped and noted, and a scalar under an empty key
     (``{"": 1}``) is dropped since a field needs a name. Field order follows a
     depth-first walk in input order, so ``top_keys`` and the ``fields`` order are stable.
+    ``structure`` holds the segments of each path with more than one (see :class:`Flattened`).
     """
     fields: dict[str, str] = {}
     notes: set[str] = set()
@@ -166,17 +181,18 @@ def flatten(
                 continue
             fields[path] = text
         return Flattened(fields=fields, top_keys=top_keys, notes=tuple(sorted(notes)))
-    stack: list[tuple[str, int, Any]] = [("", 0, value)]
+    structure: dict[str, SegmentPath] = {}
+    stack: list[tuple[str, SegmentPath, int, Any]] = [("", (), 0, value)]
     while stack:
-        prefix, depth, current = stack.pop()
+        prefix, segments, depth, current = stack.pop()
         if isinstance(current, Mapping):
             if depth >= max_depth:
                 notes.add(NOTE_DEPTH_LIMIT)
                 continue
-            children: list[tuple[str, int, Any]] = [
-                (_join(prefix, clean_text(str(key))), depth + 1, child)
-                for key, child in current.items()
-            ]
+            children: list[tuple[str, SegmentPath, int, Any]] = []
+            for key, child in current.items():
+                name = clean_text(str(key))
+                children.append((_join(prefix, name), (*segments, (name, False)), depth + 1, child))
             stack.extend(reversed(children))
         elif isinstance(current, list | tuple):
             if depth >= max_depth:
@@ -184,10 +200,12 @@ def flatten(
                 continue
             if len(current) > max_items:
                 notes.add(NOTE_ARRAY_LIMIT)
-            items = [
-                (_join(prefix, str(index)), depth + 1, child)
-                for index, child in enumerate(current[:max_items])
-            ]
+            items: list[tuple[str, SegmentPath, int, Any]] = []
+            for index, child in enumerate(current[:max_items]):
+                text_index = str(index)
+                items.append(
+                    (_join(prefix, text_index), (*segments, (text_index, True)), depth + 1, child)
+                )
             stack.extend(reversed(items))
         else:
             text = stringify(current)
@@ -200,7 +218,13 @@ def flatten(
                 notes.add(NOTE_FIELD_LIMIT)
                 continue
             fields[prefix] = text
-    return Flattened(fields=fields, top_keys=top_keys, notes=tuple(sorted(notes)))
+            if len(segments) > 1:
+                structure[prefix] = segments
+            else:
+                structure.pop(prefix, None)
+    return Flattened(
+        fields=fields, top_keys=top_keys, notes=tuple(sorted(notes)), structure=structure
+    )
 
 
 def _signature_key(key: str) -> str:

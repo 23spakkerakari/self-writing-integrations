@@ -15,6 +15,7 @@ from carto_edge.pipeline.model import ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.common import clean_text, flatten
 from carto_edge.pipeline.parse.json import parse_json
 from carto_edge.pipeline.parse.names import FieldNameStore
+from carto_edge.pipeline.parse.xml import parse_xml
 from carto_edge.pipeline.parser import RecordParser
 from carto_edge.pipeline.pii import RegexDetector
 from carto_edge.pipeline.templates import TemplateStore
@@ -83,3 +84,43 @@ def test_the_name_register_persists_names_with_surrogates(tmp_path: Path) -> Non
     again = FieldNameStore(RegexDetector(), tmp_path)
     gated = again.apply("sys_b", {"plain_key": "2"}, ["plain_key"])
     assert gated.fields == {"plain_key": "2"}  # the register was written and read back
+
+
+# -- finding 4: paths are segment tuples until the end -----------------------------------------
+
+
+def _gate_nested(
+    names: FieldNameStore, record: dict[str, object], trusted: frozenset[str] = frozenset()
+) -> dict[str, str]:
+    flat = flatten(record)
+    return names.apply(SYS, flat.fields, flat.top_keys, trusted, structure=flat.structure).fields
+
+
+def test_flatten_reports_the_segments_of_nested_paths() -> None:
+    flat = flatten({"a.b": 1, "m": {"x.y": 2, "42": 3}, "l": [4]})
+    assert flat.fields == {"a.b": "1", "m.x.y": "2", "m.42": "3", "l.0": "4"}
+    assert "a.b" not in flat.structure  # one segment
+    assert flat.structure["m.x.y"] == (("m", False), ("x.y", False))
+    assert flat.structure["m.42"] == (("m", False), ("42", False))
+    assert flat.structure["l.0"] == (("l", False), ("0", True))
+
+
+def test_a_dotted_map_key_stays_one_value() -> None:
+    names = FieldNameStore(RegexDetector(), map_min_keys=16)
+    for i in range(20):
+        _gate_nested(names, {"balances": {f"k{chr(97 + i)}x.quixote": 5}})
+    gated = _gate_nested(names, {"balances": {"dclfre.zebulon": 5}})
+    assert gated == {"balances.0.key": "dclfre.zebulon", "balances.0.value": "5"}
+
+
+def test_a_numeric_map_key_is_a_name_not_an_index() -> None:
+    names = FieldNameStore(RegexDetector())
+    gated = _gate_nested(names, {"stock": {"42": 1}}, names.trusted_set(["stock"]))
+    assert gated == {"stock.*": "1"}  # gated like any name, not passed as an array index
+
+
+def test_xml_paths_carry_their_segments() -> None:
+    record = parse_xml('<r><svc.name a.b="1">x<i>1</i></svc.name><i>2</i><i>3</i></r>')
+    assert record is not None
+    assert record.structure["svc.name.@a.b"] == (("svc.name", False), ("@a.b", False))
+    assert record.structure["i.1"] == (("i", False), ("1", True))
