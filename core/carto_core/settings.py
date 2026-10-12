@@ -6,8 +6,10 @@
 - ``clickhouse``: the HTTP(S) endpoint ``ingest-api`` and the workers write to and read from.
   TLS is the default (spec 14.4 "PostgreSQL and ClickHouse connections require TLS"); plain
   ``http://`` needs an explicit ``secure=false`` and is for local development only.
-- ``postgres``: the metadata store. ``sslmode`` defaults to ``require``; ``prefer`` and ``allow``
-  are not offered because they silently fall back to clear text.
+- ``postgres``: the metadata store. ``sslmode`` defaults to ``verify-full``: the server certificate
+  and its name are checked (``ca_file`` names the CA, else libpq's default root file). ``prefer``
+  and ``allow`` are not offered because they silently fall back to clear text; ``disable`` is
+  for the Compose stack's internal network and local containers only.
 - ``ingest``: the mutual-TLS listener of ``ingest-api`` (spec 12 "Internal", 14.4) and its body
   caps (spec 8.5: 5 MB compressed batches; spec 2.3 invariant 8: size limits on every input).
 
@@ -162,8 +164,11 @@ class PostgresSettings(_Frozen):
         default=None, description="File holding the password; never an environment value."
     )
     sslmode: SslMode = Field(
-        default="require",
-        description="libpq sslmode; 'disable' is for local development against a container.",
+        default="verify-full",
+        description=(
+            "libpq sslmode; verify-full checks the certificate and the host name. 'disable' is "
+            "for the Compose stack's internal network and local containers only."
+        ),
     )
     ca_file: Path | None = Field(default=None, description="libpq sslrootcert.")
     connect_timeout_seconds: int = Field(default=10, ge=1, le=300)
