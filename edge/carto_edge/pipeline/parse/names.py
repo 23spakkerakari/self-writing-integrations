@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from carto_common.logging import get_logger
-from carto_edge.pipeline.parse.common import MASKED_SEGMENT, safe_path, safe_segment
+from carto_edge.pipeline.parse.common import MASKED_SEGMENT, clean_text, safe_path, safe_segment
 from carto_edge.pipeline.pii import PiiDetector
 from carto_schema.event import MAX_FIELD_NAME_LEN, SOURCE_ID_PATTERN
 
@@ -78,7 +78,10 @@ _MAX_CACHE: Final = 65_536
 
 
 def _digest(name: str) -> str:
-    return hashlib.blake2b(name.encode("utf-8"), digest_size=_DIGEST_BYTES).hexdigest()
+    # surrogatepass: the parsers replace lone surrogates (clean_text); a caller that skipped
+    # that must still not make the gate raise.
+    data = name.encode("utf-8", errors="surrogatepass")
+    return hashlib.blake2b(data, digest_size=_DIGEST_BYTES).hexdigest()
 
 
 def _join(prefix: str, segment: str) -> str:
@@ -324,7 +327,7 @@ class FieldNameStore:
         ``aliceSmith`` -> ``alice smith``). The words, not the name as written: spaCy's
         recogniser reads a bare ``order_id`` as a person and ``warehouse_code`` as a location,
         while the spaced forms of field names are clean and person names are still found."""
-        words = _CAMEL.sub(" ", name).translate(_SEPARATORS)
+        words = clean_text(_CAMEL.sub(" ", name).translate(_SEPARATORS))
         return any(hit.score >= self._threshold for hit in self._detector.detect(words))
 
     # -- persistence ----------------------------------------------------------------------------
@@ -381,7 +384,9 @@ class FieldNameStore:
                 for key, parent in system.parents.items()
             },
         }
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # ASCII escapes: a name holding a lone surrogate (from a caller that did not clean it)
+        # still serializes instead of failing the flush.
+        data = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         temporary = path.with_name(path.name + ".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

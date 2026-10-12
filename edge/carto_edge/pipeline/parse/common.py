@@ -41,6 +41,7 @@ __all__ = [
     "NOTE_DEPTH_LIMIT",
     "NOTE_FIELD_LIMIT",
     "Flattened",
+    "clean_text",
     "flatten",
     "key_signature",
     "safe_path",
@@ -69,6 +70,8 @@ NOTE_DEPTH_LIMIT: Final = "depth_limit"
 NOTE_ARRAY_LIMIT: Final = "array_limit"
 NOTE_FIELD_LIMIT: Final = "field_limit"
 NOTE_KEY_LIMIT: Final = "key_limit"
+_SURROGATE: Final = re.compile("[\\ud800-\\udfff]")
+REPLACEMENT_CHARACTER: Final = chr(0xFFFD)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,18 @@ def utf8_len(text: str) -> int:
     return len(text.encode("utf-8", errors="surrogatepass"))
 
 
+def clean_text(text: str) -> str:
+    """``text`` with every lone surrogate replaced by U+FFFD.
+
+    ``json.loads`` accepts an escaped lone surrogate and a ``str`` can hold one, but it has no
+    UTF-8 encoding: hashing, persisting or forwarding it would raise. The parsers normalize at
+    their decode boundary with this function (keys, string values and text lines), so nothing
+    downstream sees one. ASCII text is returned as it is."""
+    if text.isascii():
+        return text
+    return _SURROGATE.sub(REPLACEMENT_CHARACTER, text)
+
+
 def stringify(value: Any) -> str | None:
     """Render a scalar as the string the pipeline works on; ``None`` for null.
 
@@ -96,7 +111,7 @@ def stringify(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return value
+        return clean_text(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int | float | Decimal | UUID):
@@ -107,7 +122,7 @@ def stringify(value: Any) -> str | None:
         return bytes(value).hex()
     if isinstance(value, Enum):
         return stringify(value.value)
-    return str(value)
+    return clean_text(str(value))
 
 
 def _join(prefix: str, key: str) -> str:
@@ -128,21 +143,22 @@ def flatten(
     ``prefix.<index>`` for the first ``max_items`` elements; scalars are rendered with
     :func:`stringify` and nulls are skipped. Values nested deeper than ``max_depth`` levels,
     elements past ``max_items`` and fields past ``max_fields`` are dropped and noted. Keys are
-    rendered with ``str`` (JSON keys are strings already; DB rows may use other types); paths
+    rendered with ``str`` (JSON keys are strings already; DB rows may use other types) and lose
+    their lone surrogates like string values (:func:`clean_text`); paths
     longer than :data:`MAX_KEY_LEN` are dropped and noted, and a scalar under an empty key
     (``{"": 1}``) is dropped since a field needs a name. Field order follows a
     depth-first walk in input order, so ``top_keys`` and the ``fields`` order are stable.
     """
     fields: dict[str, str] = {}
     notes: set[str] = set()
-    top_keys = tuple(str(key) for key in value)
+    top_keys = tuple(clean_text(str(key)) for key in value)
     if len(value) <= max_fields and not any(
         isinstance(child, Mapping | list | tuple) for child in value.values()
     ):
         # Fast path: a flat record of scalars (the common NDJSON and row shape).
         for key, child in value.items():
             text = stringify(child)
-            path = str(key)
+            path = clean_text(str(key))
             if text is None or not path:
                 continue
             if len(path) > MAX_KEY_LEN:
@@ -158,7 +174,8 @@ def flatten(
                 notes.add(NOTE_DEPTH_LIMIT)
                 continue
             children: list[tuple[str, int, Any]] = [
-                (_join(prefix, str(key)), depth + 1, child) for key, child in current.items()
+                (_join(prefix, clean_text(str(key))), depth + 1, child)
+                for key, child in current.items()
             ]
             stack.extend(reversed(children))
         elif isinstance(current, list | tuple):

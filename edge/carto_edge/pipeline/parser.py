@@ -45,7 +45,13 @@ from carto_edge.config import (
 )
 from carto_edge.pipeline.model import ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.access_log import AccessLogParser
-from carto_edge.pipeline.parse.common import flatten, key_signature, safe_path, utf8_len
+from carto_edge.pipeline.parse.common import (
+    clean_text,
+    flatten,
+    key_signature,
+    safe_path,
+    utf8_len,
+)
 from carto_edge.pipeline.parse.csv import CsvHeader, CsvParser, looks_like_csv_header
 from carto_edge.pipeline.parse.detect import FormatDetector
 from carto_edge.pipeline.parse.json import parse_json
@@ -177,7 +183,7 @@ class RecordParser:
             return self._parse_fields(raw)
         if text is None or not text.strip():
             return ParseFailure(REASON_EMPTY)
-        return self._parse_text(raw, text.rstrip("\r\n"))
+        return self._parse_text(raw, clean_text(text.rstrip("\r\n")))
 
     # -- records that arrive as fields --------------------------------------------------------
 
@@ -186,12 +192,12 @@ class RecordParser:
             return ParseFailure(REASON_EMPTY)
         flat = flatten(raw.fields)
         fields = flat.fields
-        message = raw.text.strip() if raw.text and raw.text.strip() else None
+        message = clean_text(raw.text.strip()) if raw.text and raw.text.strip() else None
         if message is None:
             message = self._take_message(fields)
         if not fields and message is None:
             return ParseFailure(REASON_EMPTY)
-        hint = raw.template_hint.strip() if raw.template_hint else ""
+        hint = clean_text(raw.template_hint.strip()) if raw.template_hint else ""
         draft = _Draft(
             fields=fields,
             template_text=hint or None,
