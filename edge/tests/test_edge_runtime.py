@@ -201,3 +201,37 @@ def test_analyze_flush_does_not_run_gateway_housekeeping(tmp_path: Path) -> None
         assert runtime.vault.count() == 1
     finally:
         runtime.close()
+
+
+def _anchor_lines(text: str) -> list[dict[str, object]]:
+    lines = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+    return [line for line in lines if line.get("event") == "audit.anchor"]
+
+
+def test_gateway_publishes_the_audit_anchor_hourly_and_at_close(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = settings(tmp_path)
+    build_runtime(config, sources(), mode="analyze", init_local_keys=True).close()
+    runtime = build_runtime(config, sources(), mode="gateway")
+    assert runtime.anchors is not None
+    tick = [0.0]
+    runtime.monotonic = lambda: tick[0]
+    capsys.readouterr()
+    runtime.flush()
+    first = _anchor_lines(capsys.readouterr().out)
+    assert [line["seq"] for line in first] == [0]
+    runtime.audit.record("reveal", "user:1", "vault", {"revealed": 1})
+    tick[0] = 60.0
+    runtime.flush()
+    assert _anchor_lines(capsys.readouterr().out) == []
+    runtime.close()
+    last = _anchor_lines(capsys.readouterr().out)
+    assert [line["seq"] for line in last] == [1]
+    assert last[0]["row_hash"] == runtime.audit.last_hash
+
+
+def test_analyze_runtime_publishes_no_anchor(tmp_path: Path) -> None:
+    runtime = build_runtime(settings(tmp_path), sources(), mode="analyze", init_local_keys=True)
+    assert runtime.anchors is None
+    runtime.close()

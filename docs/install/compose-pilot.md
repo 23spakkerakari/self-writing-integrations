@@ -873,6 +873,42 @@ and that volume for the longest core outage you want to ride out. Watch
 refuses to start when the chain is broken. Check it with
 `carto-edge audit verify --file /var/lib/carto/audit.ndjson` inside the `edge-gateway` container.
 
+The chain alone cannot show that the last rows were deleted, or that a row was rewritten with
+every later hash recomputed. The gateway therefore writes an **anchor** every hour and at
+shutdown (ADR 0033): one log line with `"event": "audit.anchor"` and the last row's `seq`,
+`row_hash` and `ts`. Keep the gateway's container logs somewhere the edge host cannot rewrite
+(your log shipper, SIEM or syslog), or send the anchors straight to your syslog server:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__HOST` | none (off) | Syslog or SIEM host that receives each anchor |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__PORT` | 6514 | TCP port |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__TLS` | `true` | RFC 5425 TLS (1.2 or later); `false` sends plain TCP with the same framing |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__CA_FILE` | system trust store | CA bundle that signed the syslog server's certificate |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__TIMEOUT_SECONDS` | 5 | Connect and send timeout |
+
+Messages are RFC 5424 (facility `log audit`, severity informational, MSGID `audit.anchor`, text
+`event=audit.anchor seq=<n> row_hash=<hex> ts=<time>`) with RFC 5425 octet-counting framing. A
+failed send is logged as `audit.anchor_syslog_failed` and the next hourly anchor is sent as
+usual; it never delays a reveal or an audit row.
+
+To check the file against anchors you trust, pass them as `<seq>:<row_hash>` (repeatable):
+
+```bash
+$COMPOSE exec edge-gateway carto-edge audit verify --file /var/lib/carto/audit.ndjson \
+  --anchor 1532:<row_hash from the 09:00 anchor> --anchor 1610:<row_hash from the 10:00 anchor>
+```
+
+Each anchor reports `holds`, `MISSING` (rows were removed after it) or `MISMATCH` (the chain was
+rewritten); any of the last two makes the command exit 1. Rows written after the newest anchor
+(at most an hour) are not covered.
+
+A power cut during an append can leave a partial last line. On its next start the gateway (or
+any `carto-edge` command that writes the audit file) moves that line to
+`audit.ndjson.torn-<UTC time>` next to the file, keeps it for inspection, and appends an
+`audit.recovered` row with its size. `audit verify` reports such a line without failing. Any
+other mismatch still stops the gateway.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
@@ -895,7 +931,9 @@ refuses to start when the chain is broken. Check it with
 | `carto_edge_dropped_total` grows with reason `unknown_source`, or OTLP partial success counts rejected records | `carto.source_id` does not match an enabled `otlp` source | Align the collector receivers with `sources.yaml` |
 | Webhook 401, 404, 413 or 400 | Signature or timestamp, unknown source, body over 1 MB, malformed body | See the webhook section |
 | PostgreSQL authentication fails after editing `pg_password` | The image applies the password only on first initialisation | Restore the original file or reset the password inside PostgreSQL |
-| `audit chain broken at line N` and the gateway stops | `audit.ndjson` was edited or truncated | Treat as a security incident; restore from backup |
+| `audit chain broken at line N` and the gateway stops | `audit.ndjson` was edited | Treat as a security incident; restore from backup |
+| `audit verify --anchor` reports `MISSING` or `MISMATCH` | Rows were removed or the chain rewritten after that anchor | Treat as a security incident; compare with a backup and the anchors in your log store |
+| `audit.anchor_syslog_failed` in the gateway log | The syslog target is unreachable or its certificate does not verify | Check host, port and `CA_FILE`; the anchors are still in the product log |
 | `/internal/tokenize` or `/internal/reveal` answer 503 | No assertion public key | Expected until M3 |
 
 ## Security notes

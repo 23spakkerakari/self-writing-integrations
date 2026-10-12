@@ -20,7 +20,9 @@ record value.
 In gateway mode :meth:`EdgeRuntime.flush`, which the gateway's housekeeping loop runs every
 ``gateway.stats_flush_seconds``, also runs :meth:`EdgeRuntime.housekeeping` on its own hourly
 period: expired reveal vault entries are purged (spec 14.10) and the count is logged and counted
-in ``carto_edge_vault_purged_total``.
+in ``carto_edge_vault_purged_total``, and the audit anchor is published (ADR 0033,
+:mod:`carto_edge.audit_anchor`). :meth:`EdgeRuntime.close` publishes a last anchor in gateway
+mode, so the anchor log always ends with the row written last.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Final, Literal
 from carto_common.crypto import Keyring
 from carto_common.logging import get_logger
 from carto_edge.audit import EdgeAudit
+from carto_edge.audit_anchor import AnchorPublisher, SyslogAnchorSender
 from carto_edge.config import EdgeSettings, SourcesFile
 from carto_edge.connectors.base import ConnectorContext
 from carto_edge.keys import ROTATION_FILE, KeyManagementError, KeyManager
@@ -56,6 +59,7 @@ __all__ = [
     "HOUSEKEEPING_SECONDS",
     "EdgeRuntime",
     "Mode",
+    "build_anchor_publisher",
     "build_connector_context",
     "build_reveal_service",
     "build_runtime",
@@ -90,6 +94,7 @@ class EdgeRuntime:
     audit: EdgeAudit
     secrets: EdgeSecretResolver | None = None
     metrics: EdgeMetrics | None = None
+    anchors: AnchorPublisher | None = None
     housekeeping_seconds: float = HOUSEKEEPING_SECONDS
     monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
     _last_housekeeping: float | None = field(default=None, repr=False)
@@ -149,19 +154,23 @@ class EdgeRuntime:
             log.info("vault.purged", entries=purged)
             if self.metrics is not None and purged:
                 self.metrics.inc("carto_edge_vault_purged_total", purged)
+        if self.anchors is not None:
+            self.anchors.publish()
         return True
 
     def close(self) -> None:
-        """Flush, then close the templates, the vault, the audit file and the secret resolver.
-        Every step runs even when an earlier one raises (an error propagates once all steps ran,
-        with any earlier one chained as its context), so a failed flush never leaves the vault
-        or the audit file open."""
-        with contextlib.ExitStack() as stack:
+        """Flush, publish the last audit anchor in gateway mode, then close the templates, the
+        vault, the audit file and the secret resolver. Every step runs even when an earlier one
+        raises (an error propagates once all steps ran, with any earlier one chained as its
+        context), so a failed flush never leaves the vault or the audit file open."""
+        with contextlib.ExitStack() as stack:  # callbacks run in reverse order of registration
             if self.secrets is not None:
                 stack.callback(self.secrets.close)
             stack.callback(self.audit.close)
             stack.callback(self.vault.close)
             stack.callback(self.templates.close)
+            if self.anchors is not None:  # the last anchor covers every row written before shutdown
+                stack.callback(self.anchors.publish)
             stack.callback(self.flush)
 
 
@@ -258,6 +267,7 @@ def build_runtime(
         classifier=classifier,
         pipeline=pipeline,
         audit=audit,
+        anchors=None if analyze else build_anchor_publisher(settings, audit),
     )
     log.info(
         "runtime.built",
@@ -270,6 +280,13 @@ def build_runtime(
         quarantine_samples=classify.quarantine_samples,
     )
     return runtime
+
+
+def build_anchor_publisher(settings: EdgeSettings, audit: EdgeAudit) -> AnchorPublisher:
+    """The gateway's audit anchor publisher, with the syslog target when one is configured."""
+    target = settings.audit.anchor_syslog
+    sender = SyslogAnchorSender(target) if target is not None else None
+    return AnchorPublisher(audit, sender=sender)
 
 
 def build_reveal_service(
