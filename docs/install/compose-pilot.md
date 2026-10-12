@@ -852,7 +852,11 @@ refuses to start when the chain is broken. Check it with
   values; when its values contain a run of four or more digits it is tokenized anyway (ADR
   0029). One without digits (`MAN-ALPHA`) is kept in clear unless pinned: review the kept fields
   and pin such identifiers to `tokenize` (Field policy pins, step 7). The reverse also holds: a
-  harmless field with four digits (a year, a port) is tokenized until you pin it to `keep`. The leak test (spec
+  harmless field with four digits (a year, a port) is tokenized until you pin it to `keep`.
+  Field names travel only once seen in three records under their parent and not read as a
+  person's name (ADR 0030), so the first two events of a new record shape show `*` for their
+  field names; objects keyed by values (256 or more distinct keys) are sent as maps whose keys
+  are values. The leak test (spec
   18.3, `make leak`) checks bundles, forwarded batches, logs and ClickHouse rows for planted
   marker values, and CI replays the simulator through this stack and scans ClickHouse and the
   service logs the same way.

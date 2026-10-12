@@ -590,7 +590,7 @@ Common requirements for every connector:
 
 Order of attempts per record, first match wins, with per-source hints:
 
-1. **JSON / NDJSON:** flatten nested keys to dotted paths (`payload.order.id`); arrays indexed up to 20 elements; depth limit 12.
+1. **JSON / NDJSON:** flatten nested keys to dotted paths (`payload.order.id`); arrays indexed up to 20 elements; depth limit 12. A field name travels in clear only once it has been seen in three records under its parent and the PII detector does not flag it; a parent with many distinct child names is a map, whose keys become values (`stock.0.key`, `stock.0.value`) (ADR 0030).
 2. **XML:** `defusedxml`, flatten to paths, attribute keys as `@attr`, depth and size limits.
 3. **logfmt / key=value:** quoted values supported.
 4. **CSV:** per source with header row or configured columns.

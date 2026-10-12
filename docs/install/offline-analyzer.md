@@ -279,6 +279,13 @@ The rule errs on the safe side: a harmless field whose values have four digits (
 a store number) is tokenized, and a four-digit value in a kept field is left out of the event.
 Pin such a field to `field_class: low_card_attribute`, `policy: keep` to send it in clear.
 
+Field names follow a similar rule (ADR 0030). A name appears in the bundle only if it occurs in
+at least three records under the same parent and does not read as a person's name; otherwise it
+is `*`. A JSON object keyed by values (customers, orders) with 256 or more distinct keys is
+treated as a map: its keys appear as values in `<parent>.<n>.key` fields, which are tokenized or
+dropped like any other value. If a real field shows as `*` in `MANIFEST.md`, it was rare in your
+export; pinning its path makes the name trusted.
+
 If a value shows up, pin the field (or remove the lines from the export) and re-run with the same
 state directory. Tell us too: the classifier should have caught it.
 

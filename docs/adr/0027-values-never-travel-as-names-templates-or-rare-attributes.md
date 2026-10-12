@@ -59,7 +59,7 @@ only string values, not keys or dotted paths.
 - Memory: up to 2,048 short values per low-cardinality field; identifier fields free theirs once
   they pass the cap.
 
-## Residual risk (founder question)
+## Residual risk (founder question, answered 2026-10-11 by ADR 0030)
 
 A JSON map keyed by a value with no digit run, such as a customer name (`{"Alice Smith": 3}`),
 still puts that name in a field path. Closing it needs map detection: a parent path with many

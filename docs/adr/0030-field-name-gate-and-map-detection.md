@@ -21,13 +21,17 @@ a name gate as well (2026-10-11).
 ## Decision
 
 **Name gate.** The parser keeps a per-system register of the names it has read from input, by
-parent path. Array indexes count as `#`, and a masked parent counts as `*`. A name read from
-the input is used in clear only when both hold:
+parent path. Array indexes count as `#`. A parent that is not trusted yet is keyed by a digest
+of its name, so its children are counted from the first record, and the subtree moves under the
+name once it is trusted. A name read from the input is used in clear only when both hold:
 
 1. it has been seen in at least three records under the same parent (`MIN_NAME_RECORDS`, the
    rule ADR 0027 applies to kept values and template words);
-2. the PII detector does not flag it. The detector runs once per name, when the name reaches
-   three records.
+2. the PII detector does not flag it read as words (`alice_smith` and `aliceSmith` become
+   `alice smith`). The detector runs once per name, when the name reaches three records. The
+   name as written is not checked: spaCy's recogniser reads a bare `order_id` as a person and
+   `warehouse_code` as a location, while the spaced forms of every scenario A field name are
+   clean and person names are still found.
 
 Until then the segment is `*`, as an ADR 0027 mask would be. Some names are exempt and trusted
 from the first record: those the configuration names (the source's timestamp, message, severity
