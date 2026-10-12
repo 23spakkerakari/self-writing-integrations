@@ -10,7 +10,14 @@ import time
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from carto_edge.pipeline.pii import MAX_TEXT_BYTES, RegexDetector, _iban_hits, _iban_valid
+from carto_edge.pipeline.pii import (
+    MAX_TEXT_BYTES,
+    RegexDetector,
+    _iban_hits,
+    _iban_valid,
+    detect_many,
+    truncate_text,
+)
 
 # The pattern the detector used before the fix: nested quantifiers that backtrack on long
 # runs. Kept here only as the reference the new scan must agree with on short inputs.
@@ -75,3 +82,11 @@ def test_iban_scan_agrees_with_the_old_pattern(text: str) -> None:
 def test_iban_scan_agrees_on_valid_iban_pieces(pieces: list[str]) -> None:
     text = "".join(pieces)
     assert _iban_spans(text) == _old_iban_spans(text)
+
+
+def test_detector_inputs_with_a_lone_surrogate_never_raise() -> None:
+    text = "mail a@example.com " + chr(0xD800) + " done"
+    assert chr(0xD800) not in truncate_text(text)
+    assert truncate_text("plain") == "plain"
+    hits = detect_many(RegexDetector(), [text, "x"])
+    assert [hit.entity_type for hit in hits[0]] == ["EMAIL_ADDRESS"]
