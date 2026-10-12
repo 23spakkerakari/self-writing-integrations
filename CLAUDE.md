@@ -46,5 +46,5 @@ import, lint or test it.
   (ADR 0028); acceptance waits on the founder (reference-node run, questions in the demo note)
   and on the `m1-review-fixes` branch (docs/plans/M1-review-fixes.md, ADRs 0033 to 0045).
 - M2 Map discovery: plan drafted on branch `m2-map-discovery` on 2026-10-12 (docs/plans/M2.md).
-  Code starts after M1 acceptance and the founder's answers to the plan's questions; ADRs from
+  Every question in the plan is answered; code starts after M1 acceptance. ADRs from
   0046.
