@@ -18,7 +18,7 @@ They run on every `up` and are idempotent, so a restart of the stack never fails
 | Job | Does |
 | --- | --- |
 | `volumes-init` | `chown 10001:10001` on the named volumes the carto services write (a new named volume is root-owned). The only container that runs as root, with `CHOWN` and nothing else, and no network. |
-| `pki-init` | `carto-ctl pki init --layout per-service --if-missing`: the install CA and one certificate pair per service, each on its own volume (`pki-ingest-api`, `pki-edge-gateway`, `pki-otel-collector`) so a service can read only its own key. Each certificate names its service role, and each route accepts only the roles listed for it (ADR 0031). The CA key goes to the `pki-ca` volume, which no running service mounts (spec 14.4, 15). |
+| `pki-init` | `carto-ctl pki init --if-missing`: a CA per listener (`ingest-api`, `edge-gateway`), each signing its listener's server certificate and the client certificates of the services allowed to call it, written to one volume per service (`pki-ingest-api`, `pki-edge-gateway`, `pki-otel-collector`) so a service can read only its own keys. Each certificate also names its service role, and each route accepts only the roles listed for it (ADR 0031). The CA keys go to the `pki-ca` volume, which no running service mounts (spec 14.4, 15). |
 | `key-init` | `carto-ctl key init --if-missing --kms local`: the tenant key wrapped by the local KMS on the `edge-state` volume (ADR 0012). Production uses Vault Transit (`docs/install/compose-pilot.md`). |
 | `migrate` | `carto-core migrate`: ClickHouse and PostgreSQL schemas and retention TTLs. |
 

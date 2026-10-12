@@ -223,9 +223,9 @@ def test_collector_dev_exports_to_the_gateway_over_mtls(collector: dict[str, Any
     exporter = collector["exporters"]["otlphttp/edge"]
     assert exporter["endpoint"] == "https://edge-gateway:8443"
     tls = exporter["tls"]
-    assert tls["ca_file"] == "/etc/carto/pki/ca.crt"
-    assert tls["cert_file"] == "/etc/carto/pki/tls.crt"  # its own volume (ADR 0031)
-    assert tls["key_file"] == "/etc/carto/pki/tls.key"
+    assert tls["ca_file"] == "/etc/carto/pki/to-edge-gateway-ca.crt"  # ADR 0031
+    assert tls["cert_file"] == "/etc/carto/pki/to-edge-gateway.crt"
+    assert tls["key_file"] == "/etc/carto/pki/to-edge-gateway.key"
     assert exporter["sending_queue"]["storage"] == "file_storage"
     storage = collector["extensions"]["file_storage"]
     assert storage["directory"] == "/var/lib/otelcol/storage"

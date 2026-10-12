@@ -1,5 +1,5 @@
-"""carto-ctl pki init (spec 14.4): a CA plus one server+client pair per service, the expected
-SANs and EKUs, owner-only keys, fingerprints on stdout and never a key, refusal to overwrite."""
+"""carto-ctl pki init: a CA per listener, per-service directories and service roles (spec 14.4;
+ADR 0031)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID
@@ -17,7 +18,9 @@ from cryptography.x509.oid import ExtendedKeyUsageOID
 from carto_common.pki import certificate_fingerprint, load_certificate, load_private_key
 from carto_ctl.cli import main
 from carto_ctl.exit_codes import EXIT_FAILURE, EXIT_OK, EXIT_USAGE
-from carto_ctl.pki import DEFAULT_SERVICES, initialize_pki
+from carto_ctl.pki import LISTENER_CLIENTS, initialize_pki
+
+STACK = "ingest-api,edge-gateway,otel-collector"
 
 
 def _signed_by(leaf: x509.Certificate, issuer: x509.Certificate) -> None:
@@ -26,76 +29,161 @@ def _signed_by(leaf: x509.Certificate, issuer: x509.Certificate) -> None:
     public_key.verify(leaf.signature, leaf.tbs_certificate_bytes, ec.ECDSA(hashes.SHA256()))
 
 
+def _not_signed_by(leaf: x509.Certificate, issuer: x509.Certificate) -> None:
+    with pytest.raises(InvalidSignature):
+        _signed_by(leaf, issuer)
+
+
 def _files(directory: Path) -> set[str]:
     return {path.name for path in directory.iterdir()}
 
 
-def test_pki_init_writes_the_ca_and_one_pair_per_service(
+def _sans(leaf: x509.Certificate) -> x509.SubjectAlternativeName:
+    return leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+
+
+def _role_uris(leaf: x509.Certificate) -> list[str]:
+    return _sans(leaf).get_values_for_type(x509.UniformResourceIdentifier)
+
+
+def _ekus(leaf: x509.Certificate) -> x509.ExtendedKeyUsage:
+    return leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+
+
+def _init(out: Path, ca_dir: Path, *extra: str) -> int:
+    return main(["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir), *extra])
+
+
+def test_each_listener_gets_its_own_ca_and_each_service_only_what_it_needs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    out = tmp_path / "pki"
-    argv = ["pki", "init", "--out", str(out), "--dns", "core.internal", "--ip", "10.0.0.5"]
-    assert main(argv) == EXIT_OK
+    out, ca_dir = tmp_path / "pki", tmp_path / "pki-ca"
+    argv = ["--services", STACK, "--dns", "core.internal", "--ip", "10.0.0.5"]
+    assert _init(out, ca_dir, *argv) == EXIT_OK
     captured = capsys.readouterr()
     assert captured.err == ""
-    ca = load_certificate(out / "ca.crt")
-    load_private_key(out / "ca.key")
-    assert certificate_fingerprint(ca) in captured.out
-    expected_files = {"ca.crt", "ca.key"}
-    for service in DEFAULT_SERVICES:
-        expected_files |= {f"{service}.crt", f"{service}.key"}
-        leaf = load_certificate(out / f"{service}.crt")
-        load_private_key(out / f"{service}.key")
-        assert leaf.issuer == ca.subject
-        _signed_by(leaf, ca)
-        sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-        assert sans.get_values_for_type(x509.DNSName) == [service, "localhost", "core.internal"]
-        assert [str(ip) for ip in sans.get_values_for_type(x509.IPAddress)] == ["10.0.0.5"]
-        ekus = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
-        assert ExtendedKeyUsageOID.SERVER_AUTH in ekus
-        assert ExtendedKeyUsageOID.CLIENT_AUTH in ekus
-        assert leaf.not_valid_after_utc - leaf.not_valid_before_utc == dt.timedelta(days=90)
-        assert f"{service}.crt  {certificate_fingerprint(leaf)}" in captured.out
-    assert _files(out) == expected_files
+    assert _files(ca_dir) == {
+        "ingest-api-ca.crt",
+        "ingest-api-ca.key",
+        "edge-gateway-ca.crt",
+        "edge-gateway-ca.key",
+    }
+    ingest_ca = load_certificate(ca_dir / "ingest-api-ca.crt")
+    gateway_ca = load_certificate(ca_dir / "edge-gateway-ca.crt")
+    assert ingest_ca.subject != gateway_ca.subject
+    assert f"ingest-api CA  {certificate_fingerprint(ingest_ca)}" in captured.out
+    assert _files(out) == {"ingest-api", "edge-gateway", "otel-collector"}
+    assert _files(out / "ingest-api") == {"listener.crt", "listener.key", "listener-ca.crt"}
+    assert _files(out / "edge-gateway") == {
+        "listener.crt",
+        "listener.key",
+        "listener-ca.crt",
+        "to-ingest-api.crt",
+        "to-ingest-api.key",
+        "to-ingest-api-ca.crt",
+    }
+    assert _files(out / "otel-collector") == {
+        "to-edge-gateway.crt",
+        "to-edge-gateway.key",
+        "to-edge-gateway-ca.crt",
+    }
+    for listener, ca in (("ingest-api", ingest_ca), ("edge-gateway", gateway_ca)):
+        server = load_certificate(out / listener / "listener.crt")
+        load_private_key(out / listener / "listener.key")
+        _signed_by(server, ca)
+        assert (out / listener / "listener-ca.crt").read_bytes() == (
+            ca_dir / f"{listener}-ca.crt"
+        ).read_bytes()
+        assert _sans(server).get_values_for_type(x509.DNSName) == [
+            listener,
+            "localhost",
+            "core.internal",
+        ]
+        assert [str(ip) for ip in _sans(server).get_values_for_type(x509.IPAddress)] == ["10.0.0.5"]
+        assert _role_uris(server) == [f"urn:carto:role:{listener}"]
+        assert ExtendedKeyUsageOID.SERVER_AUTH in _ekus(server)
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in _ekus(server)  # its own health probe
+        assert server.not_valid_after_utc - server.not_valid_before_utc == dt.timedelta(days=90)
+        assert f"{listener}/listener.crt  {certificate_fingerprint(server)}" in captured.out
+    # The gateway calls ingest-api with a certificate from the ingest CA only.
+    to_ingest = load_certificate(out / "edge-gateway" / "to-ingest-api.crt")
+    _signed_by(to_ingest, ingest_ca)
+    _not_signed_by(to_ingest, gateway_ca)
+    assert _role_uris(to_ingest) == ["urn:carto:role:edge-gateway"]
+    assert ExtendedKeyUsageOID.SERVER_AUTH not in _ekus(to_ingest)
+    # The collector holds a gateway-CA certificate only: it can never reach ingest-api.
+    to_gateway = load_certificate(out / "otel-collector" / "to-edge-gateway.crt")
+    _signed_by(to_gateway, gateway_ca)
+    _not_signed_by(to_gateway, ingest_ca)
+    assert _role_uris(to_gateway) == ["urn:carto:role:otel-collector"]
     assert "-----BEGIN" not in captured.out
     assert "PRIVATE" not in captured.out
 
 
-def test_ca_key_dir_keeps_the_ca_key_away_from_the_service_files(tmp_path: Path) -> None:
+def test_the_listener_table_matches_the_adr() -> None:
+    assert LISTENER_CLIENTS == {
+        "ingest-api": ("edge-gateway",),
+        "edge-gateway": ("otel-collector", "collector", "proxy", "api"),
+    }
+
+
+def test_a_service_that_is_not_a_role_gets_roleless_certificates_for_every_listener(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, ca_dir = tmp_path / "pki", tmp_path / "pki-ca"
+    assert _init(out, ca_dir, "--services", f"{STACK},scraper") == EXIT_OK
+    assert _files(out / "scraper") == {
+        "to-ingest-api.crt",
+        "to-ingest-api.key",
+        "to-ingest-api-ca.crt",
+        "to-edge-gateway.crt",
+        "to-edge-gateway.key",
+        "to-edge-gateway-ca.crt",
+    }
+    assert _role_uris(load_certificate(out / "scraper" / "to-ingest-api.crt")) == []
+    assert "scraper/to-ingest-api.crt" in capsys.readouterr().out
+
+
+def test_a_service_with_nothing_to_call_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, ca_dir = tmp_path / "pki", tmp_path / "pki-ca"
+    # otel-collector calls only edge-gateway, which is not in --services.
+    assert _init(out, ca_dir, "--services", "ingest-api,otel-collector") == EXIT_FAILURE
+    assert "otel-collector" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_ca_key_dir_defaults_to_out(tmp_path: Path) -> None:
     out = tmp_path / "pki"
-    ca_dir = tmp_path / "pki-ca"
-    argv = ["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir)]
-    assert main(argv) == EXIT_OK
-    assert "ca.key" not in _files(out)
-    assert _files(ca_dir) == {"ca.key"}
-    ca = load_certificate(out / "ca.crt")
-    key = load_private_key(ca_dir / "ca.key")
-    assert key.public_key().public_numbers() == ca.public_key().public_numbers()  # type: ignore[union-attr]
+    assert main(["pki", "init", "--out", str(out), "--services", STACK]) == EXIT_OK
+    assert {"ingest-api-ca.key", "edge-gateway-ca.key"} <= _files(out)
 
 
 def test_if_missing_succeeds_on_a_complete_run_and_refuses_a_partial_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    out = tmp_path / "pki"
-    ca_dir = tmp_path / "pki-ca"
-    argv = ["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir), "--if-missing"]
-    assert main(argv) == EXIT_OK
-    first = {name: (out / name).read_bytes() for name in _files(out)}
+    out, ca_dir = tmp_path / "pki", tmp_path / "pki-ca"
+    argv = ("--services", STACK, "--if-missing")
+    assert _init(out, ca_dir, *argv) == EXIT_OK
+    first = {path: path.read_bytes() for path in out.rglob("*") if path.is_file()}
     capsys.readouterr()
-    assert main(argv) == EXIT_OK  # the Compose job on its second start
+    assert _init(out, ca_dir, *argv) == EXIT_OK  # the Compose job on its second start
     assert "nothing written" in capsys.readouterr().out
-    assert {name: (out / name).read_bytes() for name in _files(out)} == first
-    (out / "edge-gateway.crt").unlink()  # a partial state is never papered over
-    assert main(argv) == EXIT_FAILURE
+    assert {path: path.read_bytes() for path in out.rglob("*") if path.is_file()} == first
+    (out / "otel-collector" / "to-edge-gateway-ca.crt").unlink()  # never papered over
+    assert _init(out, ca_dir, *argv) == EXIT_FAILURE
     assert "refusing to overwrite" in capsys.readouterr().err
-    assert main(["pki", "init", "--out", str(out), "--ca-key-dir", str(ca_dir)]) == EXIT_FAILURE
+    assert _init(out, ca_dir, "--services", STACK) == EXIT_FAILURE
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_private_keys_are_owner_only(tmp_path: Path) -> None:
     out = tmp_path / "pki"
     assert main(["pki", "init", "--out", str(out)]) == EXIT_OK
-    for key in out.glob("*.key"):
+    keys = list(out.rglob("*.key"))
+    assert keys
+    for key in keys:
         assert stat.S_IMODE(key.stat().st_mode) == 0o600, key
 
 
@@ -104,46 +192,29 @@ def test_pki_init_refuses_to_overwrite_any_existing_key(
 ) -> None:
     out = tmp_path / "pki"
     assert main(["pki", "init", "--out", str(out)]) == EXIT_OK
-    before = {path.name: path.read_bytes() for path in out.iterdir()}
+    before = {path: path.read_bytes() for path in out.rglob("*") if path.is_file()}
     capsys.readouterr()
     assert main(["pki", "init", "--out", str(out)]) == EXIT_FAILURE
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "refusing to overwrite" in captured.err
-    assert {path.name: path.read_bytes() for path in out.iterdir()} == before
+    assert {path: path.read_bytes() for path in out.rglob("*") if path.is_file()} == before
     # One stale service key is enough, and nothing is written before the check.
     other = tmp_path / "other"
-    other.mkdir()
-    (other / "api.key").write_bytes(b"stale")
+    (other / "api").mkdir(parents=True)
+    (other / "api" / "to-edge-gateway.key").write_bytes(b"stale")
     assert main(["pki", "init", "--out", str(other)]) == EXIT_FAILURE
-    assert "api.key" in capsys.readouterr().err
-    assert _files(other) == {"api.key"}
+    assert "to-edge-gateway.key" in capsys.readouterr().err
+    assert {path.name for path in other.rglob("*")} == {"api", "to-edge-gateway.key"}
 
 
-def test_custom_services_and_lifetime(tmp_path: Path) -> None:
+def test_custom_lifetime(tmp_path: Path) -> None:
     out = tmp_path / "pki"
-    argv = [
-        "pki",
-        "init",
-        "--out",
-        str(out),
-        "--services",
-        "edge-gateway,ingest-api",
-        "--days",
-        "30",
-    ]
+    argv = ["pki", "init", "--out", str(out), "--services", STACK, "--days", "30"]
     assert main(argv) == EXIT_OK
-    assert _files(out) == {
-        "ca.crt",
-        "ca.key",
-        "edge-gateway.crt",
-        "edge-gateway.key",
-        "ingest-api.crt",
-        "ingest-api.key",
-    }
-    leaf = load_certificate(out / "ingest-api.crt")
+    leaf = load_certificate(out / "otel-collector" / "to-edge-gateway.crt")
     assert leaf.not_valid_after_utc - leaf.not_valid_before_utc == dt.timedelta(days=30)
-    ca = load_certificate(out / "ca.crt")
+    ca = load_certificate(out / "edge-gateway-ca.crt")
     assert ca.not_valid_after_utc - ca.not_valid_before_utc == dt.timedelta(days=3650)
 
 
@@ -159,6 +230,7 @@ def test_custom_services_and_lifetime(tmp_path: Path) -> None:
         ["--days", "ninety"],
         ["--dns", "bad name"],
         ["--dns", "-core.internal"],
+        ["--layout", "flat"],  # removed with the per-listener CAs (ADR 0031 amendment)
     ],
 )
 def test_bad_options_are_usage_errors_and_write_nothing(
@@ -175,19 +247,27 @@ def test_default_out_is_pki_in_the_working_directory(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["pki", "init"]) == EXIT_OK
-    assert (tmp_path / "pki" / "ca.crt").is_file()
+    assert (tmp_path / "pki" / "edge-gateway" / "listener.crt").is_file()
+    assert (tmp_path / "pki" / "api" / "to-edge-gateway.crt").is_file()
     assert "pki" in capsys.readouterr().out
 
 
 def test_initialize_pki_dedupes_san_names_and_keeps_order(tmp_path: Path) -> None:
     result = initialize_pki(
-        tmp_path / "p", ("api",), ("localhost", "api", "x.internal"), ("127.0.0.1",), 90
+        tmp_path / "p",
+        ("edge-gateway",),
+        ("localhost", "edge-gateway", "x.internal"),
+        ("127.0.0.1",),
+        90,
     )
-    assert [service for service, _fp in result.services] == ["api"]
-    leaf = load_certificate(tmp_path / "p" / "api.crt")
-    sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-    assert sans.get_values_for_type(x509.DNSName) == ["api", "localhost", "x.internal"]
-    assert [str(ip) for ip in sans.get_values_for_type(x509.IPAddress)] == ["127.0.0.1"]
+    assert [listener for listener, _fp in result.cas] == ["edge-gateway"]
+    leaf = load_certificate(tmp_path / "p" / "edge-gateway" / "listener.crt")
+    assert _sans(leaf).get_values_for_type(x509.DNSName) == [
+        "edge-gateway",
+        "localhost",
+        "x.internal",
+    ]
+    assert [str(ip) for ip in _sans(leaf).get_values_for_type(x509.IPAddress)] == ["127.0.0.1"]
 
 
 def test_help_lists_the_options_and_no_longer_says_it_is_a_stub(
@@ -196,62 +276,8 @@ def test_help_lists_the_options_and_no_longer_says_it_is_a_stub(
     monkeypatch.setenv("COLUMNS", "200")
     assert main(["pki", "init", "--help"]) == EXIT_OK
     out = capsys.readouterr().out
-    for option in ("--out", "--services", "--dns", "--ip", "--days"):
+    for option in ("--out", "--services", "--dns", "--ip", "--days", "--ca-key-dir"):
         assert option in out
+    assert "--layout" not in out
     assert "Arrives in" not in out
     assert "(spec 14.4)" in out
-
-
-def _role_uris(leaf: x509.Certificate) -> list[str]:
-    sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-    return sans.get_values_for_type(x509.UniformResourceIdentifier)
-
-
-def test_service_certificates_carry_their_role(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """ADR 0031: a service named like a role gets that role; any other service gets none."""
-    out = tmp_path / "pki"
-    assert main(["pki", "init", "--out", str(out), "--services", "edge-gateway,batch-tool"]) == 0
-    assert _role_uris(load_certificate(out / "edge-gateway.crt")) == ["urn:carto:role:edge-gateway"]
-    assert _role_uris(load_certificate(out / "batch-tool.crt")) == []
-    printed = capsys.readouterr().out
-    assert "role edge-gateway" in printed
-    assert "batch-tool.crt" in printed and "no role" in printed
-
-
-def test_per_service_layout_gives_each_service_only_its_own_key(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    out = tmp_path / "pki"
-    ca_dir = tmp_path / "pki-ca"
-    argv = [
-        "pki",
-        "init",
-        "--out",
-        str(out),
-        "--ca-key-dir",
-        str(ca_dir),
-        "--layout",
-        "per-service",
-        "--services",
-        "ingest-api,edge-gateway,otel-collector",
-        "--if-missing",
-    ]
-    assert main(argv) == EXIT_OK
-    assert _files(out) == {"ingest-api", "edge-gateway", "otel-collector"}
-    assert _files(ca_dir) == {"ca.crt", "ca.key"}
-    ca = load_certificate(ca_dir / "ca.crt")
-    for service in ("ingest-api", "edge-gateway", "otel-collector"):
-        folder = out / service
-        assert _files(folder) == {"tls.crt", "tls.key", "ca.crt"}
-        assert (folder / "ca.crt").read_bytes() == (ca_dir / "ca.crt").read_bytes()
-        leaf = load_certificate(folder / "tls.crt")
-        _signed_by(leaf, ca)
-        assert _role_uris(leaf) == [f"urn:carto:role:{service}"]
-        load_private_key(folder / "tls.key")
-    assert "edge-gateway/tls.crt" in capsys.readouterr().out
-    assert main(argv) == EXIT_OK  # complete: the Compose job's second start writes nothing
-    assert "nothing written" in capsys.readouterr().out
-    (out / "otel-collector" / "ca.crt").unlink()
-    assert main(argv) == EXIT_FAILURE  # partial: refused, keys untouched

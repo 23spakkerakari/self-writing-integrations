@@ -51,11 +51,12 @@ step-up for reveal).
     resolved at use (`vault://` against Vault KV v2; `local://` against the KMS-wrapped
     `secrets.sqlite`); the edge audit file (`audit.ndjson`, hash-chained; ADR 0014); the internal
     service keys, each in its own Compose volume mounted only by its service (ADR 0031), and the
-    CA key in the separate `pki-ca` volume that only the `pki-init` job mounts; the analyzer's state directory, as
+    listener CA keys in the separate `pki-ca` volume that only the `pki-init` job mounts; the analyzer's state directory, as
     sensitive as an installed edge (ADR 0025).
   - *Trust boundary changes:* collector to `edge-gateway` over mutual TLS (OTLP/HTTP, client
-    certificate from the install CA with the `otel-collector` or `collector` role, ADR 0031);
-    `edge-gateway` to `ingest-api` over mutual TLS (role `edge-gateway`; TLS 1.2
+    certificate from the edge-gateway CA with the `otel-collector` or `collector` role, ADR
+    0031); `edge-gateway` to `ingest-api` over mutual TLS (client certificate from the ingest-api
+    CA, role `edge-gateway`; each listener trusts only its own CA; TLS 1.2
     floor, client certificate required; `carto_core.ingest.server`); core to edge through
     `/internal/tokenize` and `/internal/reveal`, which accept only Ed25519-signed internal
     assertions (audience, permission, purpose, nonce, at most 5 minutes; plan decision 13;
@@ -103,7 +104,8 @@ step-up for reveal).
     and the reveal rate-limit windows are in memory and reset on a gateway restart (see
     `carto_edge.reveal`); MySQL and SQL Server connect by name after validation, leaving a
     rebinding window (ADR 0018); the listeners trust the role a certificate names, so whoever
-    holds the CA key (the `pki-ca` volume, the operator) can issue any role; webhook replay protection depends on
+    holds a listener's CA key (the `pki-ca` volume, the operator) can issue any role for that
+    listener; webhook replay protection depends on
     the sender's timestamp header; the Vault address is an operator setting and does not pass the
     SSRF policy (`carto_edge.secrets`); certificate rotation is manual until M6; the full
     gateway path measured 2,398 to 3,600 events/s in one process on a development laptop, above

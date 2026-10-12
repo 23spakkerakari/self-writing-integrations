@@ -1,24 +1,30 @@
-"""``carto-ctl pki init``: the private CA and per-service certificates for Compose (spec 14.4).
+"""``carto-ctl pki init``: a CA per listener and the services' certificates (spec 14.4; ADR 0031).
 
-Writes ``ca.crt`` and ``<service>.crt``/``<service>.key`` for every service into ``--out``
-(default ``./pki``) and ``ca.key`` into ``--ca-key-dir`` (default: ``--out``). Keeping the CA key
-in a directory no running service mounts means a compromised service cannot mint certificates
-(spec 14.4, 15); the Compose stack puts it on its own volume that only ``pki-init`` sees. Each
-leaf allows server and client authentication, so the same pair serves a listener and
-authenticates it as a client of another service, and carries SANs for the service name,
-``localhost`` and any ``--dns``/``--ip`` given. Keys are written with owner-only permissions and
-never overwritten: a directory holding any of the keys this run would write is refused before
-anything is touched. With ``--if-missing`` a complete earlier run (every file this run would
-write is present) is a success that writes nothing, which is what a Compose one-shot job needs
-on its second start; a partial one is still refused. The output lists certificate fingerprints
-only. Kubernetes installs use cert-manager instead (M6).
+Each listener named in ``--services`` (:data:`LISTENER_CLIENTS`: ``ingest-api``, ``edge-gateway``)
+gets its own CA. That CA signs the listener's server certificate and the client certificates of
+the services allowed to call it, and the listener trusts nothing else, so a caller meant for
+another listener is refused during the TLS handshake. Every certificate also names its service
+role (``urn:carto:role:<service>`` when the name is one of :data:`carto_common.mtls.ROLES`), which
+each listener checks per route. A service whose name is not a role (a scraper) gets a client
+certificate without one for every listener: enough for health and metrics.
 
-A service whose name is a known role (:data:`carto_common.mtls.ROLES`: ``edge-gateway``,
-``ingest-api``, ``otel-collector``, ``api``, ...) gets that role in a ``urn:carto:role:`` URI SAN;
-the listeners accept a route only from the roles it lists (ADR 0031). With ``--layout
-per-service`` each service gets its own directory, ``<out>/<service>/`` with ``tls.crt``,
-``tls.key`` and ``ca.crt``, so a deployment can give each service only its own key (Compose
-mounts one volume per directory); the CA certificate is also written next to ``ca.key``.
+Each service gets a directory ``<out>/<service>/`` holding only what it needs, so a deployment can
+give each service only its own keys (Compose mounts one volume per directory):
+
+- ``listener.crt``, ``listener.key``, ``listener-ca.crt``: a listener's server certificate (also a
+  client certificate for its own health route) and the CA it trusts for its callers;
+- ``to-<listener>.crt``, ``to-<listener>.key``, ``to-<listener>-ca.crt``: the client certificate
+  for calling ``<listener>`` and that listener's CA, to verify the server.
+
+The CA keys and certificates go to ``--ca-key-dir`` (default ``--out``) as ``<listener>-ca.key``
+and ``<listener>-ca.crt``; keeping them where no running service mounts means a compromised
+service cannot mint certificates (spec 14.4, 15). Server certificates carry SANs for the service
+name, ``localhost`` and any ``--dns``/``--ip`` given. Keys are written with owner-only permissions
+and never overwritten: a directory holding any key this run would write is refused before
+anything is touched. With ``--if-missing`` a complete earlier run (every file this run would write
+is present) is a success that writes nothing, which is what a Compose one-shot job needs on its
+second start; a partial one is still refused. The output lists certificate fingerprints only.
+Kubernetes installs use cert-manager with one issuer per listener instead (M6).
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from typing import TYPE_CHECKING, Final
 from carto_common.mtls import ROLES
 from carto_common.pki import (
     LEAF_VALID_DAYS,
+    CertificatePair,
     PkiError,
     certificate_fingerprint,
     create_ca,
@@ -49,8 +56,9 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_OUT",
     "DEFAULT_SERVICES",
-    "LAYOUTS",
+    "LISTENER_CLIENTS",
     "MAX_DAYS",
+    "IssuedFile",
     "PkiInitResult",
     "configure_pki_init",
     "initialize_pki",
@@ -60,8 +68,12 @@ __all__ = [
 
 DEFAULT_SERVICES: Final[tuple[str, ...]] = ("edge-gateway", "ingest-api", "otel-collector", "api")
 DEFAULT_OUT: Final = Path("pki")
-LAYOUTS: Final = ("flat", "per-service")
 MAX_DAYS: Final = 3650
+LISTENER_CLIENTS: Final[dict[str, tuple[str, ...]]] = {
+    "ingest-api": ("edge-gateway",),
+    "edge-gateway": ("otel-collector", "collector", "proxy", "api"),
+}
+"""Each listener and the roles its CA signs client certificates for (ADR 0031)."""
 _SERVICE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _DNS_PATTERN: Final = re.compile(
     r"^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*$"
@@ -69,15 +81,23 @@ _DNS_PATTERN: Final = re.compile(
 
 
 @dataclass(frozen=True, slots=True)
+class IssuedFile:
+    """One certificate written: its path under ``--out``, fingerprint and role."""
+
+    path: str
+    fingerprint: str
+    role: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PkiInitResult:
     out: Path
-    ca_fingerprint: str
-    services: tuple[tuple[str, str], ...]
-    """``(service, certificate fingerprint)`` in the order written."""
+    cas: tuple[tuple[str, str], ...]
+    """``(listener, CA certificate fingerprint)`` in the order written."""
+    certificates: tuple[IssuedFile, ...]
     san_names: tuple[str, ...]
     san_addresses: tuple[str, ...]
     days: int
-    layout: str = "flat"
 
 
 def _service_list(text: str) -> tuple[str, ...]:
@@ -124,13 +144,13 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
         "--out",
         type=Path,
         default=DEFAULT_OUT,
-        help=f"Directory to write into (default {DEFAULT_OUT})",
+        help=f"Directory to write the per-service directories into (default {DEFAULT_OUT})",
     )
     parser.add_argument(
         "--ca-key-dir",
         type=Path,
         default=None,
-        help="Directory for ca.key, kept away from the services (default: --out)",
+        help="Directory for the listener CAs' keys, kept away from the services (default: --out)",
     )
     parser.add_argument(
         "--if-missing",
@@ -150,7 +170,7 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
         type=_dns_name,
         default=[],
         metavar="NAME",
-        help="Extra DNS SAN on every service certificate (repeatable)",
+        help="Extra DNS SAN on every listener certificate (repeatable)",
     )
     parser.add_argument(
         "--ip",
@@ -158,14 +178,7 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
         type=_ip_address,
         default=[],
         metavar="ADDR",
-        help="Extra IP SAN on every service certificate (repeatable)",
-    )
-    parser.add_argument(
-        "--layout",
-        choices=LAYOUTS,
-        default="flat",
-        help="flat: <service>.crt/.key and ca.crt in --out; per-service: <out>/<service>/"
-        "tls.crt, tls.key and ca.crt, one directory per service (default flat)",
+        help="Extra IP SAN on every listener certificate (repeatable)",
     )
     parser.add_argument(
         "--days",
@@ -175,39 +188,78 @@ def configure_pki_init(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _service_paths(out: Path, service: str, layout: str) -> tuple[Path, Path, Path | None]:
-    """The certificate, key and (per-service layout only) CA certificate paths of a service."""
-    if layout == "per-service":
-        folder = out / service
-        return folder / "tls.crt", folder / "tls.key", folder / "ca.crt"
-    return out / f"{service}.crt", out / f"{service}.key", None
+@dataclass(frozen=True, slots=True)
+class _Plan:
+    """What one run writes: the listener CAs and, per service, the listener it serves (if
+    any) and the listeners it calls."""
+
+    listeners: tuple[str, ...]
+    calls: dict[str, tuple[str, ...]]
 
 
-def _ca_certificate_path(out: Path, ca_key_dir: Path, layout: str) -> Path:
-    return ca_key_dir / "ca.crt" if layout == "per-service" else out / "ca.crt"
-
-
-def _planned_files(
-    out: Path, ca_key_dir: Path, services: tuple[str, ...], layout: str = "flat"
-) -> list[Path]:
-    files = [_ca_certificate_path(out, ca_key_dir, layout), ca_key_dir / "ca.key"]
+def _plan(services: tuple[str, ...]) -> _Plan:
+    if not services:
+        msg = "at least one service is required"
+        raise PkiError(msg)
+    listeners = tuple(service for service in services if service in LISTENER_CLIENTS)
+    calls: dict[str, tuple[str, ...]] = {}
     for service in services:
-        certificate, key, ca_copy = _service_paths(out, service, layout)
-        files.extend((certificate, key))
-        if ca_copy is not None:
-            files.append(ca_copy)
-    return files
+        if service in ROLES:
+            targets = tuple(
+                listener
+                for listener in listeners
+                if listener != service and service in LISTENER_CLIENTS[listener]
+            )
+        else:
+            targets = tuple(listener for listener in listeners if listener != service)
+        if not targets and service not in listeners:
+            msg = (
+                f"{service} serves no listener and calls none of the listeners in --services "
+                f"({', '.join(listeners) or 'none'})"
+            )
+            raise PkiError(msg)
+        calls[service] = targets
+    return _Plan(listeners=listeners, calls=calls)
 
 
-def pki_complete(
-    out: Path,
-    services: tuple[str, ...],
-    ca_key_dir: Path | None = None,
-    layout: str = "flat",
-) -> bool:
+def _planned(out: Path, ca_key_dir: Path, plan: _Plan) -> tuple[list[Path], list[Path]]:
+    """Every file a run writes, and the private keys among them."""
+    files: list[Path] = []
+    keys: list[Path] = []
+    for listener in plan.listeners:
+        files.append(ca_key_dir / f"{listener}-ca.crt")
+        keys.append(ca_key_dir / f"{listener}-ca.key")
+        folder = out / listener
+        files.extend((folder / "listener.crt", folder / "listener-ca.crt"))
+        keys.append(folder / "listener.key")
+    for service, targets in plan.calls.items():
+        folder = out / service
+        for target in targets:
+            files.extend((folder / f"to-{target}.crt", folder / f"to-{target}-ca.crt"))
+            keys.append(folder / f"to-{target}.key")
+    return files + keys, keys
+
+
+def pki_complete(out: Path, services: tuple[str, ...], ca_key_dir: Path | None = None) -> bool:
     """True when every file :func:`initialize_pki` would write for ``services`` exists."""
-    key_dir = ca_key_dir if ca_key_dir is not None else out
-    return all(path.is_file() for path in _planned_files(out, key_dir, services, layout))
+    try:
+        plan = _plan(services)
+    except PkiError:
+        return False
+    files, _keys = _planned(out, ca_key_dir if ca_key_dir is not None else out, plan)
+    return all(path.is_file() for path in files)
+
+
+def _record(
+    issued: list[IssuedFile], out: Path, path: Path, pair: CertificatePair, role: str | None
+) -> None:
+    issued.append(
+        IssuedFile(
+            path=path.relative_to(out).as_posix(),
+            fingerprint=certificate_fingerprint(pair.certificate),
+            role=role,
+        )
+    )
 
 
 def initialize_pki(
@@ -218,63 +270,67 @@ def initialize_pki(
     days: int,
     *,
     ca_key_dir: Path | None = None,
-    layout: str = "flat",
     now: dt.datetime | None = None,
 ) -> PkiInitResult:
-    """Create the CA and one server+client pair per service; refuse to overwrite any key."""
-    if not services:
-        msg = "at least one service is required"
-        raise PkiError(msg)
-    if layout not in LAYOUTS:
-        msg = f"layout must be one of {', '.join(LAYOUTS)}"
-        raise PkiError(msg)
+    """Create a CA per listener and every service's certificates; refuse to overwrite any key."""
+    plan = _plan(services)
     key_dir = ca_key_dir if ca_key_dir is not None else out
-    key_paths = [
-        key_dir / "ca.key",
-        *(_service_paths(out, service, layout)[1] for service in services),
-    ]
-    existing = [str(path) for path in key_paths if path.exists()]
+    _files, keys = _planned(out, key_dir, plan)
+    existing = [str(path) for path in keys if path.exists()]
     if existing:
         msg = f"refusing to overwrite existing private key(s): {', '.join(existing)}"
         raise PkiError(msg)
-    ca = create_ca(now=now)
     key_dir.mkdir(parents=True, exist_ok=True)
-    write_pem(ca, _ca_certificate_path(out, key_dir, layout), key_dir / "ca.key")
-    issued: list[tuple[str, str]] = []
-    for service in services:
+    authorities: dict[str, CertificatePair] = {}
+    cas: list[tuple[str, str]] = []
+    issued: list[IssuedFile] = []
+    for listener in plan.listeners:
+        ca = create_ca(f"carto {listener} CA", now=now)
+        write_pem(ca, key_dir / f"{listener}-ca.crt", key_dir / f"{listener}-ca.key")
+        authorities[listener] = ca
+        cas.append((listener, certificate_fingerprint(ca.certificate)))
         names: list[str] = []
-        for name in (service, "localhost", *dns_names):
+        for name in (listener, "localhost", *dns_names):
             if name not in names:
                 names.append(name)
-        leaf = issue_certificate(
+        server = issue_certificate(
             ca,
-            service,
+            listener,
             dns_names=tuple(names),
             ip_addresses=ip_addresses,
-            role=service if service in ROLES else None,
+            role=listener if listener in ROLES else None,
             valid_days=days,
             now=now,
         )
-        certificate_path, key_path, ca_copy = _service_paths(out, service, layout)
-        write_pem(leaf, certificate_path, key_path)
-        if ca_copy is not None:
-            ca_copy.write_bytes(ca.certificate_pem)
-        issued.append((service, certificate_fingerprint(leaf.certificate)))
+        folder = out / listener
+        write_pem(server, folder / "listener.crt", folder / "listener.key")
+        (folder / "listener-ca.crt").write_bytes(ca.certificate_pem)
+        _record(issued, out, folder / "listener.crt", server, listener)
+    for service, targets in plan.calls.items():
+        folder = out / service
+        role = service if service in ROLES else None
+        for target in targets:
+            ca = authorities[target]
+            client = issue_certificate(
+                ca, service, server=False, role=role, valid_days=days, now=now
+            )
+            write_pem(client, folder / f"to-{target}.crt", folder / f"to-{target}.key")
+            (folder / f"to-{target}-ca.crt").write_bytes(ca.certificate_pem)
+            _record(issued, out, folder / f"to-{target}.crt", client, role)
     return PkiInitResult(
         out=out,
-        ca_fingerprint=certificate_fingerprint(ca.certificate),
-        services=tuple(issued),
-        san_names=("<service>", "localhost", *dns_names),
+        cas=tuple(cas),
+        certificates=tuple(issued),
+        san_names=("<listener>", "localhost", *dns_names),
         san_addresses=tuple(ip_addresses),
         days=days,
-        layout=layout,
     )
 
 
 def pki_init(invocation: Invocation) -> int:
     args = invocation.args
     services = tuple(args.services)
-    if args.if_missing and pki_complete(args.out, services, args.ca_key_dir, args.layout):
+    if args.if_missing and pki_complete(args.out, services, args.ca_key_dir):
         invocation.out.write(
             f"PKI already present in {args.out} for {', '.join(services)}; nothing written.\n"
         )
@@ -287,20 +343,19 @@ def pki_init(invocation: Invocation) -> int:
             tuple(args.ip),
             args.days,
             ca_key_dir=args.ca_key_dir,
-            layout=args.layout,
         )
     except (PkiError, OSError) as exc:
         invocation.err.write(f"carto-ctl pki init: {exc}\n")
         return EXIT_FAILURE
     out = invocation.out
-    out.write(f"ca.crt  {result.ca_fingerprint}\n")
-    for service, fingerprint in result.services:
-        role = f"  role {service}" if service in ROLES else "  no role"
-        name = f"{service}/tls.crt" if result.layout == "per-service" else f"{service}.crt"
-        out.write(f"{name}  {fingerprint}{role}\n")
+    for listener, fingerprint in result.cas:
+        out.write(f"{listener} CA  {fingerprint}\n")
+    for issued in result.certificates:
+        role = f"role {issued.role}" if issued.role else "no role"
+        out.write(f"{issued.path}  {issued.fingerprint}  {role}\n")
     sans = ", ".join((*result.san_names, *result.san_addresses))
     out.write(
-        f"wrote {len(result.services)} service certificate pairs valid {result.days} days "
-        f"(SANs: {sans}) and the CA to {result.out}; keep every *.key private.\n"
+        f"wrote {len(result.cas)} listener CAs and {len(result.certificates)} certificates valid "
+        f"{result.days} days (listener SANs: {sans}) to {result.out}; keep every *.key private.\n"
     )
     return EXIT_OK

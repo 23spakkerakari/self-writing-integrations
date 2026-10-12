@@ -1,7 +1,8 @@
 # ADR 0031: Mutual TLS routes accept only the service roles listed for them
 
-Status: accepted by the founder, 2026-10-11 (spec 14.4, 12 "Internal", 15). Built in M1, before
-the push routes (ADR 0032) issue certificates to customer collectors.
+Status: accepted by the founder, 2026-10-11, and amended 2026-10-12 with a CA per listener (see
+the amendment below) (spec 14.4, 12 "Internal", 15). Built in M1, before the push routes (ADR
+0032) issue certificates to customer collectors.
 
 ## Context
 
@@ -68,3 +69,40 @@ holding only its directory, and the CA key stays on its own volume as before.
 - `/internal/tokenize` and `/internal/reveal` keep their own signed assertions (spec 9, the
   reveal service) in addition to the role check.
 - In-process tests wrap the app with the role they act as.
+
+## Amendment, 2026-10-12: a CA per listener, as well as roles
+
+The founder chose both: route roles as above, and a separate CA for each listener.
+
+**One CA per listener.** Each listener (`ingest-api`, `edge-gateway`; core's API from M3) has
+its own CA. It signs that listener's server certificate and the client certificates of the
+services allowed to call it, and the listener trusts only that CA for client certificates. A
+caller signed by another listener's CA is refused during the TLS handshake, before any route is
+read. Who may call which listener is fixed in `carto-ctl`:
+
+| Listener | Its CA signs client certificates for |
+| --- | --- |
+| `ingest-api` | `edge-gateway` |
+| `edge-gateway` | `otel-collector`, `collector`, `proxy`, `api` |
+
+The role checks stay, because one listener serves several callers (the gateway takes OTLP from
+collectors and reveal calls from core's API), and a CA cannot tell its routes apart. Together:
+a certificate issued to a collector on a customer host can never open a connection to
+`ingest-api`, and on the gateway it can call only `/v1/logs` and health.
+
+**Files.** `carto-ctl pki init` always writes one directory per service (the `--layout`
+option is gone):
+
+| File in `<out>/<service>/` | What it is |
+| --- | --- |
+| `listener.crt`, `listener.key` | the service's server certificate, signed by its own listener CA (also usable as a client certificate to its own health route) |
+| `listener-ca.crt` | its listener CA, which it trusts for client certificates |
+| `to-<listener>.crt`, `to-<listener>.key` | its client certificate for calling `<listener>`, signed by that listener's CA, with its role |
+| `to-<listener>-ca.crt` | that listener's CA, to verify the server |
+
+The CA keys are written as `<listener>-ca.key` (with `<listener>-ca.crt`) to `--ca-key-dir`,
+which no running service mounts. Compose keeps one volume per service.
+
+**Consequences.** Two CAs to create and rotate in the Compose stack instead of one (manual until
+M6, when cert-manager runs one issuer per listener). Certificates for collectors on customer
+hosts (ADR 0032) are signed by the `edge-gateway` CA only.

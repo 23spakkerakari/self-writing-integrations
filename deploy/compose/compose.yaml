@@ -8,8 +8,8 @@
 #
 # One-shot jobs run in this order on every `up` and are idempotent:
 #   volumes-init  chowns the named volumes to the carto uid (a new volume is root-owned)
-#   pki-init      carto-ctl pki init --layout per-service --if-missing: one volume per service
-#                 holding only its own key and role certificate (ADR 0031); the CA key goes to
+#   pki-init      carto-ctl pki init --if-missing: a CA per listener and one volume per service
+#                 holding only its own keys and role certificates (ADR 0031); the CA keys go to
 #                 the pki-ca volume, which no running service mounts (spec 14.4)
 #   key-init      carto-ctl key init --if-missing (local KMS; production uses Vault Transit)
 #   migrate       carto-core migrate
@@ -156,8 +156,6 @@ services:
       - /etc/carto/pki-ca
       - --services
       - ingest-api,edge-gateway,otel-collector
-      - --layout
-      - per-service
       - --if-missing
 
   migrate:
@@ -198,9 +196,10 @@ services:
       <<: *core-env
       CARTO_INGEST__HOST: 0.0.0.0
       CARTO_INGEST__PORT: "8443"
-      CARTO_INGEST__TLS_CERT_FILE: /etc/carto/pki/tls.crt
-      CARTO_INGEST__TLS_KEY_FILE: /etc/carto/pki/tls.key
-      CARTO_INGEST__CLIENT_CA_FILE: /etc/carto/pki/ca.crt
+      # Its own listener CA signs its server certificate and the edge gateway's client one.
+      CARTO_INGEST__TLS_CERT_FILE: /etc/carto/pki/listener.crt
+      CARTO_INGEST__TLS_KEY_FILE: /etc/carto/pki/listener.key
+      CARTO_INGEST__CLIENT_CA_FILE: /etc/carto/pki/listener-ca.crt
     secrets: [pg_password, ch_password]
     volumes:
       - pki-ingest-api:/etc/carto/pki:ro
@@ -248,14 +247,15 @@ services:
       CARTO_STATE_DIR: /var/lib/carto
       CARTO_SOURCES_FILE: /etc/carto/sources.yaml
       CARTO_CORE__URL: https://ingest-api:8443
-      CARTO_CORE__CA_FILE: /etc/carto/pki/ca.crt
-      CARTO_CORE__CERT_FILE: /etc/carto/pki/tls.crt
-      CARTO_CORE__KEY_FILE: /etc/carto/pki/tls.key
+      # To ingest-api: a client certificate from the ingest-api CA (ADR 0031).
+      CARTO_CORE__CA_FILE: /etc/carto/pki/to-ingest-api-ca.crt
+      CARTO_CORE__CERT_FILE: /etc/carto/pki/to-ingest-api.crt
+      CARTO_CORE__KEY_FILE: /etc/carto/pki/to-ingest-api.key
       CARTO_GATEWAY__HOST: 0.0.0.0
       CARTO_GATEWAY__PORT: "8443"
-      CARTO_GATEWAY__TLS_CERT_FILE: /etc/carto/pki/tls.crt
-      CARTO_GATEWAY__TLS_KEY_FILE: /etc/carto/pki/tls.key
-      CARTO_GATEWAY__TLS_CLIENT_CA_FILE: /etc/carto/pki/ca.crt
+      CARTO_GATEWAY__TLS_CERT_FILE: /etc/carto/pki/listener.crt
+      CARTO_GATEWAY__TLS_KEY_FILE: /etc/carto/pki/listener.key
+      CARTO_GATEWAY__TLS_CLIENT_CA_FILE: /etc/carto/pki/listener-ca.crt
       CARTO_KMS__PROVIDER: local
     volumes:
       - edge-state:/var/lib/carto
