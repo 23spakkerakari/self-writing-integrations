@@ -43,5 +43,8 @@ import, lint or test it.
   after CI is green.
 - M1 Edge pipeline and offline analyzer: built on branch `m1-edge-pipeline` on 2026-10-10
   (docs/plans/M1.md, ADRs 0011 to 0032); CI green. Throughput met on the laptop's full gateway path
-  (ADR 0028); acceptance waits on the founder (reference-node run, questions in the demo note). Next, once accepted: M2 map discovery (write
-  docs/plans/M2.md first).
+  (ADR 0028); acceptance waits on the founder (reference-node run, questions in the demo note)
+  and on the `m1-review-fixes` branch (docs/plans/M1-review-fixes.md, ADRs 0033 to 0045).
+- M2 Map discovery: plan drafted on branch `m2-map-discovery` on 2026-10-12 (docs/plans/M2.md).
+  Code starts after M1 acceptance and the founder's answers to the plan's questions; ADRs from
+  0046.
