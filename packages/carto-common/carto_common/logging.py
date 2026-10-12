@@ -14,8 +14,9 @@ Rules, in the order :func:`redact` applies them to every event (key names first,
 1. **Secret-named keys** keep the key and replace the value with ``[REDACTED]``, whatever its
    type. The name is lower-cased and split into segments on ``_``, ``-``, ``.``, whitespace,
    camelCase and letter-digit boundaries. The key matches when any segment is one of
-   ``password``, ``passwd``, ``secret``, ``token``, ``apikey``, ``authorization``, ``cookie``,
-   ``session``, ``bearer`` or ``credential`` (singular or plural), or when two adjacent segments
+   ``password``, ``passwd``, ``passphrase``, ``pass``, ``pwd``, ``secret``, ``token``,
+   ``apikey``, ``authorization``, ``auth``, ``cookie``, ``session``, ``bearer``, ``credential``,
+   ``signature`` or ``sig`` (singular or plural), or when two adjacent segments
    are ``api key``, ``private key``, ``client secret`` or ``access key``, unless the last
    segment is a qualifier naming a count, a reference or a property rather than the value
    itself (:data:`SECRET_KEY_QUALIFIERS`: ``count``, ``ref``, ``name``, ``type``, ``ttl`` and
@@ -37,7 +38,8 @@ Rules, in the order :func:`redact` applies them to every event (key names first,
    characters of ``[A-Za-z0-9+/=_-]`` with at least three of the classes upper, lower, digit
    and other, and Shannon entropy of at least 3.5 bits per character) -> ``[HIGH_ENTROPY]``; a
    secret word followed by ``=`` or ``:`` and a value in free text (``password=hunter2``,
-   ``Authorization: Basic ...``, ``?token=...&``) -> the value becomes ``[REDACTED]`` unless an
+   ``Authorization: Basic ...``, ``?token=...&``, ``{"password": "..."}``, ``;PWD=...;``) -> the
+   value becomes ``[REDACTED]`` unless an
    earlier rule already masked it (``token=[JWT]`` and ``secret=[HIGH_ENTROPY]`` stay); lower-case
    hex runs of eight or more characters holding both a letter and a digit (UUIDs, content hashes,
    the simulator's ``mk<8 hex>`` leak markers of spec 18.3) -> their shape; and
@@ -175,6 +177,12 @@ _SECRET_WORDS: Final = (
     "session",
     "bearer",
     "credential",
+    "pwd",
+    "passphrase",
+    "pass",
+    "auth",
+    "signature",
+    "sig",
 )
 SECRET_KEY_WORDS: Final = frozenset(_SECRET_WORDS) | frozenset(f"{word}s" for word in _SECRET_WORDS)
 """Key segments that mark a key as holding a secret (spec 8.3 name hints plus session ids)."""
@@ -203,6 +211,7 @@ SECRET_KEY_QUALIFIERS: Final = frozenset(
         "expires",
         "expiry",
         "ttl",
+        "scheme",
     }
 )
 """Last segments that make a secret-named key describe the secret rather than hold it."""
@@ -288,14 +297,22 @@ _CARTO_TOKEN: Final = re.compile(r"t[0-9]{1,4}\.[A-Za-z0-9_-]{22}")
 _AWS_KEY: Final = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
 # scheme://user:password@host -> the password only; the user name helps the operator.
 _URL_USERINFO: Final = re.compile(r"(?<=://)([^/\s@:]+):([^/\s@]+)(?=@)")
-# password=..., api-key: ..., Authorization: Basic ..., ?token=...&: the value after the secret
-# word, up to whitespace or a separator (or a whole quoted string). "token_count=3" and
-# "secret_ref=vault://x" do not match because "_" follows the word, not "=" or ":"; a value that
-# an earlier rule already turned into a mask ("token=[JWT]") keeps the more specific mask.
+# password=..., api-key: ..., Authorization: Basic ..., ?token=...&, {"password": "..."},
+# ;PWD={...};: the value after the secret word, up to whitespace or a separator (or a whole
+# quoted or braced string). The word may be closed by a quote, escaped or not, before the
+# separator, so JSON objects and Python reprs match. "token_count=3" and "secret_ref=vault://x"
+# do not match because "_" follows the word, not "=" or ":". The short words pwd, pass, auth and
+# sig must start a word or a camelCase hump ("dbPass=", not "bypass=" or "oauth="). A value that
+# an earlier rule already turned into a mask ("token=[JWT]") keeps the more specific mask. Every
+# quantifier is either bounded or stops at a fixed character, so the scan stays linear on
+# attacker-written text (spec 2.3 invariant 8).
 _SECRET_ASSIGNMENT: Final = re.compile(
-    r"(?i)((?:api|private|access)[\s_.-]?key|client[\s_.-]?secret|password|passwd|secret|token"
-    r"|authorization|cookie|session|bearer|credentials?)(\s*[=:]\s*)(?!\[[A-Z_]+\])"
-    r"""(?:(?:basic|bearer|digest)\s+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s,;&]+)"""
+    r"(?i)((?:api|private|access)[\s_.-]?key|client[\s_.-]?secret|password|passwd|passphrase"
+    r"|secret|token|authorization|cookie|session|bearer|credentials?|signature"
+    r"|(?<![A-Za-z])(?:pwd|pass|auth|sig)|(?-i:(?<=[a-z0-9])(?:P(?i:wd|ass)|A(?i:uth)|S(?i:ig))))"
+    r"""(\\?["']?[ \t]{0,16}[=:][ \t]{0,16})(?!\\?["']?\[[A-Z_]+\])"""
+    r"""(?:(?:basic|bearer|digest)[ \t]{1,16})?"""
+    r"""(?:\\"[^"\n]*\\"|"[^"\n]*"|'[^'\n]*'|\{[^}\n]*\}|[^\s,;&]+)"""
 )
 # The look-behind stops a DSN user name (postgres://carto@db.internal) from reading as a mailbox.
 _EMAIL: Final = re.compile(r"(?<![\w.%+/-])[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w-])")
