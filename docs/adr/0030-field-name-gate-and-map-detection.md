@@ -70,10 +70,20 @@ input.
   the detector does not flag, travels as a name until the parent becomes a map. That residual
   is accepted; the leak test plants name-keyed maps and recurring keys.
 - Throughput: the gate costs about 6 microseconds per record once names are trusted (about 4%
-  of pass 2 under the profiler). A gateway benchmark against the commit before the gate is
-  still to be run on mains power (the first attempt measured the same code twice and is
-  withdrawn). Each name's first PII check also loads the spaCy model earlier than before (once
-  per process).
+  of pass 2 under the profiler). `make bench-gateway`, alternating between the commit before
+  the gate (806b37c, its own environment) and the gate, 20 s each, on 2026-10-12:
+
+  | Core | Before the gate (events/s) | With the gate (events/s) |
+  | --- | --- | --- |
+  | Performance, 4 pairs | 2,795, 3,648, 3,579, 3,203 (mean 3,306) | 3,102, 3,386, 2,550, 3,155 (mean 3,048) |
+  | Efficiency, 2 pairs | 2,050, 1,136 | 2,016, 1,128 |
+
+  Within a pair the difference is a few per cent; between pairs the laptop's load moved the
+  figures far more (it had just come back to mains power from 3% charge, and another session
+  was running). The efficiency-core figures are below ADR 0028's 2,398 for both builds, so the
+  slow-core margin is not established under these conditions; the reference-node run decides.
+  Each name's first PII check also loads the spaCy model earlier than before (once per
+  process).
 - Scenario A analyzer: no emitted event carries a masked name; fields and policies are
   unchanged (`fields.json` also lists fields seen only in pass 1, under `*`).
 - `make eval` deltas are reported in the PR (M1: no engine output yet).
