@@ -38,9 +38,11 @@ from carto_core.ingest.app import create_app
 from carto_core.ingest.health import PostgresSourceHealthStore, SourceHealthRecord
 from carto_core.ingest.ledger import PostgresBatchLedger
 from carto_core.migrations import (
+    MIGRATION_LOCK_KEY,
     apply_clickhouse_migrations,
     apply_postgres_migrations,
     apply_retention,
+    migration_lock,
 )
 from carto_core.settings import ClickHouseSettings, CoreSettings, PostgresSettings
 from carto_edge.cli.analyze import analyze
@@ -305,6 +307,22 @@ def test_postgres_migrations_apply_idempotently(postgres: PostgresSettings) -> N
         assert "sent_at" in health_columns
     finally:
         engine.dispose()
+
+
+def test_the_migration_lock_excludes_a_second_migrate_run(postgres: PostgresSettings) -> None:
+    engine = create_engine_from_settings(postgres)
+    other = create_engine_from_settings(postgres)
+    probe = sqlalchemy.text("SELECT pg_try_advisory_lock(:key)")
+    release = sqlalchemy.text("SELECT pg_advisory_unlock(:key)")
+    try:
+        with migration_lock(engine), other.connect() as connection:
+            assert connection.execute(probe, {"key": MIGRATION_LOCK_KEY}).scalar_one() is False
+        with other.connect() as connection:
+            assert connection.execute(probe, {"key": MIGRATION_LOCK_KEY}).scalar_one() is True
+            connection.execute(release, {"key": MIGRATION_LOCK_KEY})
+    finally:
+        engine.dispose()
+        other.dispose()
 
 
 def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
