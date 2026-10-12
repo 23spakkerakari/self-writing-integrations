@@ -83,6 +83,7 @@ character classes is hidden only when its key, URL position or ``key=value`` con
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import enum
@@ -91,9 +92,12 @@ import logging
 import math
 import re
 import sys
+import threading
+import warnings
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from types import TracebackType
 from typing import Any, Final, TextIO, cast
 
 import structlog
@@ -122,6 +126,7 @@ __all__ = [
     "SECRET_KEY_QUALIFIERS",
     "SECRET_KEY_WORDS",
     "TOKEN_MASK",
+    "WARNINGS_LOGGER",
     "configure_logging",
     "get_logger",
     "identifier_shape",
@@ -310,7 +315,7 @@ _SECRET_ASSIGNMENT: Final = re.compile(
     r"(?i)((?:api|private|access)[\s_.-]?key|client[\s_.-]?secret|password|passwd|passphrase"
     r"|secret|token|authorization|cookie|session|bearer|credentials?|signature"
     r"|(?<![A-Za-z])(?:pwd|pass|auth|sig)|(?-i:(?<=[a-z0-9])(?:P(?i:wd|ass)|A(?i:uth)|S(?i:ig))))"
-    r"""(\\?["']?[ \t]{0,16}[=:][ \t]{0,16})(?!\\?["']?\[[A-Z_]+\])"""
+    r"""(\\?["']?[ \t]{0,16}[=:][ \t]{0,16}|[ \t]{1,16}(?=\\?["']))(?!\\?["']?\[[A-Z_]+\])"""
     r"""(?:(?:basic|bearer|digest)[ \t]{1,16})?"""
     r"""(?:\\"[^"\n]*\\"|"[^"\n]*"|'[^'\n]*'|\{[^}\n]*\}|[^\s,;&]+)"""
 )
@@ -612,6 +617,109 @@ class _RootHandler(logging.StreamHandler[TextIO]):
         super().emit(record)
 
 
+_HOOK_MARK: Final = "_carto_redacting_hook"
+WARNINGS_LOGGER: Final = "py.warnings"
+"""Logger name of Python warnings, as ``logging.captureWarnings`` uses."""
+
+_ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
+
+
+def _log_exception(event: str, exc_info: _ExcInfo, **fields: object) -> None:
+    """Log ``exc_info`` at CRITICAL through the processor chain; never raise from a hook."""
+    with contextlib.suppress(Exception):  # never fall back to printing the raw traceback
+        get_logger().critical(event, exc_info=exc_info, **fields)
+
+
+def _show_warning(
+    message: Warning | str,
+    category: type[Warning],
+    filename: str,
+    lineno: int,
+    file: TextIO | None = None,
+    line: str | None = None,
+) -> None:
+    """``warnings.showwarning`` replacement: the warning goes to the root logger, redacted."""
+    del file, line  # the source line adds nothing an operator needs; files are never written
+    logging.getLogger(WARNINGS_LOGGER).warning(
+        "%s:%s: %s: %s", filename, lineno, category.__name__, message
+    )
+
+
+def _is_ours(hook: object) -> bool:
+    return bool(getattr(hook, _HOOK_MARK, False))
+
+
+def _sys_hook(
+    previous: Callable[[type[BaseException], BaseException, TracebackType | None], object] | None,
+) -> Callable[[type[BaseException], BaseException, TracebackType | None], None]:
+    def hook(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
+        _log_exception("uncaught exception", (kind, value, tb))
+        if previous is not None:
+            previous(kind, value, tb)
+
+    setattr(hook, _HOOK_MARK, True)
+    return hook
+
+
+def _thread_hook(
+    previous: Callable[[threading.ExceptHookArgs], object] | None,
+) -> Callable[[threading.ExceptHookArgs], None]:
+    def hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_value is not None:
+            thread = args.thread.name if args.thread is not None else None
+            _log_exception(
+                "uncaught exception in thread",
+                (args.exc_type, args.exc_value, args.exc_traceback),
+                thread=thread,
+            )
+        if previous is not None:
+            previous(args)
+
+    setattr(hook, _HOOK_MARK, True)
+    return hook
+
+
+def _unraisable_hook(
+    previous: Callable[[Any], object] | None,
+) -> Callable[[Any], None]:
+    def hook(args: Any) -> None:
+        if args.exc_value is not None:
+            _log_exception(
+                "unraisable exception",
+                (args.exc_type, args.exc_value, args.exc_traceback),
+                detail=args.err_msg,
+                object_type=type(args.object).__name__,
+            )
+        if previous is not None:
+            previous(args)
+
+    setattr(hook, _HOOK_MARK, True)
+    return hook
+
+
+def _install_hooks() -> None:
+    """Route warnings and uncaught exceptions through :func:`redact` (spec 2.3 invariant 7).
+
+    The interpreter's defaults print the raw message and traceback to stderr, so they are
+    replaced, never called. A hook someone else installed before (a test runner's) is kept and
+    called after logging. Installing twice changes nothing.
+    """
+    warnings.showwarning = _show_warning
+    if not _is_ours(sys.excepthook):
+        previous = None if sys.excepthook is sys.__excepthook__ else sys.excepthook
+        sys.excepthook = _sys_hook(previous)
+    if not _is_ours(threading.excepthook):
+        previous_thread = (
+            None if threading.excepthook is threading.__excepthook__ else threading.excepthook
+        )
+        threading.excepthook = _thread_hook(previous_thread)
+    if not _is_ours(sys.unraisablehook):
+        previous_unraisable = (
+            None if sys.unraisablehook is sys.__unraisablehook__ else sys.unraisablehook
+        )
+        sys.unraisablehook = _unraisable_hook(previous_unraisable)
+
+
 def configure_logging(
     service: str,
     level: str = "INFO",
@@ -636,6 +744,11 @@ def configure_logging(
     configure their own handlers must be told not to (uvicorn: ``log_config=None``). The HTTP
     client loggers of :data:`QUIET_LIBRARY_LOGGERS` are held at WARNING because their INFO lines
     carry request URLs and query strings.
+
+    Python warnings are logged as WARNING records of the :data:`WARNINGS_LOGGER` logger, and
+    uncaught exceptions (main thread, other threads, and the "exception ignored" path of
+    ``sys.unraisablehook``) as CRITICAL events with their traceback, all through :func:`redact`
+    instead of the interpreter's raw stderr output (ADR 0040).
     """
     level_name = level.strip().lower()
     if level_name not in _LEVELS:
@@ -674,6 +787,7 @@ def configure_logging(
     root.setLevel(_LEVELS[level_name])
     for name in QUIET_LIBRARY_LOGGERS:
         logging.getLogger(name).setLevel(max(logging.WARNING, _LEVELS[level_name]))
+    _install_hooks()
 
 
 def get_logger(**initial_values: Any) -> FilteringBoundLogger:
