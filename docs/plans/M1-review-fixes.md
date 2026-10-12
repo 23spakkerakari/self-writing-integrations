@@ -1,6 +1,6 @@
 # M1 review fixes
 
-Status: in progress on branch `m1-review-fixes` (cut from `m1-edge-pipeline` at 4c79b79),
+Status: in progress on branch `m1-review-fixes` (rebased on `m1-edge-pipeline` at eb57b02),
 started 2026-10-12.
 Source: a staff-level review of M1 on 2026-10-11 (bugs, leaks, weak architecture), with the
 founder's decisions of 2026-10-11 and 2026-10-12. M1 acceptance waits on this work.
@@ -22,9 +22,9 @@ each leak.
 | Source queries are checked against allowlists, not denylists (SQL Server statements, Splunk commands and capabilities, MySQL grants through roles) | 0037 |
 | Least-privilege database users stay in M6 | none (spec 21 M6) |
 
-Not in this plan: the per-listener certificate authorities the founder asked for on
-2026-10-12 overlap ADR 0031 (service roles on mutual TLS routes), which another session is
-building on `m1-edge-pipeline`. The founder decides how the two combine before any code.
+Not in this plan: certificate authorities. On 2026-10-12 the founder chose both a CA per
+listener and ADR 0031's route roles. Another session builds it on `m1-edge-pipeline` as an
+amendment to ADR 0031; this branch does not touch PKI or mutual TLS code.
 
 ## Work packages
 
