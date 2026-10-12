@@ -45,6 +45,19 @@ identifiers as strings, which nothing enforced.
   argument) and JSON embedded in a message match. Braced ODBC values (`PWD={...}`) are masked
   whole. Every quantifier is bounded or stops at a fixed character, and a test holds the scan
   linear on 100,000-character adversarial lines.
+- A quoted value directly after a secret word counts as its value (`with secret "..."`).
+
+### Warnings and uncaught exceptions are logged, not printed
+
+`configure_logging` replaces `warnings.showwarning` (warnings become `py.warnings` records, as
+`logging.captureWarnings` would make them, without the source line) and installs
+`sys.excepthook`, `threading.excepthook` and `sys.unraisablehook`. Each logs a CRITICAL event with
+the traceback through the processor. The interpreter's defaults print the raw text to stderr, so
+they are replaced and never called; a hook installed by someone else first (pytest installs one
+for threads and one for unraisable exceptions) is called after logging, so a test runner still
+sees the failure. `warnings.showwarning` is replaced directly rather than through
+`logging.captureWarnings`, which installs itself only once per process and would stay pointed at
+a stale function after a test restores the warnings module.
 
 ## Consequences
 

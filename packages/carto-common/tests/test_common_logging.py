@@ -14,6 +14,8 @@ import json
 import logging
 import re
 import sys
+import threading
+import warnings
 from collections.abc import Iterator, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -108,9 +110,11 @@ def clean_structlog() -> Iterator[None]:
     root = logging.getLogger()
     handlers_before = list(root.handlers)
     level_before = root.level
+    hooks_before = (sys.excepthook, threading.excepthook, sys.unraisablehook, warnings.showwarning)
     structlog.reset_defaults()
     structlog.contextvars.clear_contextvars()
     yield
+    sys.excepthook, threading.excepthook, sys.unraisablehook, warnings.showwarning = hooks_before
     structlog.reset_defaults()
     structlog.contextvars.clear_contextvars()
     for handler in list(root.handlers):
@@ -423,6 +427,12 @@ def test_urls_without_userinfo_survive(value: str) -> None:
         (f"GET /blob?sp=r&sig={PLANTED}&se=x", f"GET /blob?sp=r&sig={REDACTED}&se=x"),
         (f"signature: {PLANTED}", f"signature: {REDACTED}"),
         (f"dbPass={PLANTED}", f"dbPass={REDACTED}"),
+        # a quoted value right after the word, no separator
+        (
+            f'login failed for jsmith with secret "{PLANTED}"',
+            f"login failed for jsmith with secret {REDACTED}",
+        ),
+        (f"Password '{PLANTED} x' rejected", f"Password {REDACTED} rejected"),
     ],
 )
 def test_secret_assignments_in_free_text_are_masked(value: str, expected: str) -> None:
@@ -1144,3 +1154,124 @@ def test_get_logger_default_configuration_covers_stdlib_too(
     data = json.loads(out.out)
     assert data["service"] == DEFAULT_SERVICE
     assert data["event"] == f"token={TOKEN_MASK}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Warnings and uncaught exceptions go through the processor too
+# ---------------------------------------------------------------------------------------------
+
+LEAKY_MESSAGE = f"could not parse SO-0004471 with password={PLANTED}"
+
+
+@pytest.fixture
+def interpreter_default_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start from the interpreter's own hooks, as a service process does (not pytest's)."""
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    monkeypatch.setattr(threading, "excepthook", threading.__excepthook__)
+    monkeypatch.setattr(sys, "unraisablehook", sys.__unraisablehook__)
+
+
+def _assert_redacted_only(
+    stream: io.StringIO, captured: pytest.CaptureFixture[str]
+) -> dict[str, Any]:
+    out = captured.readouterr()
+    assert out.err == ""  # nothing bypasses the processor on its way to stderr
+    assert out.out == ""
+    text = stream.getvalue()
+    assert "SO-0004471" not in text
+    assert PLANTED not in text
+    data: dict[str, Any] = json.loads(text.splitlines()[-1])
+    return data
+
+
+def test_python_warnings_are_logged_through_redact(
+    clean_structlog: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn(LEAKY_MESSAGE, UserWarning, stacklevel=1)
+    data = _assert_redacted_only(stream, capsys)
+    assert data["logger"] == "py.warnings"
+    assert data["level"] == "warning"
+    assert "UserWarning" in data["event"]
+    assert f"AA-9999999 with password={REDACTED}" in data["event"]
+
+
+def test_uncaught_exceptions_are_logged_through_redact(
+    clean_structlog: None, interpreter_default_hooks: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+    assert sys.excepthook is not sys.__excepthook__
+    try:
+        raise RuntimeError(LEAKY_MESSAGE)
+    except RuntimeError as exc:
+        sys.excepthook(type(exc), exc, exc.__traceback__)
+    data = _assert_redacted_only(stream, capsys)
+    assert data["level"] == "critical"
+    assert data["event"] == "uncaught exception"
+    assert "RuntimeError" in data["exception"]
+    assert "AA-9999999" in data["exception"]
+
+
+def test_uncaught_thread_exceptions_are_logged_through_redact(
+    clean_structlog: None, interpreter_default_hooks: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+
+    def work() -> None:
+        raise RuntimeError(LEAKY_MESSAGE)
+
+    worker = threading.Thread(target=work, name="SO-0004471-worker")
+    worker.start()
+    worker.join()
+    data = _assert_redacted_only(stream, capsys)
+    assert data["event"] == "uncaught exception in thread"
+    assert data["thread"] == "AA-9999999-AAAAAA"
+    assert "AA-9999999" in data["exception"]
+
+
+def test_unraisable_exceptions_are_logged_through_redact(
+    clean_structlog: None, interpreter_default_hooks: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+
+    class Leaky:
+        def __repr__(self) -> str:
+            return LEAKY_MESSAGE
+
+        def __del__(self) -> None:
+            raise RuntimeError(LEAKY_MESSAGE)
+
+    leaky = Leaky()
+    del leaky  # CPython runs __del__ here and hands its exception to sys.unraisablehook
+    data = _assert_redacted_only(stream, capsys)
+    assert data["event"] == "unraisable exception"
+    assert "object_type" in data
+    assert "AA-9999999" in data["exception"]
+
+
+def test_exception_hooks_chain_to_a_hook_someone_else_installed(
+    clean_structlog: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test runner's hook (pytest's) still sees the exception; the interpreter's never does."""
+    seen: list[type[BaseException]] = []
+
+    def runner_hook(kind: type[BaseException], value: BaseException, tb: object) -> None:
+        del value, tb
+        seen.append(kind)
+
+    monkeypatch.setattr(sys, "excepthook", runner_hook)
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+    configure_logging("edge", stream=stream)  # idempotent: one log line, one chained call
+    try:
+        raise ValueError(LEAKY_MESSAGE)
+    except ValueError as exc:
+        sys.excepthook(type(exc), exc, exc.__traceback__)
+    assert seen == [ValueError]
+    assert len(stream.getvalue().splitlines()) == 1

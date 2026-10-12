@@ -56,6 +56,15 @@ are therefore rendered through `redact` as well and never reach `logging.lastRes
 that install their own handlers must be told not to: start uvicorn with `log_config=None` so its
 `uvicorn.*` loggers propagate to the root.
 
+Python warnings and uncaught exceptions take the same path (ADR 0040). `configure_logging`
+replaces `warnings.showwarning`, so a warning becomes a WARNING record of the `py.warnings`
+logger, and installs `sys.excepthook`, `threading.excepthook` and `sys.unraisablehook`, so an
+uncaught exception, one raised in a thread, and one ignored in `__del__` become CRITICAL events
+(`uncaught exception`, `uncaught exception in thread`, `unraisable exception`) with the traceback
+in `exception`, masked like any other string. The interpreter's default hooks, which print the
+raw message to stderr, are never called; a hook someone else installed first (a test runner's)
+is called after logging.
+
 ### Redaction rules (`redact`, spec 14.12 and 2.3 invariant 7)
 
 Keys are checked first, then every string value, the `event` message and dictionary keys included.
@@ -72,7 +81,7 @@ Value rules run in the order of the table.
 | URL userinfo | `scheme://user:password@host` (the DSNs and SFTP URLs of spec 8.1) | `scheme://user:[REDACTED]@host` |
 | E-mail address | `local@domain.tld`, not preceded by `/` (a DSN user name is not a mailbox) | `[EMAIL]` |
 | High-entropy run | 32 or more characters of `[A-Za-z0-9+/=_-]`, at least three of the classes upper, lower, digit, other, Shannon entropy of at least 3.5 bits per character | `[HIGH_ENTROPY]` |
-| Secret assignment in text | A secret word from the key rule (pairs joined by `_`, `-`, `.` or space) optionally closed by a quote (escaped or not), followed by `=` or `:` and a value: `password=hunter2`, `x-api-key: ...`, `Authorization: Basic ...`, `?token=...&next=`, `{"password": "..."}`, `{'password': '...'}`, `;PWD={...};`. The short words `pwd`, `pass`, `auth` and `sig` must start a word or a camelCase hump (`dbPass=` matches, `bypass=` and `oauth=` do not) | the value becomes `[REDACTED]`; a value an earlier rule masked (`token=[JWT]`) keeps that mask |
+| Secret assignment in text | A secret word from the key rule (pairs joined by `_`, `-`, `.` or space) optionally closed by a quote (escaped or not), followed by `=` or `:` and a value: `password=hunter2`, `x-api-key: ...`, `Authorization: Basic ...`, `?token=...&next=`, `{"password": "..."}`, `{'password': '...'}`, `;PWD={...};`. A quoted value right after the word (`with secret "..."`) counts too. The short words `pwd`, `pass`, `auth` and `sig` must start a word or a camelCase hump (`dbPass=` matches, `bypass=` and `oauth=` do not) | the value becomes `[REDACTED]`; a value an earlier rule masked (`token=[JWT]`) keeps that mask |
 | Hex run | Eight or more lower-case hex characters holding at least one letter and one digit (UUIDs, content hashes, the simulator's `mk<8 hex>` leak markers) | its shape |
 | Identifier-shaped token | A whitespace-delimited token with a run of four or more digits, or four or more digits in total when it also contains `-` or `_` (`88-210`, `X9-0442`), that is not an ISO date (`YYYY-MM-DD`), time or timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z or +hh:mm]`) with real month, day, hour, minute and second ranges | its shape: digits to `9`, letters to `A`, punctuation kept (spec 8.3); mask markers and ULIDs inside the token are kept |
 | Number (ADR 0040) | An `int` or `float` (not `bool`) whose decimal text holds four or more digits, leading zeros not counted, unless the last segment of its own key is a metric qualifier: `count`, `counts`, `attempt`, `attempts`, `retries`, `rows`, `records`, `events`, `batches`, `samples`, `bytes`, `ms`, `seconds`, `second`, `days`, `depth`, `size`, `len`, `length`, `limit`, `port`, `status`, `pid`, `version`, `versions`. The qualifier covers the number directly under the key, not the items of a list | its shape as a string: `customer_id=48812213` logs `"99999999"`, `total=207.81` logs `"999.99"` |
