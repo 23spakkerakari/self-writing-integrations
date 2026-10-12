@@ -130,9 +130,20 @@ def _logger() -> Any:
 # ---------------------------------------------------------------------------------------------
 
 
+def _utf8(text: str) -> tuple[str, bytes]:
+    """``text`` and its UTF-8 bytes; a lone surrogate (which has no UTF-8 form) is replaced by
+    U+FFFD first, so no detector input can raise."""
+    try:
+        return text, text.encode("utf-8")
+    except UnicodeEncodeError:
+        clean = text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+        return clean, clean.encode("utf-8")
+
+
 def truncate_text(text: str) -> str:
-    """Cut ``text`` to :data:`MAX_TEXT_BYTES` UTF-8 bytes without splitting a character."""
-    encoded = text.encode("utf-8")
+    """Cut ``text`` to :data:`MAX_TEXT_BYTES` UTF-8 bytes without splitting a character. A lone
+    surrogate becomes U+FFFD."""
+    text, encoded = _utf8(text)
     if len(encoded) <= MAX_TEXT_BYTES:
         return text
     return encoded[:MAX_TEXT_BYTES].decode("utf-8", errors="ignore")
@@ -222,7 +233,7 @@ def detect_many(detector: PiiDetector, texts: Sequence[str]) -> list[list[PiiHit
         chunk.clear()
 
     for index, text in enumerate(texts):
-        piece = text.encode("utf-8")[:_SAMPLE_MAX_BYTES].decode("utf-8", errors="ignore")
+        piece = _utf8(text)[1][:_SAMPLE_MAX_BYTES].decode("utf-8", errors="ignore")
         size = len(piece.encode("utf-8")) + len(_SEPARATOR)
         if chunk and chunk_bytes + size > MAX_TEXT_BYTES:
             flush()

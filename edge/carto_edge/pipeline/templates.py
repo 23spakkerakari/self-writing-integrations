@@ -21,8 +21,10 @@ Two things are done differently from a stock Drain3 setup, both for spec 2.3:
   arbitrary classes on load (invariant 8: no pickle). The store serialises the parse tree and
   the clusters itself, one validated JSON file per system under ``EdgeSettings.templates_dir``,
   written atomically (``<system>.json.tmp`` then ``os.replace``), on an interval and on
-  :meth:`TemplateStore.flush`/:meth:`TemplateStore.close`. A corrupt or oversized file is
-  logged by path and ignored; mining starts fresh.
+  :meth:`TemplateStore.flush`/:meth:`TemplateStore.close`, with ASCII escapes so that any
+  string, a lone surrogate included, can be written. A failed write is logged and retried at
+  the next flush; a corrupt or oversized file is logged by path and ignored; mining starts
+  fresh.
 
 A third rule for the same invariant: Drain3 keeps a one-member cluster's message verbatim, so
 a word that appeared once (a name, a code word, free text) would become a "constant". Until a
@@ -95,7 +97,10 @@ _CHANGED: Final = "cluster_template_changed"
 
 def compute_template_id(system_id: str, template_text: str) -> str:
     """``tpl_`` + the first 12 hex characters of ``sha256(system_id + "\\0" + text)`` (ADR 0016)."""
-    digest = hashlib.sha256(f"{system_id}\0{template_text}".encode()).hexdigest()
+    # surrogatepass: a lone surrogate in a message still gives an id, the same on every run,
+    # instead of an exception for the record. Valid text encodes exactly as before.
+    material = f"{system_id}\0{template_text}".encode("utf-8", errors="surrogatepass")
+    digest = hashlib.sha256(material).hexdigest()
     return f"tpl_{digest[:12]}"
 
 
@@ -506,13 +511,15 @@ class TemplateStore:
             **_drain_to_json(state.miner.drain),
             "registry": _registry_to_json(state.registry),
         }
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         temporary = path.with_name(path.name + ".tmp")
         try:
+            # ASCII escapes: any string the input can hold, a lone surrogate included, has a
+            # JSON form, so one odd message never makes every later flush fail.
+            data = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary.write_bytes(data)
             temporary.replace(path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             _log().warning(
                 "template_state_write_failed", system_id=system_id, error=type(exc).__name__
             )
