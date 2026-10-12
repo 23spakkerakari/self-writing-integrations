@@ -561,6 +561,7 @@ Common requirements for every connector:
 - Uses the Splunk REST search export endpoint (`/services/search/jobs/export`) with `output_mode=json`, bounded `earliest_time`/`latest_time` windows, and a saved search string from config.
 - Auth: Splunk authentication token for a dedicated user whose role can search only the configured indexes. Document the role setup in the install guide.
 - Incremental: sliding windows with overlap (default 2 min) and dedupe on `_cd` + `_indextime` + hash; cursor = last fully processed window end.
+- *Note (ADR 0035):* windows are on index time (`index_earliest`/`index_latest`), end no later than `now - settle_seconds` (default 60), and every fully searched window, even an empty one, commits the cursor through a cursor-only checkpoint. `earliest_time` is set to the window start minus `max_event_lag_hours` (default 24) only to bound the buckets scanned.
 - Backfill: chunked windows (default 1 hour) with concurrency limit (default 2) to protect the Splunk search head.
 - `test()`: runs a 1-minute search with `| head 1`, checks token capabilities are read-only where Splunk exposes them, and reports the indexes visible.
 

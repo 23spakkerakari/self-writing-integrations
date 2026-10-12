@@ -1,11 +1,17 @@
 """Splunk pull connector over the REST search export endpoint (spec 8.1.3).
 
-- ``read(cursor)`` runs the configured search over sliding windows of ``window_minutes`` from
-  ``cursor.window_end - overlap_minutes`` (default overlap 2 minutes) up to now, streaming the
-  export's line-delimited JSON and deduplicating on ``_cd`` + ``_indextime`` + sha256(``_raw``)
-  across windows with a bounded LRU. The last record of each window carries
-  ``commit_cursor={"window_end": <iso>}``.
-- ``backfill(start, end)`` runs chunked windows (default 60 minutes) with at most
+- ``read(cursor)`` runs the configured search over sliding windows of ``window_minutes`` of
+  **index time** (``index_earliest`` inclusive, ``index_latest`` exclusive; ADR 0035 item 2)
+  from ``cursor.window_end - overlap_minutes`` (default overlap 2 minutes) up to
+  ``now - settle_seconds`` (default 60), streaming the export's line-delimited JSON and
+  deduplicating on ``_cd`` + ``_indextime`` + sha256(``_raw``) across windows with a bounded
+  LRU. Index time only moves forward, so an event indexed late (forwarder backlog) is still
+  read. ``earliest_time`` is ``window start - max_event_lag_hours`` (default 24) only to bound
+  the buckets Splunk scans; an event whose own time is older than that is not read.
+  After every fully searched window, empty or not, the read yields a
+  :class:`~carto_edge.pipeline.model.CursorCheckpoint` ``{"window_end": <iso>}``, so a quiet
+  search still moves the cursor.
+- ``backfill(start, end)`` runs chunked windows of event time (default 60 minutes) with at most
   ``max_concurrency`` exports in flight (default 2) to protect the search head.
 - ``test()`` reads the token's roles (``/services/authentication/current-context``), each
   role's capabilities and ``srchIndexesAllowed`` (``/services/authorization/roles/<role>``), runs
@@ -52,7 +58,7 @@ from carto_edge.connectors.base import (
 from carto_edge.connectors.registry import register, validate_config_model
 from carto_edge.net.http import build_async_client
 from carto_edge.net.retry import CircuitBreaker, RateLimiter, retry_async
-from carto_edge.pipeline.model import RawRecord
+from carto_edge.pipeline.model import CursorCheckpoint, RawRecord, ReadItem
 from carto_schema.event import EventKind
 
 __all__ = ["WRITE_CAPABILITY_PREFIXES", "SplunkConfig", "SplunkConnector"]
@@ -72,6 +78,9 @@ WRITE_CAPABILITY_PREFIXES: Final = (
 )
 KEPT_FIELDS: Final = frozenset({"host", "source", "sourcetype", "index", "_time"})
 DROPPED_FIELDS: Final = frozenset({"_raw", "linecount", "splunk_server"})
+FUTURE_TOLERANCE: Final = timedelta(days=1)
+"""``latest_time`` of an index-time window: event times up to a day ahead of the window are
+still read (a source clock running ahead; ADR 0036 accepts one day)."""
 MAX_LINE_CHARS: Final = 4 * 1024 * 1024
 MAX_JSON_BODY_BYTES: Final = 4 * 1024 * 1024
 RETRY_ATTEMPTS: Final = 3
@@ -91,6 +100,18 @@ class SplunkConfig(ConnectorConfig):
     requests_per_second: float = Field(default=2.0, gt=0, le=100)
     dedupe_size: int = Field(default=100_000, ge=1000, le=10_000_000)
     max_windows_per_read: int = Field(default=288, ge=1, le=10_000)
+    settle_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=3600,
+        description="A window ends no later than now minus this (ADR 0035): indexing settles.",
+    )
+    max_event_lag_hours: int = Field(
+        default=24,
+        ge=1,
+        le=24 * 400,
+        description="Oldest event time read, relative to the index-time window (ADR 0035).",
+    )
     failure_threshold: int = Field(default=5, ge=1, le=100)
     breaker_reset_seconds: float = Field(default=60.0, gt=0, le=3600)
 
@@ -245,15 +266,29 @@ class SplunkConnector:
             )
         )
 
+    @staticmethod
+    def _event_time(start: datetime, end: datetime) -> dict[str, str]:
+        """Bounds on event time ``[start, end]`` (backfill and the test search)."""
+        return {"earliest_time": _iso(start), "latest_time": _iso(end)}
+
+    def _index_time(self, start: datetime, end: datetime) -> dict[str, str]:
+        """Bounds on index time ``[start, end)`` (ADR 0035 item 2); event time only bounds the
+        buckets scanned."""
+        return {
+            "index_earliest": _iso(start),
+            "index_latest": _iso(end),
+            "earliest_time": _iso(start - timedelta(hours=self.config.max_event_lag_hours)),
+            "latest_time": _iso(end + FUTURE_TOLERANCE),
+        }
+
     async def _export(
-        self, start: datetime, end: datetime, suffix: str = ""
+        self, times: Mapping[str, str], suffix: str = ""
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream the ``result`` objects of one export over ``[start, end]``."""
+        """Stream the ``result`` objects of one export bounded by ``times``."""
         params = {
             "search": self._search_text(suffix),
             "output_mode": "json",
-            "earliest_time": _iso(start),
-            "latest_time": _iso(end),
+            **times,
         }
         async with self._limiter:
             response = await self._export_request(params)
@@ -331,49 +366,42 @@ class SplunkConnector:
             cursor = window_end
         return windows
 
-    async def read(self, cursor: Cursor | None) -> AsyncIterator[RawRecord]:
+    async def read(self, cursor: Cursor | None) -> AsyncIterator[ReadItem]:
         now = self._clock()
+        # Whole seconds: the window bounds travel as ISO text with second precision.
+        upper = (now - timedelta(seconds=self.config.settle_seconds)).replace(microsecond=0)
         overlap = timedelta(minutes=self.config.overlap_minutes)
+        committed: datetime | None = None
         if cursor and cursor.get("window_end"):
             try:
-                start = _parse_iso(str(cursor["window_end"])) - overlap
+                committed = _parse_iso(str(cursor["window_end"]))
             except ValueError as exc:
                 msg = f"source {self.source.id!r}: cursor window_end is not an ISO timestamp"
                 raise ConnectorError(msg) from exc
+            start = committed - overlap
         elif self.source.backfill_days:
-            start = now - timedelta(days=self.source.backfill_days)
+            start = upper - timedelta(days=self.source.backfill_days)
         else:
-            start = now - timedelta(minutes=self.config.window_minutes)
-        start = min(start, now)
-        windows = self._windows(
-            start, now, self.config.window_minutes, self.config.max_windows_per_read
-        )
+            start = upper - timedelta(minutes=self.config.window_minutes)
+        windows: list[tuple[datetime, datetime]] = []
+        if committed is None or upper > committed:  # never move the cursor backwards
+            windows = self._windows(
+                min(start, upper),
+                upper,
+                self.config.window_minutes,
+                self.config.max_windows_per_read,
+            )
         total = 0
         started = time.monotonic()
         for window_start, window_end in windows:
-            pending: RawRecord | None = None
-            async for result in self._export(window_start, window_end):
+            async for result in self._export(self._index_time(window_start, window_end)):
                 record = self._record(result, now)
                 if record is None:
                     continue
-                if pending is not None:
-                    yield pending
-                    total += 1
-                pending = record
-            if pending is not None:
-                yield RawRecord(
-                    source_id=pending.source_id,
-                    system_id=pending.system_id,
-                    kind=pending.kind,
-                    locator=pending.locator,
-                    received_at=pending.received_at,
-                    text=pending.text,
-                    fields=pending.fields,
-                    sequence=pending.sequence,
-                    commit_cursor={"window_end": _iso(window_end)},
-                    size_bytes=pending.size_bytes,
-                )
                 total += 1
+                yield record
+            # The window was searched to its end: commit it even when it held nothing.
+            yield CursorCheckpoint(self.source.id, {"window_end": _iso(window_end)})
         logger.info(
             "splunk read source_id=%s windows=%d records=%d seconds=%.1f",
             self.source.id,
@@ -384,7 +412,7 @@ class SplunkConnector:
 
     async def _collect(self, start: datetime, end: datetime, now: datetime) -> list[RawRecord]:
         records: list[RawRecord] = []
-        async for result in self._export(start, end):
+        async for result in self._export(self._event_time(start, end)):
             record = self._record(result, now)
             if record is not None:
                 records.append(record)
@@ -460,7 +488,8 @@ class SplunkConnector:
         try:
             now = self._clock()
             count = 0
-            async for _result in self._export(now - timedelta(minutes=1), now, "| head 1"):
+            window = self._event_time(now - timedelta(minutes=1), now)
+            async for _result in self._export(window, "| head 1"):
                 count += 1
             checks.append(TestCheck("search", True, f"{count} result"))
         except (ConnectorError, httpx.HTTPError) as exc:

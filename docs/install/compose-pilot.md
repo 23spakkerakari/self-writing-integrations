@@ -481,7 +481,9 @@ token in Vault as the whole secret value.
 | --- | --- | --- |
 | `base_url` | required | Origin only (`https://host:port`, no path, no credentials) |
 | `search` | required | The search string run through `/services/search/jobs/export` |
-| `window_minutes`, `overlap_minutes` | 5, 2 | Sliding windows and their overlap; results are deduplicated on `_cd`, `_indextime` and a hash |
+| `window_minutes`, `overlap_minutes` | 5, 2 | Sliding windows of **index time** and their overlap; results are deduplicated on `_cd`, `_indextime` and a hash. Every searched window moves the cursor, even an empty one (ADR 0035) |
+| `settle_seconds` | 60 | A window ends no later than now minus this, so events still being indexed are read on the next poll |
+| `max_event_lag_hours` | 24 | Bounds the event time searched (`earliest_time` = window start minus this). An event whose own timestamp is older than this when it is indexed is not read; raise it for sources with long forwarder backlogs |
 | `max_concurrency`, `backfill_chunk_minutes` | 2, 60 | Backfill protection for the search head |
 | `verify_tls`, `ca_file` | `true`, none | Certificate verification and a custom CA |
 | `allow_plaintext` | `false` | Admin flag to allow `http://`; leave it off |
