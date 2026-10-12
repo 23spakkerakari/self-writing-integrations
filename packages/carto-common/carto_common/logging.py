@@ -53,11 +53,18 @@ Rules, in the order :func:`redact` applies them to every event (key names first,
    ``event_id``, spec 5.4, which operators grep for) inside a token are kept as they are, so
    ``user:1234:t1.<token>`` logs as ``AAAA:9999:[TOKEN]`` and
    ``event_id=01ARZ3NDEKTSV4RRFFQ69G5FAV`` stays readable.
-4. Non-string scalars (``None``, ``bool``, ``int``, ``float``) pass through untouched. Dates and
-   times are rendered ISO 8601 (which the identifier rule exempts), ``bytes`` are decoded and
-   masked as text, enums contribute their value, pydantic models and dataclasses are walked like
-   mappings, sets and tuples become lists, and any other object is ``str()``-ed and masked, so
-   the JSON renderer never falls back to ``repr`` on something the processor has not inspected.
+4. **Numbers** (``int`` and ``float``, not ``bool``) are values until their key says otherwise
+   (ADR 0040). A number whose decimal text holds four or more digits, leading zeros not counted,
+   logs as its shape (``customer_id=48812213`` -> ``"99999999"``, ``total=207.81`` ->
+   ``"999.99"``) unless the last segment of its own key is a metric qualifier
+   (:data:`METRIC_KEY_QUALIFIERS`: ``count``, ``ms``, ``seconds``, ``bytes``, ``port``,
+   ``events``, ``version`` and the like). The qualifier covers the number directly under the
+   key only, never the items of a list. Smaller numbers, ``None`` and ``bool`` pass through.
+5. Other types: dates and times are rendered ISO 8601 (which the identifier rule exempts),
+   ``bytes`` are decoded and masked as text, enums contribute their value, pydantic models and
+   dataclasses are walked like mappings, sets and tuples become lists, and any other object is
+   ``str()``-ed and masked, so the JSON renderer never falls back to ``repr`` on something the
+   processor has not inspected.
    Two keys that mask to the same shape stay two keys: the second becomes ``<shape>#2``.
 
 The walk is bounded to :data:`MAX_DEPTH` nested containers. Anything deeper, and any top-level
@@ -104,6 +111,7 @@ __all__ = [
     "JWT_MASK",
     "MASKS",
     "MAX_DEPTH",
+    "METRIC_KEY_QUALIFIERS",
     "PEM_MASK",
     "QUIET_LIBRARY_LOGGERS",
     "REDACTED",
@@ -116,6 +124,7 @@ __all__ = [
     "get_logger",
     "identifier_shape",
     "is_drop_key",
+    "is_metric_key",
     "is_secret_key",
     "mask_string",
     "redact",
@@ -213,6 +222,49 @@ DROP_KEYS: Final = frozenset(
 )
 """Normalised key names whose values are never logged (spec 14.12: no bodies, no raw values)."""
 
+METRIC_KEY_QUALIFIERS: Final = frozenset(
+    {
+        # counts and tallies of the product's own objects
+        "count",
+        "counts",
+        "attempt",
+        "attempts",
+        "retries",
+        "rows",
+        "records",
+        "events",
+        "batches",
+        "samples",
+        # units
+        "bytes",
+        "ms",
+        "seconds",
+        "second",
+        "days",
+        # sizes and limits
+        "depth",
+        "size",
+        "len",
+        "length",
+        "limit",
+        # process and network
+        "port",
+        "status",
+        "pid",
+        "version",
+        "versions",
+    }
+)
+"""Last key segments that make a number a metric the operator needs in clear (rule 4, ADR 0040).
+
+A number under any other key is a value and is masked once it has four or more digits: order
+totals, customer numbers and card numbers are numbers too. ``total`` and ``num`` are not here on
+purpose (``total=207.81`` is an amount, ``order_num=4471`` an identifier); a count is logged as
+``*_count``."""
+
+NUMBER_MIN_DIGITS: Final = 4
+"""Digits (leading zeros not counted) from which a number under a non-metric key is masked."""
+
 HIGH_ENTROPY_MIN_LENGTH: Final = 32
 HIGH_ENTROPY_MIN_CLASSES: Final = 3
 HIGH_ENTROPY_MIN_BITS: Final = 3.5
@@ -294,6 +346,12 @@ def is_secret_key(name: str) -> bool:
     if any(segment in SECRET_KEY_WORDS for segment in segments):
         return True
     return any(pair in SECRET_KEY_PAIRS for pair in itertools.pairwise(segments))
+
+
+def is_metric_key(name: str) -> bool:
+    """True when the key's last segment names a metric, so its number is logged as is (rule 4)."""
+    segments = _key_segments(name)
+    return bool(segments) and segments[-1] in METRIC_KEY_QUALIFIERS
 
 
 def is_drop_key(name: str) -> bool:
@@ -417,12 +475,30 @@ def _unique_key(taken: Mapping[str, object], masked: str) -> str:
     return f"{masked}#{suffix}"
 
 
+def _mask_number(value: float, *, metric: bool) -> object:
+    """``value`` as a plain number, or its shape when it is not a metric and holds
+    :data:`NUMBER_MIN_DIGITS` or more digits (rule 4)."""
+    value = int(value) if isinstance(value, int) else float(value)  # drops IntEnum and the like
+    if metric or (
+        isinstance(value, int)
+        and -(10 ** (NUMBER_MIN_DIGITS - 1)) < value < 10 ** (NUMBER_MIN_DIGITS - 1)
+    ):
+        return value
+    try:
+        text = repr(value)
+    except ValueError:  # an int past the interpreter's digit limit is certainly not a metric
+        return REDACTION_ERROR
+    if sum(char.isdecimal() for char in text.lstrip("-0.")) < NUMBER_MIN_DIGITS:
+        return value
+    return identifier_shape(text)
+
+
 def _walk_field(name: str, value: object, depth: int) -> object:
     if is_drop_key(name):
         return DROPPED
     if is_secret_key(name):
         return REDACTED
-    return _walk(value, depth)
+    return _walk(value, depth, metric=is_metric_key(name))
 
 
 def _walk_mapping(mapping: Mapping[Any, Any], depth: int) -> dict[str, object]:
@@ -433,12 +509,19 @@ def _walk_mapping(mapping: Mapping[Any, Any], depth: int) -> dict[str, object]:
     return out
 
 
-def _walk(value: object, depth: int) -> object:
-    """Return the loggable form of ``value`` nested inside ``depth`` containers (rules 3, 4)."""
+def _walk(value: object, depth: int, *, metric: bool = False) -> object:
+    """Return the loggable form of ``value`` nested inside ``depth`` containers (rules 3 to 5).
+
+    ``metric`` is true when ``value`` sits directly under a key naming a metric (rule 4).
+    """
     if depth > MAX_DEPTH:
         return REDACTION_ERROR
-    if value is None or isinstance(value, int | float):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, enum.Enum):
+        return _walk(value.value, depth, metric=metric)
+    if isinstance(value, int | float):
+        return _mask_number(value, metric=metric)
     if isinstance(value, str):
         return mask_string(value)
     if isinstance(value, bytes | bytearray | memoryview):
@@ -446,9 +529,7 @@ def _walk(value: object, depth: int) -> object:
     if isinstance(value, dt.date | dt.time):
         return value.isoformat()
     if isinstance(value, dt.timedelta):
-        return value.total_seconds()
-    if isinstance(value, enum.Enum):
-        return _walk(value.value, depth)
+        return _mask_number(value.total_seconds(), metric=metric)
     if isinstance(value, BaseModel):
         return _walk_mapping(value.model_dump(), depth)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -463,9 +544,10 @@ def _walk(value: object, depth: int) -> object:
 def redact(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """structlog processor enforcing spec 2.3 invariant 7 on every event (see module docs).
 
-    Returns a new event dict holding only JSON-native values: ``None``, ``bool``, ``int``,
-    ``float``, masked ``str``, ``list`` and ``dict`` with masked ``str`` keys. Never raises: a
-    key whose value cannot be walked is logged as ``[REDACTION_ERROR]``.
+    Returns a new event dict holding only JSON-native values: ``None``, ``bool``, ``int`` and
+    ``float`` (small, or under a metric key), masked ``str``, ``list`` and ``dict`` with masked
+    ``str`` keys. Never raises: a key whose value cannot be walked is logged as
+    ``[REDACTION_ERROR]``.
     """
     del logger, method_name
     redacted: dict[str, Any] = {}

@@ -75,6 +75,7 @@ Value rules run in the order of the table.
 | Secret assignment in text | A secret word from the key rule (pairs joined by `_`, `-`, `.` or space) followed by `=` or `:` and a value: `password=hunter2`, `x-api-key: ...`, `Authorization: Basic ...`, `?token=...&next=` | the value becomes `[REDACTED]`; a value an earlier rule masked (`token=[JWT]`) keeps that mask |
 | Hex run | Eight or more lower-case hex characters holding at least one letter and one digit (UUIDs, content hashes, the simulator's `mk<8 hex>` leak markers) | its shape |
 | Identifier-shaped token | A whitespace-delimited token with a run of four or more digits, or four or more digits in total when it also contains `-` or `_` (`88-210`, `X9-0442`), that is not an ISO date (`YYYY-MM-DD`), time or timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z or +hh:mm]`) with real month, day, hour, minute and second ranges | its shape: digits to `9`, letters to `A`, punctuation kept (spec 8.3); mask markers and ULIDs inside the token are kept |
+| Number (ADR 0040) | An `int` or `float` (not `bool`) whose decimal text holds four or more digits, leading zeros not counted, unless the last segment of its own key is a metric qualifier: `count`, `counts`, `attempt`, `attempts`, `retries`, `rows`, `records`, `events`, `batches`, `samples`, `bytes`, `ms`, `seconds`, `second`, `days`, `depth`, `size`, `len`, `length`, `limit`, `port`, `status`, `pid`, `version`, `versions`. The qualifier covers the number directly under the key, not the items of a list | its shape as a string: `customer_id=48812213` logs `"99999999"`, `total=207.81` logs `"999.99"` |
 | Folded keys | Two keys that mask to the same shape | the second becomes `<shape>#2` |
 | Nesting deeper than 16 containers, or a value that raises while walked | | `[REDACTION_ERROR]` for that key |
 
@@ -89,8 +90,10 @@ services) are left alone. `token_count=3` survives (its last segment is a qualif
 `secret_value`, `password_hash`, `session_id`, `cookies` and `x-api-key` are redacted; `secret_ref`
 survives because a reference is not a value.
 
-Other types: `None`, `bool`, `int` and `float` pass through untouched, so pass identifiers as
-strings (the edge always has them as strings) and counts as numbers. Dates and times are rendered
+Other types: `None`, `bool` and numbers of fewer than four digits pass through untouched. Log a
+count under a key ending in a metric qualifier (`events=412`, `duration_ms=12`,
+`order_count=4471`); any other number of four or more digits is treated as a value and masked
+(`total` is deliberately not a qualifier: `total=207.81` is an order amount). Dates and times are rendered
 ISO 8601, `bytes` are decoded and masked, enums contribute their value, pydantic models and
 dataclasses are walked like mappings, sets and tuples become lists, and any other object is
 `str()`-ed and masked. The processor returns only JSON-native values and never raises.
@@ -110,7 +113,7 @@ is.
 - A secret shorter than 32 characters, or made of fewer than three character classes, under a key
   that is not secret-named and outside a URL userinfo or `key=value` context. Name the key after
   what it holds (`password`, `token`, `api_key`) and the key rule hides it whatever the value.
-- Non-string scalars, and canonical ULIDs (see above).
+- Numbers of fewer than four digits, numbers under a metric key, and canonical ULIDs (see above).
 - A hex run made only of letters (`deadbeef`), which cannot be told from a word.
 - Records emitted through a handler a library installed for itself (uvicorn without
   `log_config=None`): `configure_logging` owns the root logger, nothing else.
