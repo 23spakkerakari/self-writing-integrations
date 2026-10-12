@@ -423,7 +423,7 @@ class BundleWriter:
             sources=len(summaries),
             fields=len(field_list),
             templates=len(template_list),
-            signature_key_id=signature.key_id,
+            signing_key_id=signature.key_id,  # "signature" names a secret (ADR 0010)
         )
         return manifest
 

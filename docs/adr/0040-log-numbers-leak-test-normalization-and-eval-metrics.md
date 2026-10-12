@@ -32,6 +32,20 @@ identifiers as strings, which nothing enforced.
   `samples_seen`) are masked once they reach four digits. That loses an exact count, never a
   value, and the call sites can be renamed to a `_count` key when an operator needs them.
 
+### Secret words and quoted assignments
+
+- The secret words gain `passphrase`, `pass`, `pwd`, `auth`, `signature` and `sig`, for keys and
+  for `word=value` text. In text the four short words must start a word or a camelCase hump, so
+  `dbPass=` and `;PWD=` match while `bypass=`, `compass:` and `oauth=` do not. Key segments
+  are whole words already. `scheme` joins the qualifiers (`auth_scheme` names a scheme, not a
+  credential). The bundle log line's `signature_key_id` is now `signing_key_id`, since a key
+  segment `signature` now hides its value.
+- The secret word may be closed by a quote, escaped or not, before `=` or `:`, so JSON objects,
+  Python reprs (`{'password': '...'}`, which is how a standard-library record formats a dict
+  argument) and JSON embedded in a message match. Braced ODBC values (`PWD={...}`) are masked
+  whole. Every quantifier is bounded or stops at a fixed character, and a test holds the scan
+  linear on 100,000-character adversarial lines.
+
 ## Consequences
 
 - Operators keep counts, durations, sizes, ports and versions; a customer number, card number

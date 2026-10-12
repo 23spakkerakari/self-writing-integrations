@@ -17,6 +17,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import pytest
@@ -181,6 +182,21 @@ def clean_structlog() -> Iterator[None]:
         "credentials",
         "credential",
         "api_keys",
+        "pwd",
+        "PWD",
+        "db_pwd",
+        "passphrase",
+        "key_passphrase",
+        "pass",
+        "db_pass",
+        "dbPass",
+        "auth",
+        "AUTH",
+        "proxy_auth",
+        "signature",
+        "request_signature",
+        "sig",
+        "url_sig",
     ],
 )
 def test_secret_named_keys_are_redacted(key: str) -> None:
@@ -210,6 +226,14 @@ def test_secret_named_keys_are_redacted(key: str) -> None:
         "private_key_size",
         "key_prefix",
         "tokenCount",
+        "auth_scheme",
+        "signature_scheme",
+        "pass_count",
+        "bypass",
+        "compass",
+        "author",
+        "design",
+        "signing_key_id",
     ],
 )
 def test_keys_ending_in_a_qualifier_survive(key: str) -> None:
@@ -377,6 +401,28 @@ def test_urls_without_userinfo_survive(value: str) -> None:
         (f"auth_token={PLANTED}", f"auth_token={REDACTED}"),
         (f"token={CARTO_TOKEN}", f"token={TOKEN_MASK}"),  # the earlier, more specific mask stays
         (f"secret={HIGH_ENTROPY}", f"secret={HIGH_ENTROPY_MASK}"),
+        # quoted keys: JSON, Python reprs and escaped JSON inside a message
+        (f'{{"password": "{PLANTED}"}}', f'{{"password": {REDACTED}}}'),
+        (f"{{'password': '{PLANTED}'}}", f"{{'password': {REDACTED}}}"),
+        (f'{{"api_key":"{PLANTED}","n":1}}', f'{{"api_key":{REDACTED},"n":1}}'),
+        (f'{{\\"token\\": \\"{PLANTED}\\"}}', f'{{\\"token\\": {REDACTED}}}'),
+        (f'"secret" : "{PLANTED} with spaces"', f'"secret" : {REDACTED}'),
+        # ODBC and JDBC connection strings, braces included
+        (
+            f"Driver={{ODBC Driver 18}};Server=db;UID=sa;PWD={PLANTED}!;",
+            f"Driver={{ODBC Driver 18}};Server=db;UID=sa;PWD={REDACTED};",
+        ),
+        (f"Server=db;Pwd={{{PLANTED};x}};Db=a", f"Server=db;Pwd={REDACTED};Db=a"),
+        (f"jdbc:x://db;user=sa;password={PLANTED}", f"jdbc:x://db;user=sa;password={REDACTED}"),
+        # more secret words
+        (f"passphrase={PLANTED}", f"passphrase={REDACTED}"),
+        (f"pwd: {PLANTED}", f"pwd: {REDACTED}"),
+        (f"pass={PLANTED} next", f"pass={REDACTED} next"),
+        (f"auth={PLANTED}", f"auth={REDACTED}"),
+        (f"Proxy-Auth: {PLANTED}", f"Proxy-Auth: {REDACTED}"),
+        (f"GET /blob?sp=r&sig={PLANTED}&se=x", f"GET /blob?sp=r&sig={REDACTED}&se=x"),
+        (f"signature: {PLANTED}", f"signature: {REDACTED}"),
+        (f"dbPass={PLANTED}", f"dbPass={REDACTED}"),
     ],
 )
 def test_secret_assignments_in_free_text_are_masked(value: str, expected: str) -> None:
@@ -392,10 +438,37 @@ def test_secret_assignments_in_free_text_are_masked(value: str, expected: str) -
         "session timed out",
         "the password rule",
         "api_version=2",
+        "bypass=on",
+        "compass: north",
+        "oauth=enabled",
+        "author: Jane",
+        "design: flat",
+        "the tests pass, all 12",
+        "signal=ok",
     ],
 )
 def test_free_text_without_a_secret_value_survives(value: str) -> None:
     assert mask_string(value) == value
+
+
+@pytest.mark.parametrize(
+    ("unit", "times", "tail"),
+    [
+        ("password", 20_000, ""),
+        ('pass"', 20_000, ""),
+        ("Pass ", 20_000, "="),
+        ('password="', 1, "a"),
+        ("pwd={", 1, "a"),
+        ('token\\"', 20_000, ":"),
+        ("password: ", 20_000, ""),
+    ],
+)
+def test_secret_assignment_scan_stays_linear(unit: str, times: int, tail: str) -> None:
+    """Spec 2.3 invariant 8: an attacker-written log line cannot stall the processor."""
+    value = unit * times + (tail * 100_000 if tail == "a" else tail)
+    start = perf_counter()
+    mask_string(value)
+    assert perf_counter() - start < 5.0  # about 0.4 s on the laptop; generous for --cov
 
 
 @pytest.mark.parametrize(
@@ -1024,6 +1097,16 @@ def test_stdlib_exceptions_and_levels_follow_the_configuration(clean_structlog: 
     assert TOKEN_MASK in data["exception"]
     assert CARTO_TOKEN not in lines[0]
     assert "SO-0004471" not in lines[0]
+
+
+def test_stdlib_records_with_quoted_secret_keys_are_redacted(clean_structlog: None) -> None:
+    stream = io.StringIO()
+    configure_logging("edge", stream=stream)
+    logging.getLogger("lib").warning("conn %s", {"password": PLANTED, "pwd": PLANTED})
+    logging.getLogger("lib").warning("dsn %s", f"Server=db;UID=sa;PWD={PLANTED};")
+    text = stream.getvalue()
+    assert text.count(REDACTED) == 3
+    assert PLANTED not in text
 
 
 def test_stdlib_console_output_is_redacted_too(clean_structlog: None) -> None:
