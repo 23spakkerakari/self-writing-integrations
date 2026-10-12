@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
+import tracemalloc
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs
@@ -22,7 +24,11 @@ from carto_edge.connectors.base import (
     ReadOnlyStatus,
     ResolvedHost,
 )
-from carto_edge.connectors.splunk import SplunkConnector
+from carto_edge.connectors.splunk import (
+    BACKFILL_QUEUE_RECORDS,
+    MAX_JSON_BODY_BYTES,
+    SplunkConnector,
+)
 from carto_edge.pipeline.model import CursorCheckpoint, RawRecord, ReadItem
 from carto_schema.event import EventKind
 
@@ -81,10 +87,13 @@ class Splunk:
         )
         self.roles = roles if roles is not None else ["carto_reader"]
         self.status = 200
+        self.statuses: list[int] = []  # answered first, one per request
         self.events = list(EVENTS)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if self.statuses:
+            return httpx.Response(self.statuses.pop(0), text="busy")
         if self.status != 200:
             return httpx.Response(self.status, text="denied")
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
@@ -154,6 +163,7 @@ def make(
     config: dict[str, object] | None = None,
     backfill_days: int | None = None,
     clock: Clock | None = None,
+    sleeps: list[float] | None = None,
 ) -> SplunkConnector:
     source = SourceConfig(
         id="src_orders_splunk",
@@ -175,7 +185,18 @@ def make(
         ConnectorContext(secrets=Secrets(), network=Network()),
         transport=httpx.MockTransport(splunk),
         clock=clock if clock is not None else Clock(),
+        sleep=Sleeper(sleeps if sleeps is not None else []),
     )
+
+
+class Sleeper:
+    """Records the retry delays instead of waiting."""
+
+    def __init__(self, delays: list[float]) -> None:
+        self.delays = delays
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
 
 
 async def collect_items(
@@ -450,3 +471,116 @@ async def test_token_never_appears_in_logs(caplog: pytest.LogCaptureFixture) -> 
         await collect(connector)
         await connector.test()
     assert TOKEN not in caplog.text
+
+
+# ---------------------------------------------------------------------------------------------
+# Review findings C13 and C15: byte limits, streamed backfill, 5xx retries
+# ---------------------------------------------------------------------------------------------
+
+
+class Pulled:
+    """An async body that counts the bytes the client actually pulled."""
+
+    def __init__(self, parts: list[tuple[bytes, int]]) -> None:
+        self.parts = parts
+        self.pulled = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk, times in self.parts:
+            for _ in range(times):
+                self.pulled += len(chunk)
+                yield chunk
+
+
+def streaming(path_bodies: dict[str, Pulled]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = path_bodies.get(request.url.path)
+        if body is None:
+            return httpx.Response(404)
+        return httpx.Response(200, content=body)
+
+    return httpx.MockTransport(handler)
+
+
+def streaming_connector(transport: httpx.MockTransport) -> SplunkConnector:
+    return SplunkConnector(
+        make(Splunk()).source,
+        ConnectorContext(secrets=Secrets(), network=Network()),
+        transport=transport,
+        clock=Clock(),
+        sleep=Sleeper([]),
+    )
+
+
+async def test_an_endless_line_is_skipped_without_being_held_in_memory() -> None:
+    chunk = b"x" * 65_536
+    good = json.dumps({"preview": False, "result": EVENTS[2]}).encode()
+    body = Pulled([(chunk, 512), (b"\n" + good + b"\n", 1)])  # a 32 MiB line, then one event
+    connector = streaming_connector(streaming({"/services/search/jobs/export": body}))
+    tracemalloc.start()
+    try:
+        records = await collect(connector)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert [r.locator for r in records] == [locator(2)]
+    assert body.pulled > 32 * 1024 * 1024
+    assert peak < 16 * 1024 * 1024  # never the whole line
+
+
+async def test_a_json_body_is_read_only_up_to_its_limit() -> None:
+    body = Pulled([(b"{" + b" " * 65_535, 1024)])  # 64 MiB that never ends as JSON
+    connector = streaming_connector(streaming({"/services/authentication/current-context": body}))
+    result = await connector.test()
+    assert not result.ok
+    assert "exceeds" in result.checks[0].detail
+    assert body.pulled <= MAX_JSON_BODY_BYTES + 2 * 65_536
+
+
+async def test_backfill_streams_a_large_chunk_through_a_bounded_queue() -> None:
+    splunk = Splunk()
+    splunk.events = [event(1, f"0:{n}") for n in range(3 * BACKFILL_QUEUE_RECORDS)]
+    connector = make(splunk, {"backfill_chunk_minutes": 60})
+    start = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    stream = connector.backfill(start, start + timedelta(hours=1))
+    first = await anext(stream)
+    assert first.locator == f"splunk:0:0:{splunk.events[0]['_indextime']}"
+    # The producer stops when its queue is full instead of collecting the whole chunk.
+    assert connector._sequence <= BACKFILL_QUEUE_RECORDS + 1
+    rest = [record async for record in stream]
+    assert len(rest) == 3 * BACKFILL_QUEUE_RECORDS - 1
+    await connector.close()
+
+
+async def test_backfill_keeps_chunk_order_and_raises_a_failed_chunk() -> None:
+    splunk = Splunk()
+    connector = make(splunk, {"backfill_chunk_minutes": 5, "max_concurrency": 3})
+    start = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    records = [r async for r in connector.backfill(start, start + timedelta(minutes=15))]
+    assert [r.locator for r in records] == [locator(0), locator(1), locator(2), locator(3)]
+    splunk.status = 403
+    with pytest.raises(ConnectorError, match="403"):
+        [r async for r in make(splunk).backfill(start, start + timedelta(minutes=15))]
+
+
+async def test_server_errors_are_retried_with_backoff() -> None:
+    splunk = Splunk()
+    splunk.statuses = [503, 502]
+    sleeps: list[float] = []
+    records = await collect(make(splunk, sleeps=sleeps))
+    assert [r.locator for r in records] == [locator(2)]
+    assert len(sleeps) == 2
+    assert len(exports(splunk)) == 3
+
+
+async def test_persistent_server_errors_trip_the_circuit_breaker() -> None:
+    splunk = Splunk()
+    splunk.status = 503
+    connector = make(splunk, {"failure_threshold": 2})
+    for _ in range(2):
+        with pytest.raises(ConnectorError, match="HTTP 503"):
+            await collect(connector)
+    assert len(exports(splunk)) == 2 * 3  # every read tried three times
+    with pytest.raises(ConnectorError, match="circuit breaker"):
+        await collect(connector)
+    assert len(exports(splunk)) == 6  # the open breaker sent nothing
