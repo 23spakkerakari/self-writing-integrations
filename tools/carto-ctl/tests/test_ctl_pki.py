@@ -281,3 +281,81 @@ def test_help_lists_the_options_and_no_longer_says_it_is_a_stub(
     assert "--layout" not in out
     assert "Arrives in" not in out
     assert "(spec 14.4)" in out
+
+
+# ---------------------------------------------------------------------------------------------
+# pki issue (ADR 0032)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_pki_issue_signs_a_collector_certificate_from_the_gateway_ca(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, ca_dir, host = tmp_path / "pki", tmp_path / "pki-ca", tmp_path / "host-a"
+    assert _init(out, ca_dir, "--services", STACK) == EXIT_OK
+    capsys.readouterr()
+    argv = ["pki", "issue", "--listener", "edge-gateway", "--name", "collector-a.example.internal"]
+    argv += ["--ca-key-dir", str(ca_dir), "--out", str(host), "--days", "30"]
+    assert main(argv) == EXIT_OK
+    assert _files(host) == {"to-edge-gateway.crt", "to-edge-gateway.key", "to-edge-gateway-ca.crt"}
+    leaf = load_certificate(host / "to-edge-gateway.crt")
+    _signed_by(leaf, load_certificate(ca_dir / "edge-gateway-ca.crt"))
+    _not_signed_by(leaf, load_certificate(ca_dir / "ingest-api-ca.crt"))
+    assert _role_uris(leaf) == ["urn:carto:role:collector"]
+    assert ExtendedKeyUsageOID.SERVER_AUTH not in _ekus(leaf)
+    assert leaf.not_valid_after_utc - leaf.not_valid_before_utc == dt.timedelta(days=30)
+    printed = capsys.readouterr().out
+    assert certificate_fingerprint(leaf) in printed and "role collector" in printed
+    assert "PRIVATE" not in printed
+    assert main(argv) == EXIT_FAILURE  # never over an existing key
+    assert "refusing to overwrite" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("listener", "role"),
+    [("edge-gateway", "edge-gateway"), ("edge-gateway", "ingest-api"), ("ingest-api", "collector")],
+)
+def test_pki_issue_refuses_a_role_the_listener_does_not_accept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], listener: str, role: str
+) -> None:
+    out, ca_dir, host = tmp_path / "pki", tmp_path / "pki-ca", tmp_path / "host"
+    assert _init(out, ca_dir, "--services", STACK) == EXIT_OK
+    capsys.readouterr()
+    argv = ["pki", "issue", "--listener", listener, "--role", role, "--name", "h"]
+    assert main([*argv, "--ca-key-dir", str(ca_dir), "--out", str(host)]) == EXIT_FAILURE
+    assert "does not accept" in capsys.readouterr().err
+    assert not host.exists()
+
+
+def test_pki_issue_refuses_a_ca_key_that_does_not_match(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, ca_dir = tmp_path / "pki", tmp_path / "pki-ca"
+    assert _init(out, ca_dir, "--services", STACK) == EXIT_OK
+    swapped = tmp_path / "swapped"
+    swapped.mkdir()
+    (swapped / "edge-gateway-ca.crt").write_bytes((ca_dir / "edge-gateway-ca.crt").read_bytes())
+    (swapped / "edge-gateway-ca.key").write_bytes((ca_dir / "ingest-api-ca.key").read_bytes())
+    capsys.readouterr()
+    argv = ["pki", "issue", "--listener", "edge-gateway", "--name", "h", "--ca-key-dir"]
+    assert main([*argv, str(swapped), "--out", str(tmp_path / "h")]) == EXIT_FAILURE
+    assert "is not the key of" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["--name", "bad name"], ["--name", "*.x"], ["--listener", "x"]])
+def test_pki_issue_bad_options_are_usage_errors(
+    tmp_path: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = {"--listener": "edge-gateway", "--name": "h"}
+    base.update(dict(zip(argv[::2], argv[1::2], strict=True)))
+    flat = [item for pair in base.items() for item in pair]
+    command = ["pki", "issue", *flat, "--ca-key-dir", str(tmp_path), "--out", str(tmp_path / "o")]
+    assert main(command) == EXIT_USAGE
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_pki_issue_names_the_missing_options(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["pki", "issue", "--listener", "edge-gateway"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "--name" in err and "--ca-key-dir" in err and "--out" in err
+    assert "--listener," not in err

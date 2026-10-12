@@ -162,11 +162,13 @@ jobs:
           exit-code: "1"
 
   compose:
-    name: compose stack (simulator live replay, ingest to ClickHouse, live leak scan)
+    name: compose stack (simulator live replay, ingest to ClickHouse, push routes, live leak scan)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      COMPOSE: docker compose -f deploy/compose/compose.yaml
+      # Both push-route proxies (ADR 0032) run in every command of this job.
+      COMPOSE: >-
+        docker compose -f deploy/compose/compose.yaml --profile push-otlp --profile push-webhooks
     steps:
       - uses: actions/checkout@v4
       - name: Build the service images
@@ -175,6 +177,13 @@ jobs:
         run: |
           openssl rand -hex 24 > deploy/compose/secrets/pg_password
           openssl rand -hex 24 > deploy/compose/secrets/ch_password
+      - name: Generate a throwaway certificate for the webhook proxy
+        run: |
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+            -subj /CN=localhost -addext subjectAltName=DNS:localhost \
+            -keyout deploy/compose/proxy-tls/tls.key -out deploy/compose/proxy-tls/tls.crt
+          # The proxy runs as uid 10001; a pilot chowns the key to it instead.
+          chmod 644 deploy/compose/proxy-tls/tls.key
       - name: Start the stack (one-shot jobs, databases, ingest-api, edge-gateway, collector)
         run: |
           $COMPOSE up -d
@@ -219,6 +228,39 @@ jobs:
           query "SELECT source_id, count() FROM carto.events GROUP BY source_id ORDER BY source_id"
           echo "## Compose stack" >> "$GITHUB_STEP_SUMMARY"
           echo "events in ClickHouse: $events from $sources sources" >> "$GITHUB_STEP_SUMMARY"
+      - name: Push routes through the proxies (ADR 0031, 0032)
+        run: |
+          query() {
+            $COMPOSE exec -T clickhouse clickhouse-client --user carto \
+              --password "$(cat deploy/compose/secrets/ch_password)" -q "$1"
+          }
+          count() { query "SELECT count() FROM carto.events WHERE source_id = '$1'"; }
+          webstore_before=$(count src_webstore_log)
+          # Webhooks: the HMAC secret into the edge's local secret store, then a signed request
+          # through proxy-webhooks, and the refusals.
+          openssl rand -hex 24 > webhook-secret
+          $COMPOSE run --rm --no-deps -T edge-gateway secret set shop_webhook_secret < webhook-secret
+          python3 tools/ci/push_routes.py webhook --port 8443 \
+            --ca deploy/compose/proxy-tls/tls.crt --secret-file webhook-secret \
+            --source src_shop_hooks
+          # OTLP: a collector certificate for a host outside the stack, signed by the
+          # edge-gateway CA, through the proxy-otlp passthrough.
+          mkdir -m 777 collector-pki
+          $COMPOSE run --rm --no-deps -T -v "$PWD/collector-pki:/out" pki-init \
+            pki issue --listener edge-gateway --name ci-collector \
+            --ca-key-dir /etc/carto/pki-ca --out /out
+          sudo chown -R "$(id -u)" collector-pki
+          python3 tools/ci/push_routes.py otlp --port 4318 --pki collector-pki \
+            --source src_webstore_log
+          for i in $(seq 1 24); do
+            hooks=$(count src_shop_hooks)
+            webstore=$(count src_webstore_log)
+            echo "webhook events: $hooks, webstore events: $webstore_before -> $webstore"
+            [ "${hooks:-0}" -ge 1 ] && [ "${webstore:-0}" -gt "$webstore_before" ] && break
+            sleep 5
+          done
+          [ "${hooks:-0}" -ge 1 ] && [ "${webstore:-0}" -gt "$webstore_before" ]
+          echo "push routes: webhook and OTLP events reached ClickHouse" >> "$GITHUB_STEP_SUMMARY"
       - name: Export rows, markers and logs
         run: |
           mkdir -p scan
@@ -229,7 +271,8 @@ jobs:
           done
           $COMPOSE --profile dev run --rm -T --entrypoint cat simulator \
             /data/sim/ground_truth/markers.json > scan/markers.json
-          $COMPOSE logs --no-color --no-log-prefix ingest-api edge-gateway migrate > scan/logs.txt
+          $COMPOSE logs --no-color --no-log-prefix ingest-api edge-gateway migrate \
+            proxy-webhooks proxy-otlp > scan/logs.txt
           wc -c scan/*
       - name: Leak scan of everything core stored and every product log (spec 18.3)
         run: >
@@ -244,7 +287,8 @@ jobs:
           tail -n 400 compose.log
           python3 tools/ci/annotate.py tail compose-ps.txt --title "compose ps -a" --lines 40
           python3 tools/ci/annotate.py tail compose.log --title "compose logs (tail)" --lines 150
-          for svc in volumes-init pki-init key-init migrate ingest-api edge-gateway otel-collector clickhouse; do
+          for svc in volumes-init pki-init key-init migrate ingest-api edge-gateway otel-collector \
+            proxy-webhooks proxy-otlp clickhouse; do
             $COMPOSE logs --no-color --no-log-prefix --tail 40 "$svc" > "svc-$svc.log" 2>&1 || true
             python3 tools/ci/annotate.py tail "svc-$svc.log" --title "logs: $svc" --lines 40
           done

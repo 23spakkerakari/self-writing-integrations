@@ -21,7 +21,7 @@ from typing import TextIO
 from carto_ctl import __version__
 from carto_ctl.exit_codes import EXIT_FAILURE, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_USAGE
 from carto_ctl.keyinit import configure_key_init, key_init
-from carto_ctl.pki import configure_pki_init, pki_init
+from carto_ctl.pki import configure_pki_init, configure_pki_issue, pki_init, pki_issue
 
 __all__ = [
     "COMMANDS",
@@ -134,6 +134,14 @@ COMMANDS: tuple[Command, ...] = (
         section="14.4",
         handler=pki_init,
         configure=configure_pki_init,
+    ),
+    Command(
+        path=("pki", "issue"),
+        help="Sign a client certificate from a listener's CA for a host outside the stack",
+        milestone="M1",
+        section="14.4",
+        handler=pki_issue,
+        configure=configure_pki_issue,
     ),
     Command(
         path=("key", "init"),

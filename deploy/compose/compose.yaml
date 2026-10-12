@@ -14,6 +14,13 @@
 #   key-init      carto-ctl key init --if-missing (local KMS; production uses Vault Transit)
 #   migrate       carto-core migrate
 #
+# Push routes (ADR 0032), each off until its profile is enabled; they are the only services that
+# publish a port (spec 14.5):
+#   proxy-otlp      --profile push-otlp       TCP passthrough on CARTO_OTLP_PORT (4318) for
+#                                              collectors holding a `carto-ctl pki issue` cert
+#   proxy-webhooks  --profile push-webhooks   HTTPS on CARTO_WEBHOOK_PORT (8443), certificate in
+#                                              ./proxy-tls, forwarded to the gateway as `proxy`
+#
 # First run:   make dev
 # Tear down:   docker compose -f deploy/compose/compose.yaml down -v
 
@@ -39,6 +46,8 @@ networks:
     internal: true
   edge:
     internal: true
+  # Only the push proxies join it: an internal network cannot publish a port.
+  ingress: {}
 
 volumes:
   pg-data:
@@ -48,6 +57,7 @@ volumes:
   pki-ingest-api:
   pki-edge-gateway:
   pki-otel-collector:
+  pki-proxy:
   pki-ca:
   sim-data:
   otel-queue:
@@ -124,11 +134,12 @@ services:
     command:
       - >-
         chown 10001:10001 /mnt/pki-ingest-api /mnt/pki-edge-gateway /mnt/pki-otel-collector
-        /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
+        /mnt/pki-proxy /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
     volumes:
       - pki-ingest-api:/mnt/pki-ingest-api
       - pki-edge-gateway:/mnt/pki-edge-gateway
       - pki-otel-collector:/mnt/pki-otel-collector
+      - pki-proxy:/mnt/pki-proxy
       - pki-ca:/mnt/pki-ca
       - edge-state:/mnt/edge-state
       - sim-data:/mnt/sim-data
@@ -146,6 +157,7 @@ services:
       - pki-ingest-api:/etc/carto/pki/ingest-api
       - pki-edge-gateway:/etc/carto/pki/edge-gateway
       - pki-otel-collector:/etc/carto/pki/otel-collector
+      - pki-proxy:/etc/carto/pki/proxy
       - pki-ca:/etc/carto/pki-ca
     command:
       - pki
@@ -155,7 +167,7 @@ services:
       - --ca-key-dir
       - /etc/carto/pki-ca
       - --services
-      - ingest-api,edge-gateway,otel-collector
+      - ingest-api,edge-gateway,otel-collector,proxy
       - --if-missing
 
   migrate:
@@ -278,6 +290,35 @@ services:
       - sim-data:/data/sim:ro
       - otel-queue:/var/lib/otelcol/storage
     command: ["--config", "/etc/otelcol-contrib/config.yaml"]
+
+  proxy-otlp:
+    image: nginxinc/nginx-unprivileged:1.30.4-alpine
+    <<: *hardening
+    profiles: ["push-otlp"]
+    user: "10001:10001"
+    networks: [edge, ingress]
+    depends_on:
+      edge-gateway: { condition: service_started }
+    ports: ["${CARTO_OTLP_PORT:-4318}:4318"]
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./proxy/otlp.conf:/etc/nginx/nginx.conf:ro
+
+  proxy-webhooks:
+    image: nginxinc/nginx-unprivileged:1.30.4-alpine
+    <<: *hardening
+    profiles: ["push-webhooks"]
+    user: "10001:10001"
+    networks: [edge, ingress]
+    depends_on:
+      edge-gateway: { condition: service_started }
+      pki-init: { condition: service_completed_successfully }
+    ports: ["${CARTO_WEBHOOK_PORT:-8443}:8443"]
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./proxy/webhooks.conf:/etc/nginx/nginx.conf:ro
+      - ./proxy-tls:/etc/carto/proxy-tls:ro
+      - pki-proxy:/etc/carto/pki:ro
 
   simulator:
     image: carto-simulator:dev

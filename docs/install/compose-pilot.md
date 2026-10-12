@@ -560,9 +560,8 @@ at most `max_records` (1,000) objects, at most `max_body_bytes` (1 MB) and `max_
 deep; `event_type_field` names the field whose value becomes the template. The gateway answers
 401 for a bad or missing signature, 404 for an unknown or non-webhook source, 413 above the size
 limit, 400 for a bad body, 503 when the secret cannot be resolved, and 429 or 503 under
-backpressure. In M1 the gateway accepts webhooks only from the reverse proxy's certificate
-(role `proxy`, ADR 0031) and Compose publishes no port, so webhook sources cannot be reached yet
-(see the known gaps).
+backpressure. Senders reach the gateway only through `proxy-webhooks` (role `proxy`, ADR 0031,
+0032), which is off until you enable it; see "Push routes" in step 8.
 
 #### OTLP through the OpenTelemetry Collector (spec 8.1.2)
 
@@ -600,10 +599,11 @@ Copy the template [`otel/collector.yaml`](../../otel/collector.yaml) to
   `https://edge-gateway:8443` (the collector appends `/v1/logs`).
 
 The gateway accepts `application/x-protobuf` with `gzip` or `zstd`, at most 4 MiB after
-decompression (`CARTO_GATEWAY__OTLP_MAX_BODY_BYTES`) and 10,000 log records per request. In the
-M1 stack no collector port is published, so tail files by mounting their directories read-only
-into the `otel-collector` container (step 8); the syslog (5140), Splunk HEC (8088) and OTLP (4317,
-4318) receivers of the template are reachable only from inside the `edge` network.
+decompression (`CARTO_GATEWAY__OTLP_MAX_BODY_BYTES`) and 10,000 log records per request. The
+in-stack `otel-collector` publishes no port, so tail files by mounting their directories
+read-only into it (step 8); its syslog (5140), Splunk HEC (8088) and OTLP (4317, 4318) receivers
+are reachable only from inside the `edge` network. A collector on another host (next to the
+systems whose files it tails) sends through `proxy-otlp` instead; see "Push routes" in step 8.
 
 #### Upload: files mounted into the gateway
 
@@ -659,6 +659,52 @@ Use both files for every command from here on:
 ```sh
 COMPOSE="docker compose -f deploy/compose/compose.yaml -f deploy/compose/compose.pilot.yaml"
 ```
+
+### Push routes (ADR 0032)
+
+Two proxies, each off until you enable its profile, are the only services that publish a port
+(spec 14.5). Both run `nginxinc/nginx-unprivileged` as uid 10001 with a read-only root
+filesystem, and both join a non-internal `ingress` network so the port can be published: decide
+who reaches them with host firewall rules.
+
+**`proxy-otlp`** (`--profile push-otlp`, port `CARTO_OTLP_PORT`, default 4318) passes the TLS
+connection through to `edge-gateway` unopened, so the gateway checks the collector's own
+certificate: signed by the edge-gateway CA, with the `collector` role, which may call `/v1/logs`
+and health only. Issue one certificate per collector host from the CA volume:
+
+```sh
+$COMPOSE run --rm --no-deps -v /etc/carto-pilot/collector-a:/out pki-init \
+  pki issue --listener edge-gateway --name collector-a.example.internal \
+  --ca-key-dir /etc/carto/pki-ca --out /out
+```
+
+It writes `to-edge-gateway.crt`, `to-edge-gateway.key` and `to-edge-gateway-ca.crt` (the
+directory must be writable by uid 10001, and the key is readable by that uid only; copy the three
+files to the collector host over a channel you trust). `pki issue` refuses a role the listener
+does not accept and never overwrites a key. In `otel/collector.yaml` point the `otlphttp/edge`
+exporter at `https://<this host>:4318` with those three files and `server_name_override:
+edge-gateway`, as the template shows.
+
+**`proxy-webhooks`** (`--profile push-webhooks`, port `CARTO_WEBHOOK_PORT`, default 8443)
+terminates HTTPS for SaaS webhook senders with the certificate and key you put in
+`deploy/compose/proxy-tls/` (`tls.crt` with its chain, `tls.key` readable by uid 10001; the stack
+cannot obtain a certificate by itself without outbound internet). It accepts only `POST
+/webhooks/<source id>` (anything else is 404, other methods 403), limits each client IP to 10
+requests per second with bursts of 50 (429 beyond) and 20 open connections, caps bodies at 1 MiB,
+and forwards over mutual TLS with its own certificate (role `proxy`, issued by `pki-init` on the
+`pki-proxy` volume). The gateway still verifies each request's signature. Set each webhook
+source's HMAC secret in the gateway's local store before you enable the route (or use a
+`vault://` reference):
+
+```sh
+$COMPOSE run --rm --no-deps -T edge-gateway secret set shop_webhook_secret < hmac-secret.txt
+```
+
+Enable either or both routes by adding the profiles to every command, for example
+`$COMPOSE --profile push-otlp --profile push-webhooks up -d`, or set
+`COMPOSE_PROFILES=push-otlp,push-webhooks`. Their access logs carry the method, path (without the
+query string), status and timing for webhooks, and connection counters for OTLP; never a header
+or a body.
 
 ## Step 9: Start
 
@@ -910,10 +956,10 @@ These are things this guide or the spec expects that the M1 build does not do ye
 1. The edge image does not include unixODBC or the Microsoft ODBC Driver 18, so SQL Server
    sources cannot run from it (installing the driver means accepting Microsoft's licence terms in
    the image build; ADR 0019).
-2. With both networks internal and no published port, push sources on other hosts (syslog,
-   Splunk HEC, OTLP from applications, webhooks) cannot reach the stack; the gateway accepts
-   webhooks only through the reverse proxy, which the stack does not have yet. Pull sources work
-   through the override's egress network.
+2. Only OTLP (from a collector holding a `pki issue` certificate) and webhooks reach the stack
+   from other hosts, through the push-route proxies (ADR 0032). Syslog and Splunk HEC senders
+   must send to a collector on their own network, which forwards over OTLP; the in-stack
+   collector publishes no port.
 3. No pilot override file ships with the repository, and there is no Prometheus scraper, no
    command to reissue service certificates from the existing CA, and no command to inspect or
    clear parked batches.

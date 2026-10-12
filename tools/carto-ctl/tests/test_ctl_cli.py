@@ -48,6 +48,7 @@ def wide_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_registry_has_exactly_the_specified_commands() -> None:
     expected = {
         ("pki", "init"): ("M1", "14.4"),
+        ("pki", "issue"): ("M1", "14.4"),
         ("key", "init"): ("M1", "8.4"),
         ("audit", "verify"): ("M6", "14.9"),
         ("support-bundle",): ("M6", "16"),
@@ -58,10 +59,10 @@ def test_registry_has_exactly_the_specified_commands() -> None:
     assert {command.path: (command.milestone, command.section) for command in COMMANDS} == expected
 
 
-def test_m1_implements_pki_init_key_init_and_version() -> None:
+def test_m1_implements_pki_init_pki_issue_key_init_and_version() -> None:
     implemented = [command.name for command in COMMANDS if command.implemented]
-    assert implemented == ["pki init", "key init", "version"]
-    assert len(STUBS) == len(COMMANDS) - 3
+    assert implemented == ["pki init", "pki issue", "key init", "version"]
+    assert len(STUBS) == len(COMMANDS) - 4
 
 
 # --- stubs ------------------------------------------------------------------------------------

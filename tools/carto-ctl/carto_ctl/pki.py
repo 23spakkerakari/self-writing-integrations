@@ -1,4 +1,5 @@
-"""``carto-ctl pki init``: a CA per listener and the services' certificates (spec 14.4; ADR 0031).
+"""``carto-ctl pki init`` and ``pki issue``: a CA per listener and the certificates it signs
+(spec 14.4; ADR 0031, 0032).
 
 Each listener named in ``--services`` (:data:`LISTENER_CLIENTS`: ``ingest-api``, ``edge-gateway``)
 gets its own CA. That CA signs the listener's server certificate and the client certificates of
@@ -25,6 +26,10 @@ anything is touched. With ``--if-missing`` a complete earlier run (every file th
 is present) is a success that writes nothing, which is what a Compose one-shot job needs on its
 second start; a partial one is still refused. The output lists certificate fingerprints only.
 Kubernetes installs use cert-manager with one issuer per listener instead (M6).
+
+``carto-ctl pki issue`` signs one client certificate from a listener's CA for a host outside the
+stack (a customer's collector, ADR 0032): only a role that listener accepts, written as
+``to-<listener>.crt``, ``.key`` and ``-ca.crt``, never over an existing key.
 """
 
 from __future__ import annotations
@@ -44,9 +49,11 @@ from carto_common.pki import (
     certificate_fingerprint,
     create_ca,
     issue_certificate,
+    load_certificate,
+    load_private_key,
     write_pem,
 )
-from carto_ctl.exit_codes import EXIT_FAILURE, EXIT_OK
+from carto_ctl.exit_codes import EXIT_FAILURE, EXIT_OK, EXIT_USAGE
 
 if TYPE_CHECKING:
     import datetime as dt
@@ -60,10 +67,14 @@ __all__ = [
     "MAX_DAYS",
     "IssuedFile",
     "PkiInitResult",
+    "PkiIssueResult",
     "configure_pki_init",
+    "configure_pki_issue",
     "initialize_pki",
+    "issue_client",
     "pki_complete",
     "pki_init",
+    "pki_issue",
 ]
 
 DEFAULT_SERVICES: Final[tuple[str, ...]] = ("edge-gateway", "ingest-api", "otel-collector", "api")
@@ -357,5 +368,138 @@ def pki_init(invocation: Invocation) -> int:
     out.write(
         f"wrote {len(result.cas)} listener CAs and {len(result.certificates)} certificates valid "
         f"{result.days} days (listener SANs: {sans}) to {result.out}; keep every *.key private.\n"
+    )
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------------------------
+# pki issue: a client certificate for a host outside the stack (ADR 0032)
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PkiIssueResult:
+    certificate: Path
+    fingerprint: str
+    role: str
+    listener: str
+    days: int
+
+
+def configure_pki_issue(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--listener",
+        choices=sorted(LISTENER_CLIENTS),
+        help="The listener the certificate calls; its CA signs it",
+    )
+    parser.add_argument(
+        "--role",
+        default="collector",
+        help="The role the certificate names; the listener must accept it (default collector)",
+    )
+    parser.add_argument(
+        "--name",
+        type=_host_name,
+        metavar="NAME",
+        help="The certificate's common name, such as the collector host's name",
+    )
+    parser.add_argument(
+        "--ca-key-dir",
+        type=Path,
+        help="Directory holding <listener>-ca.crt and <listener>-ca.key (pki init --ca-key-dir)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="Directory to write to-<listener>.crt, .key and -ca.crt into",
+    )
+    parser.add_argument(
+        "--days",
+        type=_days,
+        default=LEAF_VALID_DAYS,
+        help=f"Certificate lifetime in days (default {LEAF_VALID_DAYS}, spec 14.4)",
+    )
+
+
+def _host_name(text: str) -> str:
+    if len(text) > 64 or not _DNS_PATTERN.match(text) or text.startswith("*"):
+        msg = "not a host name"
+        raise argparse.ArgumentTypeError(msg)
+    return text
+
+
+def _load_authority(ca_key_dir: Path, listener: str) -> CertificatePair:
+    certificate_path = ca_key_dir / f"{listener}-ca.crt"
+    key_path = ca_key_dir / f"{listener}-ca.key"
+    certificate = load_certificate(certificate_path)
+    key = load_private_key(key_path)
+    if certificate.public_key().public_numbers() != key.public_key().public_numbers():  # type: ignore[union-attr]
+        msg = f"{key_path} is not the key of {certificate_path}"
+        raise PkiError(msg)
+    return CertificatePair(certificate_path.read_bytes(), key_path.read_bytes())
+
+
+def issue_client(
+    listener: str,
+    role: str,
+    name: str,
+    ca_key_dir: Path,
+    out: Path,
+    days: int,
+    *,
+    now: dt.datetime | None = None,
+) -> PkiIssueResult:
+    """Sign a client certificate for ``listener`` with ``role``; refuse a role the listener
+    does not accept and an existing key."""
+    accepted = LISTENER_CLIENTS.get(listener)
+    if accepted is None:
+        msg = f"unknown listener {listener!r}"
+        raise PkiError(msg)
+    if role not in accepted:
+        msg = f"{listener} does not accept the role {role!r} (it accepts {', '.join(accepted)})"
+        raise PkiError(msg)
+    certificate_path = out / f"to-{listener}.crt"
+    key_path = out / f"to-{listener}.key"
+    if key_path.exists():
+        msg = f"refusing to overwrite existing private key {key_path}"
+        raise PkiError(msg)
+    authority = _load_authority(ca_key_dir, listener)
+    client = issue_certificate(authority, name, server=False, role=role, valid_days=days, now=now)
+    write_pem(client, certificate_path, key_path)
+    (out / f"to-{listener}-ca.crt").write_bytes(authority.certificate_pem)
+    return PkiIssueResult(
+        certificate=certificate_path,
+        fingerprint=certificate_fingerprint(client.certificate),
+        role=role,
+        listener=listener,
+        days=days,
+    )
+
+
+def pki_issue(invocation: Invocation) -> int:
+    args = invocation.args
+    missing = [
+        option
+        for option, value in (
+            ("--listener", args.listener),
+            ("--name", args.name),
+            ("--ca-key-dir", args.ca_key_dir),
+            ("--out", args.out),
+        )
+        if value is None
+    ]
+    if missing:
+        invocation.err.write(f"carto-ctl pki issue: required: {', '.join(missing)}\n")
+        return EXIT_USAGE
+    try:
+        result = issue_client(
+            args.listener, args.role, args.name, args.ca_key_dir, args.out, args.days
+        )
+    except (PkiError, OSError) as exc:
+        invocation.err.write(f"carto-ctl pki issue: {exc}\n")
+        return EXIT_FAILURE
+    invocation.out.write(
+        f"{result.certificate}  {result.fingerprint}  role {result.role}, calls "
+        f"{result.listener}, valid {result.days} days; keep the .key private.\n"
     )
     return EXIT_OK

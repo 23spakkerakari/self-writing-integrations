@@ -995,7 +995,7 @@ Deny by default. Enforced in one FastAPI dependency layer; handlers never check 
 ### 14.5 Network
 
 - Kubernetes NetworkPolicies default deny. Allowed: edge egress to configured source hosts only; core egress to configured channel and LLM hosts only; databases reachable only from the core services that need them; ingress only to web/API (and the edge webhook receiver, if used).
-- Compose: internal Docker networks; only the reverse proxy publishes a port.
+- Compose: internal Docker networks; only the reverse proxy publishes a port. It is nginx, as two proxies that are off by default: OTLP passthrough for collectors on other hosts and HTTPS for webhooks (ADR 0032); each internal listener trusts its own CA and checks the caller's role per route (ADR 0031).
 - No outbound internet by default. Phone-home off.
 
 ### 14.6 Containers and runtime

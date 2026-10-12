@@ -8,6 +8,15 @@
 #
 # Replace the values marked REPLACE. Keep the collector on the same host or network segment as
 # the log files; it is part of the edge trust zone (spec 5.2).
+#
+# A collector on another host than the Compose stack reaches edge-gateway through proxy-otlp
+# (profile push-otlp, ADR 0032), which passes the TLS connection through to the gateway. Its
+# client certificate comes from the edge-gateway CA with the `collector` role (ADR 0031):
+#
+#   carto-ctl pki issue --listener edge-gateway --name <this host> #     --ca-key-dir <the pki-ca volume> --out <a directory you copy to this host>
+#
+# That certificate can call /v1/logs and health on the gateway, nothing else, and cannot open a
+# connection to any other carto listener.
 
 extensions:
   file_storage:
@@ -47,8 +56,8 @@ receivers:
   splunk_hec:
     endpoint: 0.0.0.0:8088
     tls:
-      cert_file: /etc/carto/pki/otel-collector.crt # REPLACE
-      key_file: /etc/carto/pki/otel-collector.key # REPLACE
+      cert_file: /etc/otelcol/hec.crt # REPLACE: a server certificate your HEC senders trust
+      key_file: /etc/otelcol/hec.key # REPLACE
     resource:
       carto.source_id: src_hec # REPLACE
 
@@ -79,11 +88,14 @@ processors:
 
 exporters:
   otlphttp/edge:
-    endpoint: https://edge-gateway:8443 # REPLACE: edge-gateway internal address; path /v1/logs is appended
+    endpoint: https://carto-edge.example.internal:4318 # REPLACE: the host publishing proxy-otlp; /v1/logs is appended
     tls:
-      ca_file: /etc/carto/pki/ca.crt # REPLACE: carto-ctl pki init output
-      cert_file: /etc/carto/pki/otel-collector.crt
-      key_file: /etc/carto/pki/otel-collector.key
+      # carto-ctl pki issue --listener edge-gateway output (see the header)
+      ca_file: /etc/carto/pki/to-edge-gateway-ca.crt
+      cert_file: /etc/carto/pki/to-edge-gateway.crt
+      key_file: /etc/carto/pki/to-edge-gateway.key
+      # The passthrough hands the connection to the gateway, whose certificate names edge-gateway.
+      server_name_override: edge-gateway
       min_version: "1.2"
     compression: zstd
     timeout: 30s

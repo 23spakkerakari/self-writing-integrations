@@ -122,6 +122,20 @@ sources:
       message_field: msg
       severity_field: level
 
+  # Webhooks from the storefront's payment provider (ADR 0032): reachable only through
+  # proxy-webhooks (profile push-webhooks). The HMAC secret is set with
+  # `carto-edge secret set shop_webhook_secret` (docs/install/compose-pilot.md).
+  - id: src_shop_hooks
+    system: sys_webstore
+    type: webhook
+    secret_ref: local://shop_webhook_secret
+    config:
+      event_type_field: type
+    parse:
+      timestamp_field: created_at
+      timestamp_format: iso8601
+      timezone: UTC
+
 field_policies:
   - field: sys_warehouse/*/customer_name
     field_class: person_name

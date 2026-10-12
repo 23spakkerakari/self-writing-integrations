@@ -144,10 +144,17 @@ def test_analyze_config_pins_phonetic_forms_for_the_composite_link(analyze: Sour
 # -- deploy/compose/sources.dev.yaml -----------------------------------------------------------
 
 
+def _scenario_sources(config: SourcesFile) -> SourcesFile:
+    """The sources the simulator produces data for: without the push-only webhook example of the
+    dev stack (ADR 0032), which no scenario A system sends."""
+    kept = [source for source in config.sources if source.type is not SourceType.WEBHOOK]
+    return config.model_copy(update={"sources": kept})
+
+
 def test_dev_sources_name_the_same_sources_systems_and_pins(
     dev: SourcesFile, analyze: SourcesFile
 ) -> None:
-    _ids_match_ground_truth(dev)
+    _ids_match_ground_truth(_scenario_sources(dev))
     _pins_enable_phonetic_names(dev)
     assert dev.field_policies == analyze.field_policies
     assert dev.policy_version == analyze.policy_version
@@ -179,10 +186,18 @@ def test_dev_sources_route_each_source_through_the_right_connector(dev: SourcesF
 
 def test_dev_sources_parse_hints_match_the_analyzer(dev: SourcesFile, analyze: SourcesFile) -> None:
     analyzer = {source.id: source.parse for source in analyze.sources}
-    for source in dev.sources:
+    for source in _scenario_sources(dev).sources:
         if source.id == SRC_WMS_DB:
             continue  # the row stream is NDJSON in the dev stack, CSV for the analyzer
         assert source.parse == analyzer[source.id], source.id
+
+
+def test_dev_sources_add_one_webhook_source_for_the_push_route(dev: SourcesFile) -> None:
+    """The only source beyond scenario A: the example the CI push-route check posts to."""
+    [hooks] = [source for source in dev.sources if source.type is SourceType.WEBHOOK]
+    assert hooks.id == "src_shop_hooks"
+    assert hooks.secret_ref == "local://shop_webhook_secret"  # noqa: S105 - a reference, not a value
+    assert hooks.system == "sys_webstore"
 
 
 def test_dev_sources_header_documents_the_row_stream_gap() -> None:

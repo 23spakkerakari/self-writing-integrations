@@ -53,6 +53,13 @@ step-up for reveal).
     service keys, each in its own Compose volume mounted only by its service (ADR 0031), and the
     listener CA keys in the separate `pki-ca` volume that only the `pki-init` job mounts; the analyzer's state directory, as
     sensitive as an installed edge (ADR 0025).
+  - *Push routes (ADR 0032):* `proxy-webhooks` is the one service meant to face the internet: it
+    terminates HTTPS, admits only `POST /webhooks/<source id>` with per-IP rate and connection
+    limits and a 1 MiB body cap, and forwards with the `proxy` role, so a webhook sender reaches
+    no other route and is still authenticated by its HMAC signature at the gateway.
+    `proxy-otlp` passes TLS through, so collectors on customer hosts authenticate to the gateway
+    with their own `collector` certificates; a stolen collector key reaches `/v1/logs` and health
+    on the gateway only. Both are off unless their Compose profile is enabled.
   - *Trust boundary changes:* collector to `edge-gateway` over mutual TLS (OTLP/HTTP, client
     certificate from the edge-gateway CA with the `otel-collector` or `collector` role, ADR
     0031); `edge-gateway` to `ingest-api` over mutual TLS (client certificate from the ingest-api
