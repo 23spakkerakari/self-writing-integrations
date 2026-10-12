@@ -34,6 +34,7 @@ from carto_common.logging import (
     HIGH_ENTROPY_MASK,
     JWT_MASK,
     MAX_DEPTH,
+    METRIC_KEY_QUALIFIERS,
     PEM_MASK,
     QUIET_LIBRARY_LOGGERS,
     REDACTED,
@@ -43,6 +44,7 @@ from carto_common.logging import (
     get_logger,
     identifier_shape,
     is_drop_key,
+    is_metric_key,
     is_secret_key,
     mask_string,
     redact,
@@ -557,13 +559,86 @@ def test_event_message_is_masked() -> None:
 # ---------------------------------------------------------------------------------------------
 
 
-def test_non_string_scalars_are_untouched() -> None:
-    out = _redact(count=4471, big=2**70, ratio=0.5, ok=True, nothing=None)
-    assert out["count"] == 4471
-    assert out["big"] == 2**70
+def test_small_numbers_booleans_and_none_are_untouched() -> None:
+    out = _redact(retries=3, ratio=0.5, took=0.0123, neg=-999, ok=True, nothing=None, amount=12.5)
+    assert out["retries"] == 3
     assert out["ratio"] == 0.5
+    assert out["took"] == 0.0123  # leading zeros are not digits of a value
+    assert out["neg"] == -999
     assert out["ok"] is True
     assert out["nothing"] is None
+    assert out["amount"] == 12.5
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("customer_id", 48812213, "99999999"),
+        ("card", 4111111111111111, "9999999999999999"),
+        ("total", 207.81, "999.99"),  # an order total is a value, not a metric
+        ("order", 4471, "9999"),
+        ("phone", 15551234567, "99999999999"),
+        ("delta", -48812213, "-99999999"),
+        ("weight_kg", 1234.5, "9999.9"),
+        ("big", 2**70, "9" * len(str(2**70))),
+        ("amount", 4471.0, "9999.9"),
+        ("tiny", 1.2345e-20, "9.9999A-99"),
+    ],
+)
+def test_numbers_of_four_or_more_digits_are_masked_by_default(
+    key: str, value: float, expected: str
+) -> None:
+    out = _redact(**{key: value})
+    assert out[key] == expected
+    assert str(value) not in json.dumps(out)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "count",
+        "total_count",
+        "events",
+        "records",
+        "rows",
+        "duration_ms",
+        "retry_in_seconds",
+        "events_per_second",
+        "overlap_days",
+        "bytes",
+        "queue_depth",
+        "batch_size",
+        "port",
+        "status",
+        "pid",
+        "attempts",
+        "policy_version",
+        "quarantine_samples",
+        "batches",
+        "max_len",
+    ],
+)
+def test_numbers_under_a_metric_key_survive(key: str) -> None:
+    assert is_metric_key(key)
+    out = _redact(**{key: 48812213}, nested={key: 4471.25})
+    assert out[key] == 48812213
+    assert out["nested"] == {key: 4471.25}
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["customer_id", "order", "total", "amount", "card", "id", "count_of_x", "batch", "level", ""],
+)
+def test_keys_that_do_not_end_in_a_metric_qualifier_are_not_metric_keys(key: str) -> None:
+    assert not is_metric_key(key)
+
+
+def test_metric_qualifier_does_not_cover_list_items_or_secret_keys() -> None:
+    out = _redact(events=[48812213, 3], count={"customer_id": 48812213}, token_count=48812213)
+    assert out["events"] == ["99999999", 3]  # a list of numbers is a list of values
+    assert out["count"] == {"customer_id": "99999999"}
+    assert out["token_count"] == 48812213  # a count of tokens, not a token (rule 1 qualifier)
+    assert {"count", "ms", "seconds", "bytes", "port", "version"} <= METRIC_KEY_QUALIFIERS
 
 
 def test_nested_structures_are_walked() -> None:
@@ -672,7 +747,7 @@ def test_other_object_types_are_converted_then_masked() -> None:
     assert out["took"] == 1.5
     assert out["path"].replace("\\", "/") == "AAAAAAA/AA-9999999.AAA"
     assert out["kind"] == "file arrival AA-9999999"
-    assert out["level"] == 4471
+    assert out["level"] == "9999"  # an IntEnum is its value, and "level" is not a metric
     assert out["source"] == "src_orders_log"
     assert out["connector"] == {"name": "orders", "password": REDACTED, "host": "AA-9999.AAAAAAAA"}
     assert out["cursor"] == {"source": "src_orders_log", "position": "AAAAAA.AAA:AAAA:9999"}
@@ -711,7 +786,13 @@ _leaf = st.one_of(
     st.text(max_size=16),
     _marker_text,
 )
-_keys = st.one_of(st.text(max_size=12), st.sampled_from(MARKERS))
+# Keys hold no digits so that a masked key still names the metric its original named; numbers
+# planted under metric keys and under value keys check both sides of the number rule.
+_keys = st.one_of(
+    st.text(max_size=12).filter(lambda key: not any(char.isdecimal() for char in key)),
+    st.sampled_from(MARKERS),
+    st.sampled_from(("count", "duration_ms", "customer_id", "total", "events")),
+)
 
 
 def _nested(depth: int) -> st.SearchStrategy[Any]:
@@ -721,19 +802,26 @@ def _nested(depth: int) -> st.SearchStrategy[Any]:
     return st.one_of(_leaf, st.lists(inner, max_size=4), st.dictionaries(_keys, inner, max_size=4))
 
 
-def _assert_no_marker(value: Any) -> None:
+def _digits(number: float) -> int:
+    return sum(char.isdecimal() for char in str(number).lstrip("-0."))
+
+
+def _assert_no_marker(value: Any, key: str = "") -> None:
     if isinstance(value, str):
         for marker in MARKERS:
             assert marker not in value
     elif isinstance(value, dict):
-        for key, item in value.items():
-            _assert_no_marker(key)
-            _assert_no_marker(item)
+        for name, item in value.items():
+            _assert_no_marker(name)
+            _assert_no_marker(item, name)
     elif isinstance(value, list):
         for item in value:
             _assert_no_marker(item)
     else:
         assert value is None or isinstance(value, bool | int | float)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            # numbers of four or more digits are values unless the key names a metric
+            assert _digits(value) < 4 or is_metric_key(key.split("#", maxsplit=1)[0])
 
 
 @given(event=st.dictionaries(_keys, _nested(5), max_size=6), message=_marker_text)
@@ -757,7 +845,15 @@ def test_configure_logging_json_end_to_end(clean_structlog: None) -> None:
     stream = io.StringIO()
     configure_logging("edge", level="INFO", stream=stream)
     log = get_logger(component="gateway")
-    log.info("login for SO-0004471", order_id="SO-0004471", count=4471, **{CREDENTIAL_KEY: PLANTED})
+    log.info(
+        "login for SO-0004471",
+        order_id="SO-0004471",
+        count=4471,
+        customer_id=48812213,
+        card=4111111111111111,
+        total=207.81,
+        **{CREDENTIAL_KEY: PLANTED},
+    )
     line = stream.getvalue()
     assert line.endswith("\n")
     data = json.loads(line)
@@ -767,6 +863,11 @@ def test_configure_logging_json_end_to_end(clean_structlog: None) -> None:
     assert data["event"] == "login for AA-9999999"
     assert data["order_id"] == "AA-9999999"
     assert data["count"] == 4471
+    assert data["customer_id"] == "99999999"
+    assert data["card"] == "9999999999999999"
+    assert data["total"] == "999.99"
+    for planted in ("48812213", "4111111111111111", "207.81"):
+        assert planted not in line
     assert data[CREDENTIAL_KEY] == REDACTED
     assert PLANTED not in line
     assert "SO-0004471" not in line
