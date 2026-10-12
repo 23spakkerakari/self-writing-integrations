@@ -285,7 +285,14 @@ _PHONE_NANP: Final = re.compile(r"(?<![\d-])(?:\(\d{3}\)\s?|\d{3}[-. ])\d{3}[-. 
 _SSN: Final = re.compile(r"(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])")
 _DIGIT_RUN: Final = re.compile(r"(?<![\d-])\d(?:[ -]?\d)+(?![\d-])")
 _DIGITS: Final = re.compile(r"\d+")
-_IBAN: Final = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{1,4}){2,8}(?![A-Z0-9])")
+_IBAN_RUN: Final = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){0,40}")
+"""An IBAN candidate: country code, check digits, then up to 40 characters each with an optional
+space before it. One way to match each step, so the search is linear (spec 2.3 invariant 8)."""
+_IBAN_ALNUM: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+_IBAN_PREFIX_LEN: Final = 4
+_IBAN_GROUP_LEN: Final = 4
+_IBAN_MIN_GROUPS: Final = 2
+_IBAN_MAX_GROUPS: Final = 8
 _CARD_MIN: Final = 13
 _CARD_MAX: Final = 19
 _CARD_LEADING: Final = frozenset("13456")
@@ -311,6 +318,52 @@ def _iban_valid(iban: str) -> bool:
     rearranged = compact[4:] + compact[:4]
     numeric = "".join(str(int(char, 36)) for char in rearranged)
     return int(numeric) % 97 == 1
+
+
+def _iban_end(text: str, start: int, candidate: str) -> int | None:
+    """The end of the longest IBAN-shaped prefix of ``candidate`` (found at ``start``): it ends
+    where a space-separated chunk ends and no letter or digit follows, and its body after the
+    first four characters fits in two to eight groups of one to four characters. ``None`` when
+    no prefix qualifies. Same spans as the earlier pattern (two letters, two digits, two to
+    eight groups of one to four characters each after an optional space, no letter or digit
+    after the last), without its nested quantifiers and their backtracking."""
+    best: int | None = None
+    groups = 0
+    body = 0
+    offset = 0
+    for index, chunk in enumerate(candidate.split(" ")):
+        if index:
+            offset += 1
+        offset += len(chunk)
+        part = len(chunk) - _IBAN_PREFIX_LEN if index == 0 else len(chunk)
+        groups += -(-part // _IBAN_GROUP_LEN)
+        body += part
+        if groups > _IBAN_MAX_GROUPS:
+            break
+        end = start + offset
+        if body >= _IBAN_MIN_GROUPS and (end >= len(text) or text[end] not in _IBAN_ALNUM):
+            best = end
+    return best
+
+
+def _iban_hits(text: str) -> list[PiiHit]:
+    """Mod-97-valid IBANs, printed in groups or compact. A linear scan: each candidate run is
+    read once, and a start that leads nowhere moves the search on by one character, where the
+    lookbehind rejects every position inside a run in constant time."""
+    hits: list[PiiHit] = []
+    position = 0
+    while True:
+        match = _IBAN_RUN.search(text, position)
+        if match is None:
+            return hits
+        start = match.start()
+        end = _iban_end(text, start, match.group(0))
+        if end is None:
+            position = start + 1
+            continue
+        if _iban_valid(text[start:end]):
+            hits.append(PiiHit("IBAN_CODE", start, end, 1.0))
+        position = end
 
 
 def _card_hits(text: str) -> list[PiiHit]:
@@ -360,11 +413,7 @@ class RegexDetector:
             PiiHit("PHONE_NUMBER", m.start(), m.end(), 0.7) for m in _PHONE_NANP.finditer(text)
         )
         hits.extend(_card_hits(text))
-        hits.extend(
-            PiiHit("IBAN_CODE", m.start(), m.end(), 1.0)
-            for m in _IBAN.finditer(text)
-            if _iban_valid(m.group(0))
-        )
+        hits.extend(_iban_hits(text))
         return _normalize(hits, len(text))
 
 
