@@ -564,6 +564,7 @@ Common requirements for every connector:
 - *Note (ADR 0035):* windows are on index time (`index_earliest`/`index_latest`), end no later than `now - settle_seconds` (default 60), and every fully searched window, even an empty one, commits the cursor through a cursor-only checkpoint. `earliest_time` is set to the window start minus `max_event_lag_hours` (default 24) only to bound the buckets scanned.
 - Backfill: chunked windows (default 1 hour) with concurrency limit (default 2) to protect the Splunk search head.
 - `test()`: runs a 1-minute search with `| head 1`, checks token capabilities are read-only where Splunk exposes them, and reports the indexes visible.
+- *Note (ADR 0037):* the configured search may run only built-in read-only commands (every pipeline stage and subsearch is checked against an allowlist in code; macros are refused), and any token capability that is not on the read list (`search`, `rtsearch`, `list_*`, `get_*` and a few named read capabilities) makes the token write-capable.
 
 #### 8.1.4 SQL databases (read-only polling)
 

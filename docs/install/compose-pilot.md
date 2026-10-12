@@ -492,9 +492,15 @@ token in Vault as the whole secret value.
 | `failure_threshold`, `breaker_reset_seconds` | 5, 60 | Circuit breaker |
 
 Splunk's extracted fields are parsed; `_raw`, `linecount` and `splunk_server` are dropped and
-`_time` is among the default timestamp fields. The test reads the token's roles and capabilities
-and reports the token as write-capable when any capability starts with `edit_`, `delete_`,
-`admin_`, `change_`, `restart_` or `output_file`.
+`_time` is among the default timestamp fields. The search may use only built-in read-only
+commands (ADR 0037): every pipeline stage and subsearch is checked when the configuration loads,
+and commands that write, send, call out or start other searches (`outputlookup`, `collect`,
+`delete`, `sendemail`, `outputcsv`, `rest`, `map`, `script`, custom commands) and macros are
+refused with the command's name. If you need a read-only command that is refused, ask for it to
+be added; there is no setting to widen the list. The test reads the token's roles and
+capabilities and reports the token as write-capable when any capability is not on the read list:
+`search`, `rtsearch`, `list_*`, `get_*`, `rest_properties_get`, `rest_apps_view`,
+`export_results_is_visible` and `pattern_detect`.
 
 #### SFTP or file-drop watch (spec 8.1.5)
 

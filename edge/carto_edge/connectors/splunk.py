@@ -13,11 +13,14 @@
   search still moves the cursor.
 - ``backfill(start, end)`` runs chunked windows of event time (default 60 minutes) with at most
   ``max_concurrency`` exports in flight (default 2) to protect the search head.
+- The configured search is checked against the read-only command allowlist at construction
+  (:func:`carto_edge.connectors.splunk_spl.check_search`, ADR 0037 item 4): every pipeline
+  stage, subsearches included, must run a built-in read-only command.
 - ``test()`` reads the token's roles (``/services/authentication/current-context``), each
   role's capabilities and ``srchIndexesAllowed`` (``/services/authorization/roles/<role>``), runs
-  a one-minute ``| head 1`` search, and reports ``WRITE_CAPABLE`` when any capability starts
-  with ``edit_``, ``delete_``, ``admin_``, ``change_``, ``restart_`` or ``output_file``
-  (``rtsearch`` is a read capability); ``VERIFIED`` otherwise, with the indexes as ``visible``.
+  a one-minute ``| head 1`` search, and reports ``WRITE_CAPABLE`` when any capability is not on
+  the read list (``search``, ``rtsearch``, ``list_*``, ``get_*`` and a few named read
+  capabilities; ADR 0037 item 5); ``VERIFIED`` otherwise, with the indexes as ``visible``.
 
 Every request goes through :func:`carto_edge.net.http.build_async_client`, so the host is
 validated and pinned by the network policy (spec 14.7). The export endpoint is a POST by
@@ -56,26 +59,19 @@ from carto_edge.connectors.base import (
     TestResult,
 )
 from carto_edge.connectors.registry import register, validate_config_model
+from carto_edge.connectors.splunk_spl import SearchCheckError, check_search, write_capabilities
 from carto_edge.net.http import build_async_client
 from carto_edge.net.retry import CircuitBreaker, RateLimiter, retry_async
 from carto_edge.pipeline.model import CursorCheckpoint, RawRecord, ReadItem
 from carto_schema.event import EventKind
 
-__all__ = ["WRITE_CAPABILITY_PREFIXES", "SplunkConfig", "SplunkConnector"]
+__all__ = ["SplunkConfig", "SplunkConnector"]
 
 logger = logging.getLogger(__name__)
 
 EXPORT_PATH: Final = "/services/search/jobs/export"
 CONTEXT_PATH: Final = "/services/authentication/current-context"
 ROLES_PATH: Final = "/services/authorization/roles"
-WRITE_CAPABILITY_PREFIXES: Final = (
-    "edit_",
-    "delete_",
-    "admin_",
-    "change_",
-    "restart_",
-    "output_file",
-)
 KEPT_FIELDS: Final = frozenset({"host", "source", "sourcetype", "index", "_time"})
 DROPPED_FIELDS: Final = frozenset({"_raw", "linecount", "splunk_server"})
 FUTURE_TOLERANCE: Final = timedelta(days=1)
@@ -134,9 +130,10 @@ class SplunkConfig(ConnectorConfig):
     @classmethod
     def _search_shape(cls, value: str) -> str:
         text = value.strip()
-        if "\x00" in text:
-            msg = "search must not contain NUL"
-            raise ValueError(msg)
+        try:
+            check_search(text)
+        except SearchCheckError as exc:
+            raise ValueError(str(exc)) from exc
         return text
 
 
@@ -473,15 +470,12 @@ class SplunkConnector:
         except (ConnectorError, httpx.HTTPError) as exc:
             checks.append(TestCheck("authentication", False, str(exc)))
             problems.append(f"Splunk authentication or role lookup failed: {exc}")
-        write_capabilities = sorted(
-            capability
-            for capability in capabilities
-            if capability != "rtsearch" and capability.startswith(WRITE_CAPABILITY_PREFIXES)
-        )
-        if write_capabilities:
-            checks.append(TestCheck("capabilities", False, ", ".join(write_capabilities[:10])))
+        writers = write_capabilities(capabilities)
+        if writers:
+            checks.append(TestCheck("capabilities", False, ", ".join(writers[:10])))
             problems.append(
-                "the token's roles carry write capabilities: " + ", ".join(write_capabilities[:10])
+                "the token's roles carry capabilities that are not on the read list "
+                "(ADR 0037): " + ", ".join(writers[:10])
             )
         else:
             checks.append(TestCheck("capabilities", True, f"{len(capabilities)} read capabilities"))
@@ -495,7 +489,7 @@ class SplunkConnector:
         except (ConnectorError, httpx.HTTPError) as exc:
             checks.append(TestCheck("search", False, str(exc)))
             problems.append(f"the one-minute test search failed: {exc}")
-        read_only = ReadOnlyStatus.WRITE_CAPABLE if write_capabilities else ReadOnlyStatus.VERIFIED
+        read_only = ReadOnlyStatus.WRITE_CAPABLE if writers else ReadOnlyStatus.VERIFIED
         return TestResult(
             ok=not problems,
             read_only=read_only,

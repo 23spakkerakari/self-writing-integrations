@@ -216,6 +216,11 @@ def test_is_a_read_connector() -> None:
         {"base_url": "ftp://splunk.example"},
         {"base_url": "http://splunk.example:8089"},
         {"search": ""},
+        {"search": "index=orders | outputlookup carriers.csv"},
+        {"search": "index=orders | collect index=main"},
+        {"search": "index=orders | delete"},
+        {"search": "index=orders | sendemail to=ops@example.com"},
+        {"search": "| rest /services/server/info"},
         {"window_minutes": 0},
         {"bogus": 1},
     ],
@@ -413,6 +418,9 @@ async def test_reader_role_is_verified_and_lists_indexes() -> None:
         "change_own_password",
         "restart_splunkd",
         "output_file",
+        "schedule_search",
+        "rest_properties_set",
+        "a_capability_from_a_future_release",
     ],
 )
 async def test_write_capability_makes_the_token_write_capable(capability: str) -> None:
