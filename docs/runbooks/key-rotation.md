@@ -31,8 +31,9 @@ carto-edge key rotate --overlap-days 30
 ```
 
 This generates version `n+1`, wraps it with the KMS, writes `keys/tenant-key.json` (new active),
-`keys/tenant-key.v<n>.json` (previous) and `keys/rotation.json`, and records `key.rotate` in the
-edge audit file. Then restart edge-gateway (`docker compose ... restart edge-gateway`): it reads
+`keys/tenant-key.v<n>.json` (previous) and `keys/rotation.json`. It records `key.rotate.intent`
+in the edge audit file before it writes anything and `key.rotate.done` (or `key.rotate.failed`)
+after; when the audit file cannot be opened or written, nothing is rotated. Then restart edge-gateway (`docker compose ... restart edge-gateway`): it reads
 the keyring at startup. The offline analyzer reads it at the start of every run. From then on
 every new event carries one token per form per live version (ADR 0023) and the reveal vault
 stores raw values under both.
@@ -63,7 +64,9 @@ the old set intact. Tokens do not change.
   Take a new backup of `keys/`, verify it restores, then destroy the retired file; a second rewrap
   refuses to run while it exists.
 
-Restart edge-gateway afterwards. `key.rewrap` is recorded in the edge audit file.
+Restart edge-gateway afterwards. `key.rewrap.intent` and then `key.rewrap.done` (or
+`key.rewrap.failed`) are recorded in the edge audit file; without a writable audit file the
+command changes nothing.
 
 ## Loss of the tenant key
 
