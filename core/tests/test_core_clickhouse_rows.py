@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError
 
-import carto_core.db.clickhouse as clickhouse_module
 from carto_core.db.clickhouse import (
     EVENT_COLUMNS,
     EVENT_IDENTIFIERS_TABLE,
@@ -213,7 +212,7 @@ def test_create_client_never_opens_a_session(monkeypatch: pytest.MonkeyPatch) ->
         seen.update(kwargs)
         return object()
 
-    monkeypatch.setattr(clickhouse_module.clickhouse_connect, "get_client", fake_get_client)
+    monkeypatch.setattr("clickhouse_connect.get_client", fake_get_client)
     create_client(ClickHouseSettings(url="http://127.0.0.1:8123", secure=False))
     assert seen["autogenerate_session_id"] is False
     assert "session_id" not in seen

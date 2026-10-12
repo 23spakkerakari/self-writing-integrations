@@ -5,6 +5,7 @@ idempotent through the ledger; the CLI wraps both."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Sequence
@@ -363,7 +364,9 @@ def test_cli_load_bundle_is_idempotent(
     bundle: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     writer, ledger = FakeWriter(), InMemoryBatchLedger()
-    monkeypatch.setattr(cli, "_open_stores", lambda _settings: (writer, ledger))
+    monkeypatch.setattr(
+        cli, "_open_stores", lambda _settings: contextlib.nullcontext((writer, ledger))
+    )
     assert cli.main(["load-bundle", "--bundle", str(bundle), "--chunk-size", "5"]) == 0
     first = capsys.readouterr().out
     assert "12 events written" in first and "3 chunks" in first

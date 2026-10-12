@@ -25,7 +25,8 @@ from __future__ import annotations
 import argparse
 import ssl
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -178,11 +179,19 @@ def _verify(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _open_stores(settings: CoreSettings) -> tuple[EventWriter, BatchLedger]:
-    """The writer and ledger of the configured stores (tests substitute in-memory ones)."""
+@contextmanager
+def _open_stores(settings: CoreSettings) -> Iterator[tuple[EventWriter, BatchLedger]]:
+    """The writer and ledger of the configured stores, closed on exit (tests substitute
+    in-memory ones)."""
     client = create_client(settings.clickhouse)
-    engine = create_engine_from_settings(settings.postgres)
-    return ClickHouseWriter(client), PostgresBatchLedger(engine)
+    try:
+        engine = create_engine_from_settings(settings.postgres)
+        try:
+            yield ClickHouseWriter(client), PostgresBatchLedger(engine)
+        finally:
+            engine.dispose()
+    finally:
+        client.close()
 
 
 def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
@@ -194,8 +203,8 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
     except BundleError as exc:
         return _fail(f"bundle rejected: {exc}")
     try:
-        writer, ledger = _open_stores(settings)
-        result = load_bundle(verified, writer, ledger, chunk_size=args.chunk_size)
+        with _open_stores(settings) as (writer, ledger):
+            result = load_bundle(verified, writer, ledger, chunk_size=args.chunk_size)
     except BundleError as exc:
         return _fail(f"bundle rejected while loading: {exc}")
     except (WriterError, LedgerError, SQLAlchemyError, CoreConfigError) as exc:

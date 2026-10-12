@@ -4,6 +4,7 @@ ingest-api command refuses to start without its TLS files before touching any da
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -14,6 +15,8 @@ import pytest
 from carto_common.pki import create_ca, issue_certificate, write_pem
 from carto_core import cli
 from carto_core.cli import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, build_parser, main
+from carto_core.db.clickhouse import ClickHouseWriter
+from carto_core.ingest.ledger import PostgresBatchLedger
 from carto_core.settings import CoreSettings
 
 
@@ -166,3 +169,31 @@ def test_healthcheck_against_nothing_listening_is_a_failure(
 
 def test_module_entry_point_matches_main() -> None:
     assert sys.modules["carto_core.cli"].main is main
+
+
+class _Closable:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def dispose(self) -> None:
+        self.closed += 1
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_open_stores_closes_the_client_and_disposes_the_engine(
+    monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    client, engine = _Closable(), _Closable()
+    monkeypatch.setattr(cli, "create_client", lambda _settings: client)
+    monkeypatch.setattr(cli, "create_engine_from_settings", lambda _settings: engine)
+    expected = pytest.raises(RuntimeError) if fail else contextlib.nullcontext()
+    with expected, cli._open_stores(CoreSettings()) as (writer, ledger):
+        assert isinstance(writer, ClickHouseWriter)
+        assert isinstance(ledger, PostgresBatchLedger)
+        if fail:
+            raise RuntimeError("load failed")
+    assert client.closed == 1
+    assert engine.closed == 1
