@@ -328,6 +328,29 @@ def test_heartbeat_upsert_keeps_the_latest(world: World) -> None:
     assert record is not None and record.status == "ok" and record.error_count == 0
 
 
+def test_an_older_heartbeat_never_overwrites_a_newer_one(world: World) -> None:
+    """Two heartbeats in flight can commit out of order: the one the edge sent last wins."""
+    newer = _heartbeat(status="ok", error_count=0, sent_at="2026-10-08T11:59:30.000Z")
+    older = _heartbeat(status="failing", error_count=9, sent_at="2026-10-08T11:58:30.000Z")
+    assert _post(world, "/internal/heartbeat", newer).status_code == 200
+    assert _post(world, "/internal/heartbeat", older).status_code == 200
+    record = world.health.get("default", "src_wms_db")
+    assert record is not None
+    assert (record.status, record.error_count) == ("ok", 0)
+    assert record.sent_at == datetime(2026, 10, 8, 11, 59, 30, tzinfo=UTC)
+
+
+def test_a_heartbeat_from_the_future_is_ordered_by_its_arrival(world: World) -> None:
+    """An edge clock running ahead cannot pin the row: sent_at is capped at the arrival time."""
+    ahead = _heartbeat(status="failing", sent_at="2027-01-01T00:00:00.000Z")
+    assert _post(world, "/internal/heartbeat", ahead).status_code == 200
+    record = world.health.get("default", "src_wms_db")
+    assert record is not None and record.sent_at == NOW
+    assert _post(world, "/internal/heartbeat", _heartbeat(status="ok")).status_code == 200
+    record = world.health.get("default", "src_wms_db")
+    assert record is not None and record.status == "ok"
+
+
 def test_invalid_heartbeat_is_a_422_problem(world: World) -> None:
     _assert_problem(_post(world, "/internal/heartbeat", _heartbeat(lag_seconds=-1)), 422)
     _assert_problem(_post(world, "/internal/heartbeat", _heartbeat(tenant_id="other")), 403)

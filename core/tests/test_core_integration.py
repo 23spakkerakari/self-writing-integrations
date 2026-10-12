@@ -35,7 +35,7 @@ from carto_core.bundle import LoadResult, iter_events, load_bundle, verify_bundl
 from carto_core.db.clickhouse import ClickHouseWriter, create_client
 from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.app import create_app
-from carto_core.ingest.health import PostgresSourceHealthStore
+from carto_core.ingest.health import PostgresSourceHealthStore, SourceHealthRecord
 from carto_core.ingest.ledger import PostgresBatchLedger
 from carto_core.migrations import (
     apply_clickhouse_migrations,
@@ -300,7 +300,9 @@ def test_postgres_migrations_apply_idempotently(postgres: PostgresSettings) -> N
             version = connection.execute(
                 sqlalchemy.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert version == "0001"
+        assert version == "0002"
+        health_columns = {column["name"] for column in inspector.get_columns("source_health")}
+        assert "sent_at" in health_columns
     finally:
         engine.dispose()
 
@@ -394,6 +396,39 @@ def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
     assert record.lag_seconds == 12.5
     assert record.error_count == 2
     assert record.message == "splunk export slow"
+
+
+def test_postgres_heartbeat_upsert_never_goes_back_in_time(
+    migrated: tuple[Client, sqlalchemy.Engine],
+) -> None:
+    _client, engine = migrated
+    store = PostgresSourceHealthStore(engine)
+    base = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+
+    def record(status: str, sent_minute: int) -> SourceHealthRecord:
+        sent = base.replace(minute=sent_minute)
+        return SourceHealthRecord(
+            tenant_id="default",
+            source_id="src_order_svc",
+            status=status,
+            last_success_at=None,
+            lag_seconds=0.0,
+            error_count=0,
+            buffer_depth=0,
+            oldest_buffered_at=None,
+            message="",
+            received_at=base.replace(minute=59),
+            sent_at=sent,
+        )
+
+    store.upsert(record("ok", 30))
+    store.upsert(record("failing", 10))
+    stored = store.get("default", "src_order_svc")
+    assert stored is not None
+    assert (stored.status, stored.sent_at) == ("ok", base.replace(minute=30))
+    store.upsert(record("degraded", 40))
+    stored = store.get("default", "src_order_svc")
+    assert stored is not None and stored.status == "degraded"
 
 
 def test_bundle_loads_into_clickhouse_idempotently(
