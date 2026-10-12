@@ -13,6 +13,7 @@ import json
 import os
 import warnings
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -416,6 +417,19 @@ def test_bundle_loads_into_clickhouse_idempotently(
             {"source_id": f"bundle_{BUNDLE_ID.lower()}"},
         ).scalar_one()
     assert chunks == 3
+
+
+def test_one_client_takes_concurrent_inserts(migrated: tuple[Client, sqlalchemy.Engine]) -> None:
+    """ingest-api shares one client across its threadpool: concurrent inserts must not trip
+    over a ClickHouse session (SESSION_IS_LOCKED)."""
+    client, _engine = migrated
+    writer = ClickHouseWriter(client)
+    groups = [[_event(f"concurrent{group}", index) for index in range(20)] for group in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(writer.write_events, groups))
+    assert [result.events for result in results] == [20] * 8
+    ids = [event.event_id for group in groups for event in group]
+    assert _count(client, "events", ids) == len(ids)
 
 
 def _leak_scan_module() -> Any:

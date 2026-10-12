@@ -233,6 +233,7 @@ class ClickHouseWriter:
 def create_client(settings: ClickHouseSettings) -> Client:
     """Connect with the configured user; the password comes from ``password_file`` (spec 14.4).
 
+    The client is sessionless because ``ingest-api`` shares it across concurrent requests.
     Raises :class:`WriterError` when the server cannot be reached or refuses the login; the
     message never includes the password.
     """
@@ -248,6 +249,9 @@ def create_client(settings: ClickHouseSettings) -> Client:
             ca_cert=str(settings.ca_file) if settings.ca_file is not None else None,
             connect_timeout=timeout,
             send_receive_timeout=timeout,
+            # One client serves every threadpool worker. With a session id each concurrent
+            # request would wait for, or fail with, SESSION_IS_LOCKED; nothing needs a session.
+            autogenerate_session_id=False,
         )
     except (ClickHouseError, OSError) as exc:
         msg = (

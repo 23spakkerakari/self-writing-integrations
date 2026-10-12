@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError
 
+import carto_core.db.clickhouse as clickhouse_module
 from carto_core.db.clickhouse import (
     EVENT_COLUMNS,
     EVENT_IDENTIFIERS_TABLE,
@@ -19,10 +20,12 @@ from carto_core.db.clickhouse import (
     WriterError,
     WriteResult,
     columns_of,
+    create_client,
     event_row,
     field_ref,
     identifier_rows,
 )
+from carto_core.settings import ClickHouseSettings
 from carto_schema.event import CanonicalEvent
 
 OBSERVED = datetime(2026, 10, 6, 21, 12, 3, 412000, tzinfo=UTC)
@@ -199,3 +202,18 @@ def test_writer_ping_reports_the_client_state() -> None:
     assert ClickHouseWriter(FakeClient(alive=True)).ping() is True
     assert ClickHouseWriter(FakeClient(alive=False)).ping() is False
     assert ClickHouseWriter(FakeClient(fail=OSError("down"))).ping() is False
+
+
+def test_create_client_never_opens_a_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One client is shared by the threadpool: a session id would serialize requests and fail
+    concurrent ones with SESSION_IS_LOCKED, so the client is created without one."""
+    seen: dict[str, Any] = {}
+
+    def fake_get_client(**kwargs: Any) -> object:
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(clickhouse_module.clickhouse_connect, "get_client", fake_get_client)
+    create_client(ClickHouseSettings(url="http://127.0.0.1:8123", secure=False))
+    assert seen["autogenerate_session_id"] is False
+    assert "session_id" not in seen
