@@ -51,7 +51,7 @@ from carto_edge.config import ConfigError, EdgeSettings, SourceConfig, load_sour
 from carto_edge.connectors.base import ConnectorError, InvalidConfigError, ReadConnector
 from carto_edge.connectors.registry import build_connector
 from carto_edge.keys import KeyManagementError
-from carto_edge.pipeline.model import PipelineResult, RawRecord
+from carto_edge.pipeline.model import CursorCheckpoint, PipelineResult, RawRecord
 from carto_edge.pipeline.pii import PiiDetector
 from carto_edge.runtime import EdgeRuntime, build_connector_context, build_runtime
 
@@ -110,6 +110,8 @@ async def _collect(connector: ReadConnector, limit: int) -> list[RawRecord]:
     stream = connector.read(None)
     try:
         async for record in stream:
+            if isinstance(record, CursorCheckpoint):  # no cursor in a benchmark
+                continue
             records.append(record)
             if len(records) >= limit:
                 break

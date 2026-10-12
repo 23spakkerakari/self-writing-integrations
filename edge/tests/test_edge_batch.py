@@ -39,7 +39,7 @@ from carto_edge.pipeline.batch import (
 )
 from carto_edge.pipeline.buffer import DiskBuffer, decompress_batch
 from carto_edge.pipeline.ingestor import BackpressureState, IngestorLike
-from carto_edge.pipeline.model import RawRecord
+from carto_edge.pipeline.model import CursorCheckpoint, RawRecord
 from carto_edge.pipeline.pii import RegexDetector
 from carto_edge.pipeline.pipeline import REASON_UNKNOWN_SOURCE
 from carto_edge.runtime import EdgeRuntime, build_runtime
@@ -609,3 +609,69 @@ def test_a_refusal_before_the_first_cursor_record_still_forces_a_re_read(
         ing.flush_stale(datetime(2030, 1, 1, tzinfo=UTC))
         assert cur.get("src_web") is None
         assert small.pending_events() == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# ADR 0035: cursor-only checkpoints
+# ---------------------------------------------------------------------------------------------
+
+
+def checkpoint(line_no: int, source_id: str = "src_web") -> CursorCheckpoint:
+    return CursorCheckpoint(source_id=source_id, cursor={"file": "app.ndjson", "line": line_no})
+
+
+def test_a_checkpoint_with_nothing_pending_is_committed_at_once(
+    runtime: EdgeRuntime, buffer: DiskBuffer, cursors: CursorStore
+) -> None:
+    """An empty Splunk window or SQL range still moves the cursor (ADR 0035 item 1)."""
+    r = rig(runtime, buffer, cursors, events=3)
+    outcome = r.ingestor.ingest([checkpoint(10)])
+    assert outcome.records == 0  # a checkpoint is not a record and carries no event
+    assert outcome.events == 0
+    assert line(cursors.get("src_web")) == 10
+    assert buffer.depth() == 0
+
+
+def test_a_checkpoint_waits_for_the_records_before_it(
+    runtime: EdgeRuntime, buffer: DiskBuffer, cursors: CursorStore
+) -> None:
+    r = rig(runtime, buffer, cursors, events=3)
+    r.ingestor.ingest([record(1, cursor=False), record(2, cursor=False), checkpoint(20)])
+    assert cursors.get("src_web") is None  # records 1 and 2 sit in a partial batch
+    r.ingestor.ingest([record(3, cursor=False), record(4, cursor=False)])
+    # [1, 2, 3] was sealed when 4 arrived: the checkpoint after 2 is durable, 3 carries none.
+    assert line(cursors.get("src_web")) == 20
+    r.ingestor.ingest([checkpoint(40)])
+    assert line(cursors.get("src_web")) == 20  # record 4 is still pending
+    r.ingestor.flush()
+    assert line(cursors.get("src_web")) == 40
+
+
+def test_a_checkpoint_after_a_lost_batch_is_refused(
+    runtime: EdgeRuntime, tmp_path: Path, cursors: CursorStore
+) -> None:
+    with DiskBuffer(tmp_path / "small.sqlite", max_bytes=1, backpressure_ratio=0.5) as small:
+        small.append_bytes(b"x", source_id="other", batch_id="pre", events=1, created_at=NOW)
+        r = rig(runtime, small, cursors, events=2)
+        outcome = r.ingestor.ingest(
+            [
+                record(1, cursor=False),
+                record(2, cursor=False),
+                record(3, cursor=False),
+                checkpoint(30),
+            ]
+        )
+        assert buffer_refused(outcome) == 3
+        assert cursors.get("src_web") is None  # never past the lost events
+        small.ack([row.id for row in small.iter_pending()])
+        r.ingestor.flush()
+        assert cursors.get("src_web") is None
+
+
+def test_a_checkpoint_of_an_unknown_source_is_ignored(
+    runtime: EdgeRuntime, buffer: DiskBuffer, cursors: CursorStore
+) -> None:
+    r = rig(runtime, buffer, cursors)
+    outcome = r.ingestor.ingest([checkpoint(5, source_id="src_nope")])
+    assert outcome.records == 0
+    assert cursors.get("src_nope") is None

@@ -50,7 +50,7 @@ from carto_edge.config import (
 from carto_edge.connectors.base import ConnectorError, InvalidConfigError, ReadConnector
 from carto_edge.connectors.registry import build_connector
 from carto_edge.keys import KeyManagementError
-from carto_edge.pipeline.model import RawRecord
+from carto_edge.pipeline.model import CursorCheckpoint, RawRecord
 from carto_edge.pipeline.pii import PiiDetector
 from carto_edge.runtime import EdgeRuntime, build_connector_context, build_runtime
 from carto_schema.bundle import BundleManifest
@@ -163,6 +163,8 @@ async def _drain_async(
     total = 0
     try:
         async for record in connector.read(None):
+            if isinstance(record, CursorCheckpoint):  # the analyzer keeps no cursor
+                continue
             chunk.append(record)
             if len(chunk) >= chunk_size:
                 handle(chunk)
