@@ -1,52 +1,51 @@
-# Self-writing integrations
+# carto
 
-An agentic platform that synthesizes, verifies, publishes and maintains API integrations for the
-people-management domain. Integrations are declarative manifests interpreted by a generic runtime;
-an agent writes and repairs the manifests, and humans approve what goes live.
+Codename for an integration observability product: a read-only layer over the systems a company
+already runs that maps how data moves between them, traces any business record across every
+system it touched, watches for stalls and silent failures, and shows where a person is still
+doing the talking. The one-line pitch: *"We show you how your systems talk to each other, and
+where a person is still doing the talking."*
 
-The architecture, decisions, and milestone plan live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The build spec in [`docs/SPEC.md`](docs/SPEC.md) is the source of truth. Decisions that deviate
+from or extend it are in [`docs/adr/`](docs/adr/). Milestone plans are in
+[`docs/plans/`](docs/plans/).
 
 ## Status
 
-- **Milestone 1, built.** Manifest schema, runtime gateway with response validation, spec-derived mock
-  server, verification harness, versioned registry, Claude synthesis agent, HTTP API and CLI. BambooHR
-  employees mapped onto the canonical Employee object.
-- **Milestone 2, built.** Multi-tenant OAuth broker: envelope-encrypted vault, PKCE consent with a
-  human-approved scope screen, autonomous refresh and re-consent detection, append-only audit log,
-  notifications, and a mock authorization server for offline tests. Gusto is the practice integration.
-- **Milestone 3, built.** Drift detection and repair: the gateway's drift events (schema, status, auth,
-  deprecation, pagination, mapping) aggregate into incidents; deterministic triage assigns class and risk;
-  a mechanical patch or the repair agent produces a candidate that is verified against the API as it
-  behaves now; change requests wait for approval (or a per-risk policy), run a canary, promote, and roll
-  back in one step. Drift worlds simulate every drift type against the mock.
-- **Developer console, built.** A React/Vite app under `frontend/`: integrations, versions and their
-  verification reports, a call console, tenant connections with the consent screen, drift incidents and
-  change requests behind the approval gate, per-integration approval policies, rollback, the activity
-  feed and the canonical model reference. Runs against the API in mock or live mode.
-- **Public site, built.** A static site under `site/` (no build step): overview, how it works, console tour,
-  docs, changelog and a 404, sharing one stylesheet. See [site/README.md](site/README.md).
-- Next: milestone 4, the traffic-first ingester.
+M0 (foundations) built on 2026-10-06; see [`docs/plans/M0.md`](docs/plans/M0.md). M1 (edge
+pipeline and offline analyzer) is next.
+
+## Layout
 
 ```
-cd backend
-pip install -e ".[dev]"
-python -m pytest
-
-python -m app.cli import manifests/bamboohr.yaml
-python -m app.cli verify bamboohr 0.1.0
-python -m app.cli publish bamboohr 0.1.0
-python -m app.cli call bamboohr list_employees --config company_domain=acme --secret api_key=BAMBOOHR_API_KEY --mock
-
-uvicorn app.main:app --reload      # http://127.0.0.1:8000/docs
-
-cd ../frontend
-npm install
-npm run dev                        # http://127.0.0.1:5173, proxies /api to the backend
+packages/carto-schema/   canonical event and edge-to-core contract models, JSON Schema export
+packages/carto-common/   settings, logging with redaction, ids
+edge/                    carto-edge: connectors, pipeline, gateway, offline analyzer (M1)
+core/                    carto-core: ingest, profiler, linker, assembler, detector, notifier, api
+simulator/               scenario generators with ground truth (scenario A "shop" in M0)
+eval/                    eval harness scoring engine output against ground truth
+web/                     React UI (M2)
+otel/                    OpenTelemetry Collector template (M1)
+deploy/                  Compose (M1) and Helm (M6)
+tools/carto-ctl/         operator CLI
+docs/                    SPEC, ADRs, plans, threat model, runbooks, install guides
+legacy/                  the previous product in this repository, frozen (ADR 0005)
 ```
 
-Environment variables: `DATABASE_URL` (default SQLite in the working directory), `GATEWAY_MODE`
-(`live` or `mock`), `SYNTHESIS_MODEL` (default `claude-opus-5`), `ANTHROPIC_API_KEY` for synthesis,
-`VAULT_MASTER_KEY` (generate with `python -m app.cli vault-key`; a fixed dev key is used when unset),
-`PUBLIC_BASE_URL` for the OAuth callback, `REFRESH_SCHEDULER=1` to run token refresh in-process,
-`DRIFT_WORKER=1` to run the drift worker in-process (`DRIFT_INTERVAL_SECONDS`, `CANARY_FRACTION`,
-`CANARY_MIN_CALLS`, `REPAIR_MAX_ROUNDS` tune it).
+## Quick start
+
+Requires [`uv`](https://docs.astral.sh/uv/) and GNU make. uv downloads Python 3.12 itself.
+
+```
+make setup                       # install the locked workspace
+make check                       # lint, types, tests, schema drift check
+make sim SCENARIO=shop DAYS=14   # synthetic data for five systems plus ground truth in sim-out/shop
+make eval SCENARIO=shop          # score engine output (M0: the empty prediction) in eval/reports
+```
+
+On Windows, run these from Git Bash. If `uv` is not on PATH: `make UV="py -3.11 -m uv" check`.
+
+## Security
+
+Spec Section 2.3 lists the invariants every line of code keeps. Report a vulnerability to the
+owner privately; do not open a public issue.

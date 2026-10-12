@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "SourceStatus": {
+      "description": "Connector health as the edge sees it (spec 8.1, common requirements).",
+      "enum": [
+        "ok",
+        "degraded",
+        "failing",
+        "paused"
+      ],
+      "title": "SourceStatus",
+      "type": "string"
+    }
+  },
+  "$id": "urn:carto:schema:source_heartbeat:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One ``POST /internal/heartbeat`` body (spec 8.1 common requirements, 8.5, 12).\n\n``lag_seconds`` is how far the source cursor trails the source clock; ``buffer_depth`` and\n``oldest_buffered_at`` describe the edge's disk buffer (spec 8.5 delivery metrics). The\nnumeric fields are strict, as in the exported schema: booleans and numeric strings are\nrejected; ``lag_seconds`` accepts an integer. ``message`` is operator-facing free text that\ncore stores as sent, so the edge applies its log redaction to it first (spec 2.3\ninvariant 7: no secrets, connection strings or raw identifier values).",
+  "properties": {
+    "buffer_depth": {
+      "minimum": 0,
+      "title": "Buffer Depth",
+      "type": "integer"
+    },
+    "error_count": {
+      "minimum": 0,
+      "title": "Error Count",
+      "type": "integer"
+    },
+    "lag_seconds": {
+      "minimum": 0,
+      "title": "Lag Seconds",
+      "type": "number"
+    },
+    "last_success_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Last Success At"
+    },
+    "message": {
+      "default": "",
+      "maxLength": 1024,
+      "title": "Message",
+      "type": "string"
+    },
+    "oldest_buffered_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Oldest Buffered At"
+    },
+    "schema_version": {
+      "const": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sent_at": {
+      "format": "date-time",
+      "title": "Sent At",
+      "type": "string"
+    },
+    "source_id": {
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/SourceStatus"
+    },
+    "tenant_id": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "title": "Tenant Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "source_id",
+    "sent_at",
+    "status",
+    "last_success_at",
+    "lag_seconds",
+    "error_count",
+    "buffer_depth",
+    "oldest_buffered_at"
+  ],
+  "title": "carto source heartbeat (schema version 1)",
+  "type": "object"
+}

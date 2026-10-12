@@ -1,0 +1,338 @@
+# carto pilot stack (spec 5.5 "Pilot: Docker Compose on one VM", 14.5 "Compose: internal Docker
+# networks; only the reverse proxy publishes a port", 14.6 container hardening).
+#
+# M1 services: PostgreSQL, ClickHouse, ingest-api, edge-gateway, the OpenTelemetry Collector and
+# the simulator in live mode for `make dev`. The reverse proxy, api, web and the workers join in
+# later milestones. Passwords come from Docker secrets (files under ./secrets, never from the
+# environment); keys live in the edge state volume wrapped by the local KMS (ADR 0012).
+#
+# One-shot jobs run in this order on every `up` and are idempotent:
+#   volumes-init  chowns the named volumes to the carto uid (a new volume is root-owned)
+#   pki-init      carto-ctl pki init --if-missing: a CA per listener and one volume per service
+#                 holding only its own keys and role certificates (ADR 0031); the CA keys go to
+#                 the pki-ca volume, which no running service mounts (spec 14.4)
+#   key-init      carto-ctl key init --if-missing (local KMS; production uses Vault Transit)
+#   migrate       carto-core migrate
+#
+# Push routes (ADR 0032), each off until its profile is enabled; they are the only services that
+# publish a port (spec 14.5):
+#   proxy-otlp      --profile push-otlp       TCP passthrough on CARTO_OTLP_PORT (4318) for
+#                                              collectors holding a `carto-ctl pki issue` cert
+#   proxy-webhooks  --profile push-webhooks   HTTPS on CARTO_WEBHOOK_PORT (8443), certificate in
+#                                              ./proxy-tls, forwarded to the gateway as `proxy`
+#
+# First run:   make dev
+# Tear down:   docker compose -f deploy/compose/compose.yaml down -v
+
+name: carto
+
+x-hardening: &hardening
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  tmpfs: ["/tmp:size=64m"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+# The official database images start as root, chown their data directory and drop to their own
+# user, which needs these capabilities and nothing else; no-new-privileges still applies.
+x-db-capabilities: &db-capabilities
+  cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+
+networks:
+  core:
+    internal: true
+  edge:
+    internal: true
+  # Only the push proxies join it: an internal network cannot publish a port.
+  ingress: {}
+
+volumes:
+  pg-data:
+  ch-data:
+  edge-state:
+  # One volume per service, each holding only that service's key (ADR 0031).
+  pki-ingest-api:
+  pki-edge-gateway:
+  pki-otel-collector:
+  pki-proxy:
+  pki-ca:
+  sim-data:
+  otel-queue:
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+  ch_password:
+    file: ./secrets/ch_password
+
+services:
+  postgres:
+    image: postgres:16.6-bookworm
+    <<: [*hardening, *db-capabilities]
+    networks: [core]
+    environment:
+      POSTGRES_DB: carto
+      POSTGRES_USER: carto
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets: [pg_password]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    tmpfs: ["/tmp:size=64m", "/run/postgresql:size=16m"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carto -d carto"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    <<: [*hardening, *db-capabilities]
+    # The image's init step (create the database) stops its temporary server, which runs as the
+    # clickhouse uid, from the root entrypoint: that signal needs KILL on top of the db set.
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "KILL"]
+    networks: [core]
+    environment:
+      CLICKHOUSE_DB: carto
+      CLICKHOUSE_USER: carto
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    secrets: [ch_password]
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      # One file into users.d; the directory itself is a tmpfs because the image's entrypoint
+      # writes users.d/default-user.xml for CLICKHOUSE_USER on a read-only root filesystem.
+      - ./clickhouse/users.d/carto.xml:/etc/clickhouse-server/users.d/carto.xml:ro
+    tmpfs:
+      - "/tmp:size=256m"
+      - "/var/log/clickhouse-server:size=128m"
+      - "/etc/clickhouse-server/users.d:size=1m"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  volumes-init:
+    image: carto-ctl:dev
+    build:
+      context: ../..
+      dockerfile: deploy/docker/base.Dockerfile
+      args: { MEMBER: ctl, ENTRY: carto-ctl }
+    # Root only for the chown of fresh named volumes to the carto uid; nothing else runs here.
+    user: "0:0"
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        chown 10001:10001 /mnt/pki-ingest-api /mnt/pki-edge-gateway /mnt/pki-otel-collector
+        /mnt/pki-proxy /mnt/pki-ca /mnt/edge-state /mnt/sim-data /mnt/otel-queue
+    volumes:
+      - pki-ingest-api:/mnt/pki-ingest-api
+      - pki-edge-gateway:/mnt/pki-edge-gateway
+      - pki-otel-collector:/mnt/pki-otel-collector
+      - pki-proxy:/mnt/pki-proxy
+      - pki-ca:/mnt/pki-ca
+      - edge-state:/mnt/edge-state
+      - sim-data:/mnt/sim-data
+      - otel-queue:/mnt/otel-queue
+    restart: "no"
+
+  pki-init:
+    image: carto-ctl:dev
+    <<: *hardening
+    restart: "no"
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
+    volumes:
+      - pki-ingest-api:/etc/carto/pki/ingest-api
+      - pki-edge-gateway:/etc/carto/pki/edge-gateway
+      - pki-otel-collector:/etc/carto/pki/otel-collector
+      - pki-proxy:/etc/carto/pki/proxy
+      - pki-ca:/etc/carto/pki-ca
+    command:
+      - pki
+      - init
+      - --out
+      - /etc/carto/pki
+      - --ca-key-dir
+      - /etc/carto/pki-ca
+      - --services
+      - ingest-api,edge-gateway,otel-collector,proxy
+      - --if-missing
+
+  migrate:
+    image: carto-core:dev
+    build:
+      context: ../..
+      dockerfile: deploy/docker/base.Dockerfile
+      args: { MEMBER: core, ENTRY: carto-core }
+    <<: *hardening
+    restart: "no"
+    networks: [core]
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    environment: &core-env
+      CARTO_POSTGRES__HOST: postgres
+      CARTO_POSTGRES__DATABASE: carto
+      CARTO_POSTGRES__USER: carto
+      CARTO_POSTGRES__PASSWORD_FILE: /run/secrets/pg_password
+      # The core network is internal to this host; TLS to the databases returns with M6.
+      CARTO_POSTGRES__SSLMODE: disable
+      CARTO_CLICKHOUSE__URL: http://clickhouse:8123
+      CARTO_CLICKHOUSE__SECURE: "false"
+      CARTO_CLICKHOUSE__DATABASE: carto
+      CARTO_CLICKHOUSE__USER: carto
+      CARTO_CLICKHOUSE__PASSWORD_FILE: /run/secrets/ch_password
+    secrets: [pg_password, ch_password]
+    command: ["migrate"]
+
+  ingest-api:
+    image: carto-core:dev
+    <<: *hardening
+    networks: [core, edge]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      pki-init: { condition: service_completed_successfully }
+    environment:
+      <<: *core-env
+      CARTO_INGEST__HOST: 0.0.0.0
+      CARTO_INGEST__PORT: "8443"
+      # Its own listener CA signs its server certificate and the edge gateway's client one.
+      CARTO_INGEST__TLS_CERT_FILE: /etc/carto/pki/listener.crt
+      CARTO_INGEST__TLS_KEY_FILE: /etc/carto/pki/listener.key
+      CARTO_INGEST__CLIENT_CA_FILE: /etc/carto/pki/listener-ca.crt
+    secrets: [pg_password, ch_password]
+    volumes:
+      - pki-ingest-api:/etc/carto/pki:ro
+    command: ["ingest-api"]
+    healthcheck:
+      # Mutual TLS: the probe presents the service's own certificate (carto-core healthcheck).
+      test: ["CMD", "carto-core", "healthcheck", "--url", "https://localhost:8443/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 20s
+
+  key-init:
+    image: carto-ctl:dev
+    <<: *hardening
+    restart: "no"
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
+    volumes:
+      - edge-state:/var/lib/carto
+    command:
+      - key
+      - init
+      - --state-dir
+      - /var/lib/carto
+      - --tenant-id
+      - default
+      - --kms
+      - local
+      - --if-missing
+
+  edge-gateway:
+    image: carto-edge:dev
+    build:
+      context: ../..
+      dockerfile: deploy/docker/base.Dockerfile
+      args: { MEMBER: edge, ENTRY: carto-edge }
+    <<: *hardening
+    networks: [edge]
+    depends_on:
+      ingest-api: { condition: service_healthy }
+      key-init: { condition: service_completed_successfully }
+    environment:
+      CARTO_STATE_DIR: /var/lib/carto
+      CARTO_SOURCES_FILE: /etc/carto/sources.yaml
+      CARTO_CORE__URL: https://ingest-api:8443
+      # To ingest-api: a client certificate from the ingest-api CA (ADR 0031).
+      CARTO_CORE__CA_FILE: /etc/carto/pki/to-ingest-api-ca.crt
+      CARTO_CORE__CERT_FILE: /etc/carto/pki/to-ingest-api.crt
+      CARTO_CORE__KEY_FILE: /etc/carto/pki/to-ingest-api.key
+      CARTO_GATEWAY__HOST: 0.0.0.0
+      CARTO_GATEWAY__PORT: "8443"
+      CARTO_GATEWAY__TLS_CERT_FILE: /etc/carto/pki/listener.crt
+      CARTO_GATEWAY__TLS_KEY_FILE: /etc/carto/pki/listener.key
+      CARTO_GATEWAY__TLS_CLIENT_CA_FILE: /etc/carto/pki/listener-ca.crt
+      CARTO_KMS__PROVIDER: local
+    volumes:
+      - edge-state:/var/lib/carto
+      - pki-edge-gateway:/etc/carto/pki:ro
+      - ./sources.dev.yaml:/etc/carto/sources.yaml:ro
+      - sim-data:/data/sim:ro
+    command: ["gateway"]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    <<: *hardening
+    networks: [edge]
+    depends_on:
+      edge-gateway: { condition: service_started }
+      volumes-init: { condition: service_completed_successfully }
+    user: "10001:10001"
+    volumes:
+      - ../../otel/collector.dev.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - pki-otel-collector:/etc/carto/pki:ro
+      - sim-data:/data/sim:ro
+      - otel-queue:/var/lib/otelcol/storage
+    command: ["--config", "/etc/otelcol-contrib/config.yaml"]
+
+  proxy-otlp:
+    image: nginxinc/nginx-unprivileged:1.30.4-alpine
+    <<: *hardening
+    profiles: ["push-otlp"]
+    user: "10001:10001"
+    networks: [edge, ingress]
+    depends_on:
+      edge-gateway: { condition: service_started }
+    ports: ["${CARTO_OTLP_PORT:-4318}:4318"]
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./proxy/otlp.conf:/etc/nginx/nginx.conf:ro
+
+  proxy-webhooks:
+    image: nginxinc/nginx-unprivileged:1.30.4-alpine
+    <<: *hardening
+    profiles: ["push-webhooks"]
+    user: "10001:10001"
+    networks: [edge, ingress]
+    depends_on:
+      edge-gateway: { condition: service_started }
+      pki-init: { condition: service_completed_successfully }
+    ports: ["${CARTO_WEBHOOK_PORT:-8443}:8443"]
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./proxy/webhooks.conf:/etc/nginx/nginx.conf:ro
+      - ./proxy-tls:/etc/carto/proxy-tls:ro
+      - pki-proxy:/etc/carto/pki:ro
+
+  simulator:
+    image: carto-simulator:dev
+    build:
+      context: ../..
+      dockerfile: deploy/docker/base.Dockerfile
+      args: { MEMBER: simulator, ENTRY: carto-sim }
+    <<: *hardening
+    network_mode: none
+    depends_on:
+      volumes-init: { condition: service_completed_successfully }
+    volumes:
+      - sim-data:/data/sim
+    command: ["live", "--scenario", "shop", "--days", "2", "--speed", "60", "--out", "/data/sim"]
+    # A finished replay must not restart: a new run empties /data/sim and starts over.
+    restart: "no"
+    profiles: ["dev"]
