@@ -12,19 +12,22 @@ adds two rules, per system:
   keyed by the path so far: trusted names as written (value-like ones as ``*``), array indexes
   as ``#``, and a name not yet trusted as ``~<digest>``, so its children are counted from the
   first record; when the name is trusted its subtree moves under its name. Paths the
-  configuration names (and their prefixes) are trusted from the first record.
+  configuration names (and their prefixes) are trusted from the first record. A record
+  counts once however often it is delivered: :meth:`FieldNameStore.apply` takes the
+  record's id (the parser passes its source and locator) and the register remembers,
+  under a name's digest, the ids that already counted for it.
 - **Map detection.** A parent with ``map_min_keys`` distinct names becomes a map for good. Its
   entries are written like array elements: ``<parent>.<i>.key`` holds the key as a value and
   the entry's content is under ``<parent>.<i>.value``; only the first :data:`MAX_MAP_ENTRIES`
   entries of a record are kept.
 
-Untrusted names are counted under a 16-byte BLAKE2b digest, so the register never stores a raw
-value; trusted names are stored in clear (they travel anyway). Memory is bounded by
-:data:`MAX_PARENTS` per system; past it, every name under a new parent is masked. The gateway
-persists the register per system as plain JSON (``<system>.json``, written atomically); the
-offline analyzer keeps it in memory and calls :meth:`FieldNameStore.freeze` before its second
-pass, which then counts nothing (ADR 0017, ADR 0027 addendum). Not thread-safe: the pipeline
-calls it under its own lock.
+Untrusted names and record ids are counted under a 16-byte BLAKE2b digest, so the register
+never stores a raw value; trusted names are stored in clear (they travel anyway). Memory is
+bounded by :data:`MAX_PARENTS` per system; past it, every name under a new parent is masked.
+The gateway persists the register per system as plain JSON (``<system>.json``, written
+atomically); the offline analyzer keeps it in memory and calls :meth:`FieldNameStore.freeze`
+before its second pass, which then counts nothing (ADR 0017, ADR 0027 addendum). Not
+thread-safe: the pipeline calls it under its own lock.
 """
 
 from __future__ import annotations
@@ -78,7 +81,8 @@ INDEX: Final = "#"
 _UNTRUSTED: Final = "~"
 _CAMEL: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _SEPARATORS: Final = str.maketrans("_-.", "   ")
-STATE_VERSION: Final = 1
+STATE_VERSION: Final = 2
+"""Version 1 had no ``records``; it is still read."""
 MAX_STATE_BYTES: Final = 32 * 1024 * 1024
 DEFAULT_FLUSH_INTERVAL: Final = 60.0
 _DIGEST_BYTES: Final = 16
@@ -115,6 +119,7 @@ class _Parent:
     trusted: set[str] = field(default_factory=set)
     flagged: set[str] = field(default_factory=set)  # digests the detector flagged
     counts: dict[str, int] = field(default_factory=dict)  # digest -> records seen
+    records: dict[str, set[str]] = field(default_factory=dict)  # digest -> record id digests
 
     @property
     def distinct(self) -> int:
@@ -142,8 +147,10 @@ class GatedRecord:
 
 @dataclass(slots=True)
 class _Record:
-    """Per-record state of :meth:`FieldNameStore.apply`."""
+    """Per-record state of :meth:`FieldNameStore.apply`. ``record_id`` is the digest of the
+    id the caller gave, or ``None`` when every call counts as a new record."""
 
+    record_id: str | None = None
     out: dict[str, str] = field(default_factory=dict)
     seen: set[tuple[str, str]] = field(default_factory=set)
     entries: dict[str, dict[str, int]] = field(default_factory=dict)  # map entries by prefix
@@ -214,15 +221,18 @@ class FieldNameStore:
         trusted: frozenset[str] = frozenset(),
         *,
         structure: Mapping[str, SegmentPath] | None = None,
+        record_id: str | None = None,
     ) -> GatedRecord:
         """Gate one record's flattened ``fields`` and its ``top_keys``. ``trusted`` comes from
         :meth:`trusted_set`; a path in it is used in clear from the first record. ``structure``
         gives the segments of nested paths (:class:`~carto_edge.pipeline.parse.common.Flattened`);
         a path without an entry is one segment. Value-like segments are masked as before (ADR
         0027); when two paths end up with the same name the first value is kept; a name longer
-        than the canonical event allows is dropped."""
+        than the canonical event allows is dropped. ``record_id`` identifies the record across
+        deliveries (the parser passes ``<source_id>:<locator>``): its names count once, however
+        often it is read; without it every call counts."""
         system = self._system(system_id)
-        record = _Record()
+        record = _Record(None if record_id is None else _digest(record_id))
         out = record.out
         name_classes: dict[str, FieldClass] = {}
         for path, value in fields.items():
@@ -250,7 +260,7 @@ class FieldNameStore:
         for key in top_keys:
             parent = system.parents.get("")
             if (parent is not None and parent.is_map) or not (
-                key in trusted or self._name_trusted(system, "", key, record.seen)
+                key in trusted or self._name_trusted(system, "", key, record)
             ):
                 gated_keys.append(MASKED_SEGMENT)
             else:
@@ -303,9 +313,7 @@ class FieldNameStore:
                 parent_key = _join(parent_key, INDEX)
                 continue
             raw_prefix = ".".join(raw_segments)
-            if raw_prefix in trusted or self._name_trusted(
-                system, parent_key, segment, record.seen
-            ):
+            if raw_prefix in trusted or self._name_trusted(system, parent_key, segment, record):
                 masked = safe_segment(segment)
                 parent_key = _join(parent_key, masked)
                 if masked != segment:  # trusted, but value-like (ADR 0027)
@@ -329,9 +337,7 @@ class FieldNameStore:
             return None, False, None
         return name, cacheable, hint
 
-    def _name_trusted(
-        self, system: _System, parent_key: str, name: str, seen: set[tuple[str, str]]
-    ) -> bool:
+    def _name_trusted(self, system: _System, parent_key: str, name: str, record: _Record) -> bool:
         parent = system.parents.get(parent_key)
         if parent is None:
             if self._frozen or len(system.parents) >= MAX_PARENTS:
@@ -346,9 +352,12 @@ class FieldNameStore:
         digest = _digest(name)
         if digest in parent.flagged:
             return False
-        if (parent_key, digest) in seen:
+        if (parent_key, digest) in record.seen:
             return False
-        seen.add((parent_key, digest))
+        record.seen.add((parent_key, digest))
+        counted = parent.records.get(digest)
+        if record.record_id is not None and counted is not None and record.record_id in counted:
+            return False  # the same record delivered again counts no further
         count = parent.counts.get(digest)
         if count is None:
             if parent.distinct + 1 >= self._map_min_keys:
@@ -356,6 +365,7 @@ class FieldNameStore:
                 parent.trusted.clear()
                 parent.flagged.clear()
                 parent.counts.clear()
+                parent.records.clear()
                 system.cache.clear()
                 system.dirty = True
                 _log().info("field_map_detected", parent=parent_key or "<root>")
@@ -365,9 +375,12 @@ class FieldNameStore:
         system.dirty = True
         if count < MIN_NAME_RECORDS:
             parent.counts[digest] = count
+            if record.record_id is not None:
+                parent.records.setdefault(digest, set()).add(record.record_id)
             self._maybe_flush()
             return False
         del parent.counts[digest]
+        parent.records.pop(digest, None)
         if self._flags(name):
             parent.flagged.add(digest)
             return False
@@ -446,6 +459,9 @@ class FieldNameStore:
                     "trusted": sorted(parent.trusted),
                     "flagged": sorted(parent.flagged),
                     "counts": dict(sorted(parent.counts.items())),
+                    "records": {
+                        digest: sorted(ids) for digest, ids in sorted(parent.records.items())
+                    },
                 }
                 for key, parent in system.parents.items()
             },
@@ -496,7 +512,7 @@ def _is_digest(value: str) -> bool:
 
 def _parents_from_json(data: Any) -> dict[str, _Parent]:
     """Validate a persisted register; raises ``ValueError`` on anything unexpected."""
-    if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+    if not isinstance(data, dict) or data.get("version") not in (1, STATE_VERSION):
         msg = "unknown name state version"
         raise ValueError(msg)
     raw = data.get("parents")
@@ -528,8 +544,28 @@ def _parents_from_json(data: Any) -> dict[str, _Parent]:
             trusted=_string_list(item.get("trusted"), "trusted"),
             flagged=flagged,
             counts=dict(counts),
+            records=_records_from_json(item.get("records", {}), counts),
         )
     return parents
+
+
+def _records_from_json(raw: Any, counts: Mapping[str, int]) -> dict[str, set[str]]:
+    """The record ids (digests) counted under each pending name; every entry must belong to
+    a counted name and hold no more ids than the count."""
+    if not isinstance(raw, dict):
+        msg = "records must be a mapping"
+        raise ValueError(msg)
+    records: dict[str, set[str]] = {}
+    for digest, ids in raw.items():
+        if not isinstance(digest, str) or digest not in counts:
+            msg = "records must belong to counted names"
+            raise ValueError(msg)
+        found = _string_list(ids, "records")
+        if len(found) > counts[digest] or not all(_is_digest(value) for value in found):
+            msg = "record ids must be digests within the count"
+            raise ValueError(msg)
+        records[digest] = found
+    return records
 
 
 def _score_threshold(detector: PiiDetector) -> float:

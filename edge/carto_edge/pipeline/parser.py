@@ -356,6 +356,7 @@ class RecordParser:
                 draft.top_keys,
                 self._trusted_for(raw),
                 structure=draft.structure,
+                record_id=f"{raw.source_id}:{raw.locator}",
             )
             fields, top_keys, name_classes = gated.fields, gated.top_keys, gated.name_classes
         template_text = draft.template_text
