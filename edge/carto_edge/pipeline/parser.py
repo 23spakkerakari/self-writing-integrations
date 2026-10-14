@@ -43,7 +43,7 @@ from carto_edge.config import (
     RecordFormat,
     SourceConfig,
 )
-from carto_edge.pipeline.model import ParsedRecord, RawRecord
+from carto_edge.pipeline.model import FieldClass, ParsedRecord, RawRecord
 from carto_edge.pipeline.parse.access_log import AccessLogParser
 from carto_edge.pipeline.parse.common import (
     SegmentPath,
@@ -345,6 +345,7 @@ class RecordParser:
         config = self._config
         system_id = raw.system_id
         top_keys: Sequence[str]
+        name_classes: dict[str, FieldClass] = {}
         if self._names is None:
             fields = _safe_fields(draft.fields)
             top_keys = tuple(safe_path(key) for key in draft.top_keys)
@@ -356,7 +357,7 @@ class RecordParser:
                 self._trusted_for(raw),
                 structure=draft.structure,
             )
-            fields, top_keys = gated.fields, gated.top_keys
+            fields, top_keys, name_classes = gated.fields, gated.top_keys, gated.name_classes
         template_text = draft.template_text
         if draft.mine_message is not None:
             mined, params = self._templates.mine(system_id, draft.mine_message)
@@ -411,6 +412,7 @@ class RecordParser:
             actor_path=actor_path,
             parse_format=draft.parse_format,
             parse_notes=draft.notes,
+            name_classes=name_classes,
         )
 
     def _trusted_for(self, raw: RawRecord) -> frozenset[str]:

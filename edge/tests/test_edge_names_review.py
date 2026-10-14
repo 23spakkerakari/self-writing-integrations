@@ -10,15 +10,27 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from carto_edge.config import ParseConfig, SourceConfig, SourceType
-from carto_edge.pipeline.model import ParsedRecord, RawRecord
+from carto_common.crypto import Keyring, TokenKey, generate_key
+from carto_edge.config import (
+    ClassifySettings,
+    ParseConfig,
+    SourceConfig,
+    SourcesFile,
+    SourceType,
+    SystemConfig,
+)
+from carto_edge.pipeline.classify import Classifier
+from carto_edge.pipeline.model import FieldClass, ParsedRecord, PipelineResult, RawRecord
 from carto_edge.pipeline.parse.common import clean_text, flatten
 from carto_edge.pipeline.parse.json import parse_json
 from carto_edge.pipeline.parse.names import FieldNameStore
 from carto_edge.pipeline.parse.xml import parse_xml
 from carto_edge.pipeline.parser import RecordParser
 from carto_edge.pipeline.pii import RegexDetector
+from carto_edge.pipeline.pipeline import EdgePipeline
+from carto_edge.pipeline.stats import FieldStatsStore
 from carto_edge.pipeline.templates import TemplateStore
+from carto_edge.pipeline.tokenize import Tokenizer
 from carto_schema.event import EventKind
 
 SYS = "sys_web"
@@ -35,6 +47,38 @@ def _source(parse: ParseConfig | None = None) -> SourceConfig:
         config={"paths": ["x.log"]},
         parse=parse or ParseConfig(),
     )
+
+
+def _pipeline(parse: ParseConfig | None = None, *, quarantine: int = 200) -> EdgePipeline:
+    sources = SourcesFile(
+        systems=[SystemConfig(id=SYS, name="Web")],
+        sources=[_source(parse)],
+    )
+    detector = RegexDetector()
+    classifier = Classifier(
+        ClassifySettings(quarantine_samples=quarantine, distinct_threshold=10),
+        sources.field_policies,
+        detector,
+        FieldStatsStore(sample_size=64),
+        policy_version=sources.policy_version,
+    )
+    return EdgePipeline(
+        sources=sources,
+        templates=TemplateStore(),
+        classifier=classifier,
+        detector=detector,
+        tokenizer=Tokenizer(Keyring(active=TokenKey(1, generate_key())), "default"),
+        tenant_id="default",
+        retention_days=30,
+        clock=lambda: RECEIVED,
+    )
+
+
+def _dump(result: PipelineResult) -> str:
+    """Everything a result would carry off the edge or into the vault, as one text."""
+    assert result.event is not None, result.dropped_reason
+    vault = [entry.raw_value for entry in result.vault_entries]
+    return result.event.model_dump_json() + json.dumps(vault)
 
 
 def _raw(text: str, line: int = 1, locator: str | None = None) -> RawRecord:
@@ -124,3 +168,77 @@ def test_xml_paths_carry_their_segments() -> None:
     assert record is not None
     assert record.structure["svc.name.@a.b"] == (("svc.name", False), ("@a.b", False))
     assert record.structure["i.1"] == (("i", False), ("1", True))
+
+
+# -- finding 1: secret and PII name hints survive the name gate --------------------------------
+
+
+def test_a_secret_named_field_is_dropped_by_the_gate_while_its_name_is_masked() -> None:
+    pipeline = _pipeline(ParseConfig(format="ndjson"))
+    for line in range(1, 4):
+        record = {
+            "ts": "2026-09-23T04:00:00Z",
+            "level": "info",
+            "user_password": f"Hunter{line}Hunter",
+            "region": "eu",
+        }
+        result = pipeline.process(_raw(json.dumps(record), line))
+        assert "Hunter" not in _dump(result), line
+        assert result.vault_entries == [], line
+
+
+def test_a_pii_named_field_keeps_its_class_while_its_name_is_masked() -> None:
+    parser = RecordParser(_source(), TemplateStore(), FieldNameStore(RegexDetector()))
+    parsed = parser.parse(_raw(json.dumps({"customer_email": "mkzed@example.com"})))
+    assert isinstance(parsed, ParsedRecord)
+    assert parsed.fields == {"*": "mkzed@example.com"}
+    assert parsed.name_classes == {"*": FieldClass.CONTACT}
+
+    pipeline = _pipeline(ParseConfig(format="ndjson"))
+    for line in range(1, 3):
+        record = {"ts": "2026-09-23T04:00:00Z", "customer_email": f"mk{line}zed@example.com"}
+        result = pipeline.process(_raw(json.dumps(record), line))
+        assert "zed@example.com" not in _dump(result)
+        assert result.vault_entries == []
+        assert result.event is not None and result.event.dropped_fields == ["*"]
+
+
+def test_distinct_masked_names_never_share_one_path() -> None:
+    names = FieldNameStore(RegexDetector())
+    gated = names.apply(SYS, {"cart_ref": "c-1", "region": "eu"}, ["cart_ref", "region"])
+    assert gated.fields == {"*": "c-1", "*~1": "eu"}
+    nested = flatten({"order": {"ref": "r-1", "lines": [{"sku": "s-1", "qty": 2}]}})
+    gated = names.apply(SYS, nested.fields, nested.top_keys, structure=nested.structure)
+    assert gated.fields == {"*.*": "r-1", "*.*~1.0.*": "s-1", "*.*~1.0.*~1": "2"}
+
+
+def test_hint_words_are_not_exempt_from_masking() -> None:
+    names = FieldNameStore(RegexDetector())
+    for _ in range(2):
+        gated = names.apply(SYS, {"alice_email": "x"}, ["alice_email"])
+    assert gated.fields == {"*": "x"}
+    assert "alice" not in json.dumps(gated.top_keys)
+
+
+# -- finding 8: a name counts once per record, not once per delivery --------------------------
+
+
+def test_one_record_delivered_three_times_does_not_trust_its_names() -> None:
+    names = FieldNameStore(RegexDetector())
+    for _ in range(5):
+        gated = names.apply(SYS, {"Zebulon Quixote": "vip"}, ["Zebulon Quixote"], record_id="r7")
+    assert gated.fields == {"*": "vip"}
+    for record_id in ("r8", "r9"):
+        names.apply(SYS, {"Zebulon Quixote": "vip"}, ["Zebulon Quixote"], record_id=record_id)
+    trusted = names.apply(SYS, {"Zebulon Quixote": "vip"}, ["Zebulon Quixote"], record_id="r10")
+    assert trusted.fields == {"Zebulon Quixote": "vip"}  # three distinct records
+
+
+def test_the_parser_identifies_a_redelivered_line() -> None:
+    parser = RecordParser(_source(), TemplateStore(), FieldNameStore(RegexDetector()))
+    line = json.dumps({"ts": "2026-09-23T04:00:00Z", "Zebulon Quixote": "vip"})
+    for _ in range(4):
+        parsed = parser.parse(_raw(line, 7))
+        assert isinstance(parsed, ParsedRecord)
+        assert "Zebulon Quixote" not in parsed.fields
+        assert "Zebulon" not in parsed.template_text

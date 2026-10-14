@@ -286,7 +286,9 @@ class EdgePipeline:
             ref = field_ref(parsed.system_id, parsed.template_id, path)
             if self._observe_on_process:
                 self._classifier.observe(ref, path, value)
-            decisions[path] = self._classifier.decide(ref, path)
+            decisions[path] = self._classifier.decide(
+                ref, path, name_class=parsed.name_classes.get(path)
+            )
         return decisions
 
     # -- streaming and pass 2 -------------------------------------------------------------------

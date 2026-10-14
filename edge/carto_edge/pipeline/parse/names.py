@@ -40,6 +40,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from carto_common.logging import get_logger
+from carto_edge.pipeline.classify import is_secret_name, pii_class_by_name
+from carto_edge.pipeline.model import FieldClass
 from carto_edge.pipeline.parse.common import (
     MASKED_SEGMENT,
     SegmentPath,
@@ -128,10 +130,38 @@ class _System:
 
 @dataclass(frozen=True, slots=True)
 class GatedRecord:
-    """A record's fields and top-level keys after the gate."""
+    """A record's fields and top-level keys after the gate. ``name_classes`` holds, for a
+    gated name that hides its raw name (masked, or a map entry), the spec 8.3 rule 2 class the
+    raw name implies (``customer_email`` -> ``contact``), so the classifier keeps applying the
+    name rule to ``*``."""
 
     fields: dict[str, str]
     top_keys: tuple[str, ...]
+    name_classes: dict[str, FieldClass] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _Record:
+    """Per-record state of :meth:`FieldNameStore.apply`."""
+
+    out: dict[str, str] = field(default_factory=dict)
+    seen: set[tuple[str, str]] = field(default_factory=set)
+    entries: dict[str, dict[str, int]] = field(default_factory=dict)  # map entries by prefix
+    masks: dict[tuple[str, str], str] = field(default_factory=dict)  # (prefix, raw) -> label
+    mask_counts: dict[str, int] = field(default_factory=dict)  # labels used per prefix
+
+    def mask(self, out_segments: Sequence[str], raw: str) -> str:
+        """The masked label of ``raw`` under the gated prefix ``out_segments``: ``*`` for the
+        first distinct raw name of the record there, then ``*~1``, ``*~2``, ... so unrelated
+        values never share a field (and its statistics) within a record."""
+        prefix = ".".join(out_segments)
+        label = self.masks.get((prefix, raw))
+        if label is None:
+            count = self.mask_counts.get(prefix, 0)
+            label = MASKED_SEGMENT if count == 0 else f"{MASKED_SEGMENT}~{count}"
+            self.mask_counts[prefix] = count + 1
+            self.masks[(prefix, raw)] = label
+        return label
 
 
 class FieldNameStore:
@@ -192,9 +222,9 @@ class FieldNameStore:
         0027); when two paths end up with the same name the first value is kept; a name longer
         than the canonical event allows is dropped."""
         system = self._system(system_id)
-        seen: set[tuple[str, str]] = set()
-        entries: dict[str, dict[str, int]] = {}
-        out: dict[str, str] = {}
+        record = _Record()
+        out = record.out
+        name_classes: dict[str, FieldClass] = {}
         for path, value in fields.items():
             segments = structure.get(path) if structure else None
             key: str | SegmentPath = path if segments is None else segments
@@ -205,7 +235,7 @@ class FieldNameStore:
                 continue
             if segments is None:
                 segments = ((path, False),)
-            name, cacheable = self._gate_path(system, segments, trusted, seen, entries, out)
+            name, cacheable, hint = self._gate_path(system, segments, trusted, record)
             if name is None:
                 continue
             if cacheable:
@@ -214,44 +244,52 @@ class FieldNameStore:
                 system.cache[(key, trusted)] = name
             if name not in out:
                 out[name] = value
+                if hint is not None:
+                    name_classes[name] = hint
         gated_keys: list[str] = []
         for key in top_keys:
             parent = system.parents.get("")
             if (parent is not None and parent.is_map) or not (
-                key in trusted or self._name_trusted(system, "", key, seen)
+                key in trusted or self._name_trusted(system, "", key, record.seen)
             ):
                 gated_keys.append(MASKED_SEGMENT)
             else:
                 gated_keys.append(safe_segment(key))
-        return GatedRecord(fields=out, top_keys=tuple(gated_keys))
+        return GatedRecord(fields=out, top_keys=tuple(gated_keys), name_classes=name_classes)
 
     def _gate_path(
         self,
         system: _System,
         segments: SegmentPath,
         trusted: frozenset[str],
-        seen: set[tuple[str, str]],
-        entries: dict[str, dict[str, int]],
-        out: dict[str, str],
-    ) -> tuple[str | None, bool]:
-        """The gated name of one path, and whether it may be cached (every segment trusted and
-        no map on the way: a trusted name stays trusted, so the answer cannot change until a
-        parent becomes a map, which clears the cache)."""
+        record: _Record,
+    ) -> tuple[str | None, bool, FieldClass | None]:
+        """The gated name of one path, whether it may be cached (every segment trusted and in
+        clear, no map on the way: a trusted name stays trusted, so the answer cannot change
+        until a parent becomes a map, which clears the cache), and the name class its raw path
+        implies when the gated name hides it.
+
+        A path whose raw name is secret-like (spec 8.3 rule 1: ``user_password``) is dropped
+        here when its gated name hides that: a masked name would otherwise reach the classifier
+        as ``*`` and an identifier-shaped secret could be tokenized with its ``raw`` form."""
+        out = record.out
         out_segments: list[str] = []
         raw_segments: list[str] = []
         parent_key = ""
         cacheable = True
+        hidden = False
         for segment, is_index in segments:
             raw_segments.append(segment)
             parent = system.parents.get(parent_key)
             if parent is not None and parent.is_map:
                 cacheable = False
+                hidden = True
                 prefix = ".".join(out_segments)
-                numbered = entries.setdefault(prefix, {})
+                numbered = record.entries.setdefault(prefix, {})
                 index = numbered.get(segment)
                 if index is None:
                     if len(numbered) >= MAX_MAP_ENTRIES:
-                        return None, False
+                        return None, False, None
                     index = len(numbered)
                     numbered[segment] = index
                     key_name = safe_path(_join(prefix, f"{index}.{MAP_KEY}"))
@@ -265,18 +303,31 @@ class FieldNameStore:
                 parent_key = _join(parent_key, INDEX)
                 continue
             raw_prefix = ".".join(raw_segments)
-            if raw_prefix in trusted or self._name_trusted(system, parent_key, segment, seen):
+            if raw_prefix in trusted or self._name_trusted(
+                system, parent_key, segment, record.seen
+            ):
                 masked = safe_segment(segment)
-                out_segments.append(masked)
                 parent_key = _join(parent_key, masked)
+                if masked != segment:  # trusted, but value-like (ADR 0027)
+                    cacheable = False
+                    hidden = True
+                    masked = record.mask(out_segments, segment)
+                out_segments.append(masked)
             else:
                 cacheable = False
-                out_segments.append(MASKED_SEGMENT)
+                hidden = True
                 parent_key = _join(parent_key, _UNTRUSTED + _digest(segment))
+                out_segments.append(record.mask(out_segments, segment))
+        hint: FieldClass | None = None
+        if hidden:
+            raw_path = ".".join(raw_segments)
+            if is_secret_name(raw_path):
+                return None, False, None
+            hint = pii_class_by_name(raw_path)
         name = safe_path(".".join(out_segments))
         if not name or len(name) > MAX_FIELD_NAME_LEN:
-            return None, False
-        return name, cacheable
+            return None, False, None
+        return name, cacheable, hint
 
     def _name_trusted(
         self, system: _System, parent_key: str, name: str, seen: set[tuple[str, str]]
