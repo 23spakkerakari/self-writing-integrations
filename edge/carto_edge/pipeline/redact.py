@@ -5,8 +5,9 @@ Spec 8.3: "Presidio runs on template constants as well, in case a constant conta
 (:func:`carto_edge.pipeline.pii.looks_like_secret`) by :data:`SECRET_MASK`, a second line of
 defence behind the masking before template mining, then runs the configured detector over the
 text and replaces every hit by ``<ENTITY_TYPE>`` (:func:`carto_edge.pipeline.pii.mask`); the
-count of both feeds ``redaction.entities_masked`` in the canonical event (spec 7.1). Results are memoized per
-``(detector, text)`` in a bounded LRU because a template repeats for thousands of events.
+count of both feeds ``redaction.entities_masked`` in the canonical event (spec 7.1). Results
+are memoized per ``(detector, text)`` in a bounded LRU because a template repeats for thousands
+of events.
 
 Spec 7.1: "attributes: only fields classified as low-cardinality and non-sensitive. Values
 truncated to 256 chars." :func:`truncate_attribute` is that cut and :func:`attribute_is_clean`
@@ -52,7 +53,7 @@ ATTRIBUTE_CACHE_SIZE: Final = 65_536
 """Memoized attribute verdicts (one entry per distinct kept value and detector)."""
 
 
-SECRET_MASK: Final = "<SECRET>"
+SECRET_MASK: Final = "<SECRET>"  # noqa: S105
 """What a secret-shaped token of a template text becomes."""
 
 _TOKEN: Final = re.compile(r"\S+")

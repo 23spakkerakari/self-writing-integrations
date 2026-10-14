@@ -96,7 +96,7 @@ def test_a_template_with_a_lone_surrogate_has_an_id() -> None:
 
 # -- secrets in free text (finding: a repeated secret became a template constant) ------------
 
-SECRET = "CorrectHorseBatteryStaple"
+SECRET = "CorrectHorseBatteryStaple"  # noqa: S105
 JWT_NO_DIGITS = "eyJabcdefghijk.eyJabcdefghijk.abcdefghijklmn"
 
 
@@ -163,6 +163,8 @@ def test_the_value_half_of_a_key_value_token_is_a_parameter() -> None:
 
 def test_template_redaction_masks_secret_shaped_tokens() -> None:
     template_cache_clear()
-    masked, count = redact_template_text(f"call upstream with {JWT_NO_DIGITS} done", RegexDetector())
+    masked, count = redact_template_text(
+        f"call upstream with {JWT_NO_DIGITS} done", RegexDetector()
+    )
     assert JWT_NO_DIGITS not in masked
     assert count == 1
