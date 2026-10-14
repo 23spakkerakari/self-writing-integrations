@@ -800,7 +800,7 @@ reveal vault and the edge audit trail exist (ADR 0014, 0025):
 
 | Path | Content | Loss means |
 | --- | --- | --- |
-| `keys/` | `local-kms.key` (local KMS only), `tenant-key.json`, `tenant-key.v<n>.json` during a rotation overlap, `rotation.json`, `vault-data-key.json`, `secrets-data-key.json`, `assertion-public.key` (M3) | Old tokens unjoinable with new ones; vault and local secrets unreadable |
+| `keys/` | `local-kms.key` (local KMS only), `tenant-key.json` until the first rotation, then `tenant-key.v<n>.json` for the active version and each version still in its overlap, `rotation.json` (names the active version), `vault-data-key.json`, `secrets-data-key.json`, `assertion-public.key` (M3) | Old tokens unjoinable with new ones; vault and local secrets unreadable |
 | `vault.sqlite` | Reveal vault: token to AES-256-GCM ciphertext of the raw value, expiring with event retention | Reveal impossible for past events |
 | `audit.ndjson` | Hash-chained record of every tokenize and reveal call | Loss of the edge's independent audit record |
 | `cursors.sqlite` | Connector positions | Sources re-read; core deduplicates |
