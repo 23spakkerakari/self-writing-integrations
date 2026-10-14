@@ -409,6 +409,7 @@ Server: through the availability group listener; carto connects with
             SELECT id, po_num, order_ref, status, warehouse_code, created_by, updated_at
             FROM carto_purchase_orders
             WHERE updated_at > :watermark
+            AND updated_at <= :upper
             ORDER BY updated_at
             LIMIT :batch
           watermark_column: updated_at
