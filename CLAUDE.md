@@ -39,12 +39,12 @@ import, lint or test it.
 
 ## Milestone status
 
-- M0 Foundations: built on branch `m0-foundations` on 2026-10-06 (docs/plans/M0.md); merge
-  after CI is green.
+- M0 Foundations: built on branch `m0-foundations` on 2026-10-06 (docs/plans/M0.md); on `main`.
 - M1 Edge pipeline and offline analyzer: built on branch `m1-edge-pipeline` on 2026-10-10
-  (docs/plans/M1.md, ADRs 0011 to 0032); CI green. Throughput met on the laptop's full gateway path
-  (ADR 0028); acceptance waits on the founder (reference-node run, questions in the demo note)
-  and on the `m1-review-fixes` branch (docs/plans/M1-review-fixes.md, ADRs 0033 to 0045).
+  (docs/plans/M1.md, ADRs 0011 to 0032); merged to `main` on 2026-10-12 (PR #1). Throughput met
+  on the laptop's full gateway path (ADR 0028). Acceptance waits on the founder's reference-node
+  run and on the review fixes: branch `m1-review-fixes` (docs/plans/M1-review-fixes.md, ADRs
+  0033 to 0043), all six packages and `fix-e2` merged into it and CI green on 2026-10-15; its PR
+  to `main` is still to be opened. Items each ADR lists under Consequences as not built remain.
 - M2 Map discovery: plan drafted on branch `m2-map-discovery` on 2026-10-12 (docs/plans/M2.md).
-  Every question in the plan is answered; code starts after M1 acceptance. ADRs from
-  0046.
+  Every question in the plan is answered; code starts after M1 acceptance. ADRs from 0046.
