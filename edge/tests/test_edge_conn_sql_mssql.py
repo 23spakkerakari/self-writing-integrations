@@ -404,7 +404,7 @@ async def test_an_empty_range_still_moves_the_cursor_to_upper() -> None:
     of the first M1 build is read as the configured type."""
     harness = Harness()
     connector = make(harness)
-    legacy = {"watermarks": {"purchase_orders": "2026-09-24T01:00:00"}}
+    legacy: dict[str, object] = {"watermarks": {"purchase_orders": "2026-09-24T01:00:00"}}
     assert await collect_items(connector, legacy) == [checkpoint("2026-10-08T11:59:30")]
     assert harness.polls() == [
         {"watermark": datetime(2026, 9, 24, 1, 0), "batch": 2, "upper": UPPER}
