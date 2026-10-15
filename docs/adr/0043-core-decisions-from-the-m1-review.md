@@ -2,8 +2,9 @@
 
 Status: proposed, 2026-10-15 (plan `docs/plans/M1-review-fixes.md`, package E; spec 2.3
 invariants 2 and 8, 5.5, 8.5, 14.4, 14.6). Records the choices made while fixing the core
-findings. It does not repeat ADR 0034 or ADR 0036; most of what they decide is not built yet
-(see Consequences). The founder reviews it with the package.
+findings, and, in sections 10 and 11 (added 2026-10-15), how core builds ADR 0034 and the core
+half of ADR 0036, without repeating what those ADRs decide. Section 12 lists where the build
+departs from them. The founder reviews it with the package.
 
 ## 1. Ingest decodes at most one bounded zstd frame
 
@@ -129,13 +130,80 @@ every service and the largest memory for ClickHouse, so a new service without li
 - `load-bundle` closes the ClickHouse client and disposes the engine, also when the load fails
   (`cli._open_stores` is a context manager).
 
+## 10. How the ledger claims a batch (ADR 0034)
+
+**Decision.** In `core/carto_core/ingest/ledger.py`:
+
+- Alembic `0003` adds `state` (`pending` or `done`, a check constraint) and `claimed_at` to
+  `ingest_batches`; rows from before it are `done`, claimed at their `received_at`.
+- `claim` is one `INSERT ... ON CONFLICT DO UPDATE ... WHERE state = 'pending' AND claimed_at <
+  :stale_before RETURNING (xmax = 0)`. A returned row is the caller's claim (new, or a stale
+  claim taken over); concurrent takeovers serialize on the row lock and the `WHERE` is checked
+  again, so one wins. Otherwise a second statement reads the state: `done` is a duplicate, and
+  anything else (a fresh claim, or a row released or pruned in between) is busy.
+- `ingest.claim_timeout_seconds` sets the timeout: default 120, 30 to 3600. A busy batch is
+  answered 503 with `Retry-After: 5`; the edge backs off on its own after a 503.
+- After the write, `complete` upserts the row as `done` whoever holds the claim by then: the
+  rows are in ClickHouse either way.
+- A failed write calls `release`, which deletes the row only while it is still the caller's
+  `pending` claim (matched on `claimed_at`), so the edge's retry is taken at once instead of
+  waiting out the timeout.
+- A `LedgerPruner` thread in `ingest-api` runs `prune` at start and then hourly: it deletes rows
+  received before `now - events_days - 1 day`, 10,000 rows per statement. A failed run is
+  logged and tried at the next interval.
+- `load-bundle` uses the same claims. A chunk another run holds stops the load with "re-run
+  later".
+- ClickHouse migrations `0003` to `0006` drop the two event tables and create them again as
+  `ReplacingMergeTree`, with the sort keys of ADR 0034. The tables are dropped `SYNC`, and any
+  rows in an existing installation are lost; the install guide says so.
+
+## 11. How core enforces the observed_at range (ADR 0036)
+
+**Decision.**
+
+- `RetentionSettings.observed_at_range(now)` (`carto_common.settings`) gives the range, with both
+  ends included. The edge will use the same function.
+- `ingest-api` checks the range after validation and before the claim, on its own clock. A
+  batch with any event outside the range is a 422 listing at most 20 events as
+  `{"loc": ["events", i, "observed_at"], "type": "observed_at_too_old" | "observed_at_future"}`.
+  The detail gives the count, and no entry carries the time.
+- `ClickHouseWriter` groups events by UTC day, oldest first, at most 90 days per group, and
+  inserts each group's events and then its identifiers. A group that fails leaves the earlier
+  groups written; the batch is not marked done, and the replacing tables merge the copies that
+  the retry writes.
+- Permanent errors are a `clickhouse_connect` `DataError` (a value it cannot serialize), or one
+  of the server codes in `PERMANENT_ERROR_CODES`: the parse, type, range and size codes, and 565
+  `TOO_MANY_PARTITIONS`. The code comes from ClickHouse's `X-ClickHouse-Exception-Code` header,
+  whatever exception class carries it. These are answered 422, release the claim, and are
+  counted in `carto_ingest_refused_total`. Code 252 `TOO_MANY_PARTS` stays transient:
+  ClickHouse 24.8 raises it both for "too many partitions for a single insert block", which the
+  day groups prevent, and for "merges are slower than inserts", which passes. Everything else
+  (unknown table, memory, timeouts, the network) is a 503.
+- `load-bundle` cuts its chunks first and then skips the events outside the range at load time,
+  so a chunk's batch id always names the same events. It reports the skipped events as too old
+  or future.
+- Every 503 from `ingest-api` now carries `Retry-After`.
+
+## 12. Departures from ADR 0034 and ADR 0036, for the founder's review
+
+- ADR 0034 item 2 says `ReplacingMergeTree(ingested_at)` for both tables. `event_identifiers`
+  has no `ingested_at` column, so it uses `ReplacingMergeTree` without a version: duplicates are
+  identical rows, and either may stay.
+- New in the build: releasing the claim after a failed write, and `complete` as an upsert.
+- `load-bundle` skips both too-old and future events. ADR 0036 names only "the rest" of a bundle
+  older than retention; a future event would be refused by `ingest-api` too.
+- A chunk loaded with some events skipped as future stays `done`, so a later re-run does not
+  load those events even once they are in range.
+
 ## Consequences
 
-- **Not built, though decided by the founder:** ADR 0034 (the ledger still checks, writes, then
-  records; `events` and `event_identifiers` are still `MergeTree`; no ledger pruning) and
-  ADR 0036 (no `observed_at` range check, no split of inserts by partition day, and permanent
-  ClickHouse errors still answer 503, so a batch spanning more than 100 partitions loops on the
-  edge).
+- **Not built, decided by the founder:** the edge half of ADR 0036 (dropping old events,
+  stamping future ones with their ingest time, the edge counters and the manifest counts). It
+  waits on the founder's question of what "run time" means for the offline analyzer over
+  simulator scenarios, which have fixed dates (`DEFAULT_START_DATE` 2026-09-23). The simulator
+  output falls out of the range a month after that date.
+- Queries that need exact counts must read with `FINAL` (ADR 0034 item 3). No core query needs
+  one in M1.
 - **Not built, from the plan:** `load-bundle` keys chunks by index, not by event range, so a
   rerun with another `--chunk-size` duplicates events; it reads the files again after hashing
   them; it checks each event's tenant against the manifest but not the manifest against core's
@@ -143,11 +211,11 @@ every service and the largest memory for ClickHouse, so a new service without li
 - Spec 14.4 asks for TLS to PostgreSQL and ClickHouse. The Compose stack turns it off on its
   internal network (`sslmode: disable`, ClickHouse over HTTP), with only a YAML comment deferring
   TLS to M6. This ADR records that deferral; the founder confirms it.
-- `RETRY_AFTER_SECONDS` is documented for 429 and 503, but only the 429 sends `Retry-After`.
 
 ## Tests
 
-`core/tests/test_core_ingest_app.py`, `test_core_settings.py`, `test_core_clickhouse_rows.py`,
+`core/tests/test_core_ingest_app.py`, `test_core_ledger.py`, `test_core_bundle.py`,
+`test_core_settings.py`, `test_core_clickhouse_rows.py`,
 `test_core_cli.py`, `test_core_migrations_sql.py`, `test_core_compose_limits.py`,
 `test_core_integration.py` (Docker only); `packages/carto-schema/tests/test_schema_event.py`,
 `test_schema_property.py`.
