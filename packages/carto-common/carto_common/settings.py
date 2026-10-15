@@ -41,6 +41,7 @@ __all__ = [
     "RetentionSettings",
     "SecretRef",
     "TelemetrySettings",
+    "observed_at_range",
     "validate_secret_ref",
 ]
 
@@ -114,6 +115,12 @@ OBSERVED_AT_SLACK: Final = timedelta(days=1)
 """How far past retention, and how far ahead of now, an ``observed_at`` may lie (ADR 0036)."""
 
 
+def observed_at_range(now: datetime, events_days: int) -> tuple[datetime, datetime]:
+    """The plausible ``observed_at`` range at ``now``, both ends included (ADR 0036): no older
+    than ``events_days`` plus one day, no more than one day ahead."""
+    return now - timedelta(days=events_days) - OBSERVED_AT_SLACK, now + OBSERVED_AT_SLACK
+
+
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
@@ -145,10 +152,7 @@ class RetentionSettings(_FrozenModel):
         """The plausible ``observed_at`` range at ``now``, both ends included (ADR 0036): no older
         than events retention plus one day, no more than one day ahead. The edge drops older
         events and stamps later ones with their ingest time; ingest-api refuses both."""
-        return (
-            now - timedelta(days=self.events_days) - OBSERVED_AT_SLACK,
-            now + OBSERVED_AT_SLACK,
-        )
+        return observed_at_range(now, self.events_days)
 
 
 LlmProvider = Literal["anthropic", "bedrock", "vertex"]

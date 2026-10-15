@@ -242,6 +242,7 @@ class _Tally:
     records: Counter[str] = field(default_factory=Counter)
     events: Counter[str] = field(default_factory=Counter)
     dropped: Counter[tuple[str, str]] = field(default_factory=Counter)
+    out_of_range: Counter[tuple[str, str]] = field(default_factory=Counter)
 
 
 class Ingestor:
@@ -392,6 +393,8 @@ class Ingestor:
         label = source_id if known else UNKNOWN_SOURCE_LABEL
         outcome.records += 1
         tally.records[label] += 1
+        if result.out_of_range is not None:
+            tally.out_of_range[label, result.out_of_range] += 1
         if result.event is not None:
             outcome.events += 1
             tally.events[label] += 1
@@ -549,3 +552,7 @@ class Ingestor:
             self._metrics.inc("carto_edge_events_total", count, source_id=label)
         for (label, reason), count in tally.dropped.items():
             self._metrics.inc("carto_edge_dropped_total", count, source_id=label, reason=reason)
+        for (label, reason), count in tally.out_of_range.items():
+            self._metrics.inc(
+                "carto_edge_events_out_of_range_total", count, source_id=label, reason=reason
+            )
