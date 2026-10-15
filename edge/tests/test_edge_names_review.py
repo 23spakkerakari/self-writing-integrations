@@ -14,6 +14,7 @@ from carto_common.crypto import Keyring, TokenKey, generate_key
 from carto_edge.config import (
     ClassifySettings,
     ParseConfig,
+    RecordFormat,
     SourceConfig,
     SourcesFile,
     SourceType,
@@ -174,7 +175,7 @@ def test_xml_paths_carry_their_segments() -> None:
 
 
 def test_a_secret_named_field_is_dropped_by_the_gate_while_its_name_is_masked() -> None:
-    pipeline = _pipeline(ParseConfig(format="ndjson"))
+    pipeline = _pipeline(ParseConfig(format=RecordFormat.NDJSON))
     for line in range(1, 4):
         record = {
             "ts": "2026-09-23T04:00:00Z",
@@ -194,7 +195,7 @@ def test_a_pii_named_field_keeps_its_class_while_its_name_is_masked() -> None:
     assert parsed.fields == {"*": "mkzed@example.com"}
     assert parsed.name_classes == {"*": FieldClass.CONTACT}
 
-    pipeline = _pipeline(ParseConfig(format="ndjson"))
+    pipeline = _pipeline(ParseConfig(format=RecordFormat.NDJSON))
     for line in range(1, 3):
         record = {"ts": "2026-09-23T04:00:00Z", "customer_email": f"mk{line}zed@example.com"}
         result = pipeline.process(_raw(json.dumps(record), line))

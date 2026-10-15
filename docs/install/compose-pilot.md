@@ -753,7 +753,7 @@ done
 
 | Service | Metrics (Prometheus text, `GET /metrics`, internal network only; spec 16) |
 | --- | --- |
-| `edge-gateway` | Counters `carto_edge_records_total`, `carto_edge_events_total`, `carto_edge_dropped_total` (by source and reason), `carto_edge_vault_entries_total`, `carto_edge_batches_sealed_total`, `carto_edge_batches_sent_total`, `carto_edge_batches_parked_total`, `carto_edge_send_errors_total`, `carto_edge_heartbeats_total`, `carto_edge_requests_total`, `carto_edge_mtls_refused_total` (by route), `carto_edge_connector_errors_total`; gauges `carto_edge_buffer_bytes`, `carto_edge_buffer_depth`, `carto_edge_buffer_oldest_age_seconds`, `carto_edge_backpressure` (0 ok, 1 above 80%, 2 full), `carto_edge_connector_lag_seconds`, `carto_edge_key_versions` |
+| `edge-gateway` | Counters `carto_edge_records_total`, `carto_edge_events_total`, `carto_edge_dropped_total` (by source and reason), `carto_edge_vault_entries_total`, `carto_edge_vault_purged_total` (expired reveal vault entries removed by the hourly housekeeping), `carto_edge_batches_sealed_total`, `carto_edge_batches_sent_total`, `carto_edge_batches_parked_total`, `carto_edge_send_errors_total`, `carto_edge_heartbeats_total`, `carto_edge_requests_total`, `carto_edge_mtls_refused_total` (by route), `carto_edge_connector_errors_total`; gauges `carto_edge_buffer_bytes`, `carto_edge_buffer_depth`, `carto_edge_buffer_oldest_age_seconds`, `carto_edge_backpressure` (0 ok, 1 above 80%, 2 full), `carto_edge_connector_lag_seconds`, `carto_edge_key_versions` |
 | `ingest-api` | `carto_ingest_batches_total`, `carto_ingest_events_total`, `carto_ingest_duplicates_total`, `carto_ingest_errors_total`, `carto_heartbeats_total`, `carto_ingest_mtls_refused_total` |
 
 The stack has no Prometheus server in M1. A scraper needs a client certificate from each
@@ -800,7 +800,7 @@ reveal vault and the edge audit trail exist (ADR 0014, 0025):
 
 | Path | Content | Loss means |
 | --- | --- | --- |
-| `keys/` | `local-kms.key` (local KMS only), `tenant-key.json`, `tenant-key.v<n>.json` during a rotation overlap, `rotation.json`, `vault-data-key.json`, `secrets-data-key.json`, `assertion-public.key` (M3) | Old tokens unjoinable with new ones; vault and local secrets unreadable |
+| `keys/` | `local-kms.key` (local KMS only), `tenant-key.json` until the first rotation, then `tenant-key.v<n>.json` for the active version and each version still in its overlap, `rotation.json` (names the active version), `vault-data-key.json`, `secrets-data-key.json`, `assertion-public.key` (M3) | Old tokens unjoinable with new ones; vault and local secrets unreadable |
 | `vault.sqlite` | Reveal vault: token to AES-256-GCM ciphertext of the raw value, expiring with event retention | Reveal impossible for past events |
 | `audit.ndjson` | Hash-chained record of every tokenize and reveal call | Loss of the edge's independent audit record |
 | `cursors.sqlite` | Connector positions | Sources re-read; core deduplicates |
@@ -873,6 +873,42 @@ and that volume for the longest core outage you want to ride out. Watch
 refuses to start when the chain is broken. Check it with
 `carto-edge audit verify --file /var/lib/carto/audit.ndjson` inside the `edge-gateway` container.
 
+The chain alone cannot show that the last rows were deleted, or that a row was rewritten with
+every later hash recomputed. The gateway therefore writes an **anchor** every hour and at
+shutdown (ADR 0033): one log line with `"event": "audit.anchor"` and the last row's `seq`,
+`row_hash` and `ts`. Keep the gateway's container logs somewhere the edge host cannot rewrite
+(your log shipper, SIEM or syslog), or send the anchors straight to your syslog server:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__HOST` | none (off) | Syslog or SIEM host that receives each anchor |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__PORT` | 6514 | TCP port |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__TLS` | `true` | RFC 5425 TLS (1.2 or later); `false` sends plain TCP with the same framing |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__CA_FILE` | system trust store | CA bundle that signed the syslog server's certificate |
+| `CARTO_AUDIT__ANCHOR_SYSLOG__TIMEOUT_SECONDS` | 5 | Connect and send timeout |
+
+Messages are RFC 5424 (facility `log audit`, severity informational, MSGID `audit.anchor`, text
+`event=audit.anchor seq=<n> row_hash=<hex> ts=<time>`) with RFC 5425 octet-counting framing. A
+failed send is logged as `audit.anchor_syslog_failed` and the next hourly anchor is sent as
+usual; it never delays a reveal or an audit row.
+
+To check the file against anchors you trust, pass them as `<seq>:<row_hash>` (repeatable):
+
+```bash
+$COMPOSE exec edge-gateway carto-edge audit verify --file /var/lib/carto/audit.ndjson \
+  --anchor 1532:<row_hash from the 09:00 anchor> --anchor 1610:<row_hash from the 10:00 anchor>
+```
+
+Each anchor reports `holds`, `MISSING` (rows were removed after it) or `MISMATCH` (the chain was
+rewritten); any of the last two makes the command exit 1. Rows written after the newest anchor
+(at most an hour) are not covered.
+
+A power cut during an append can leave a partial last line. On its next start the gateway (or
+any `carto-edge` command that writes the audit file) moves that line to
+`audit.ndjson.torn-<UTC time>` next to the file, keeps it for inspection, and appends an
+`audit.recovered` row with its size. `audit verify` reports such a line without failing. Any
+other mismatch still stops the gateway.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
@@ -895,7 +931,9 @@ refuses to start when the chain is broken. Check it with
 | `carto_edge_dropped_total` grows with reason `unknown_source`, or OTLP partial success counts rejected records | `carto.source_id` does not match an enabled `otlp` source | Align the collector receivers with `sources.yaml` |
 | Webhook 401, 404, 413 or 400 | Signature or timestamp, unknown source, body over 1 MB, malformed body | See the webhook section |
 | PostgreSQL authentication fails after editing `pg_password` | The image applies the password only on first initialisation | Restore the original file or reset the password inside PostgreSQL |
-| `audit chain broken at line N` and the gateway stops | `audit.ndjson` was edited or truncated | Treat as a security incident; restore from backup |
+| `audit chain broken at line N` and the gateway stops | `audit.ndjson` was edited | Treat as a security incident; restore from backup |
+| `audit verify --anchor` reports `MISSING` or `MISMATCH` | Rows were removed or the chain rewritten after that anchor | Treat as a security incident; compare with a backup and the anchors in your log store |
+| `audit.anchor_syslog_failed` in the gateway log | The syslog target is unreachable or its certificate does not verify | Check host, port and `CA_FILE`; the anchors are still in the product log |
 | `/internal/tokenize` or `/internal/reveal` answer 503 | No assertion public key | Expected until M3 |
 
 ## Security notes

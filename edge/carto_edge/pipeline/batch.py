@@ -274,6 +274,8 @@ class Ingestor:
         self._cursors = cursors
         self._link = link
         self._metrics = metrics
+        if runtime.metrics is None:  # the runtime's housekeeping counts into the same registry
+            runtime.metrics = metrics
         self._clock = clock if clock is not None else _utc_now
         self._flush_seconds = link.batch_flush_seconds
         self._lock = threading.Lock()
