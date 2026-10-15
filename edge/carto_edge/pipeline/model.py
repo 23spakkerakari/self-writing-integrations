@@ -131,6 +131,9 @@ class ParsedRecord:
     pipeline never classifies, keeps or tokenizes that field as an ordinary field."""
     parse_format: str = ""
     parse_notes: tuple[str, ...] = ()
+    name_classes: dict[str, FieldClass] = field(default_factory=dict)
+    """Spec 8.3 rule 2 classes implied by raw field names the name gate hid (``*`` for
+    ``customer_email`` -> ``contact``, ADR 0030 amendment); the classifier applies them."""
 
 
 class FieldClass(StrEnum):
