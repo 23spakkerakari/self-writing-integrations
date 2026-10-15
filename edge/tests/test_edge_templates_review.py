@@ -110,6 +110,7 @@ def test_a_repeated_password_never_becomes_a_template_constant() -> None:
         result = pipeline.process(raw_line(text, line))
         assert result.event is not None
         assert SECRET not in result.event.model_dump_json()
+    assert result.event is not None
     assert result.event.template_text == (
         f"connecting to ftp as user={MASK} password={MASK} attempt"
     )
