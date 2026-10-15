@@ -1,7 +1,7 @@
-"""ingest-api (spec 5.3, 8.5, 12, 14.12): accepts the contract models only, is idempotent by
-batch id through the ledger (ADR 0015), answers RFC 7807 problems without echoing input, caps
-bodies, takes zstd, records heartbeats, exposes metrics, echoes request ids and never logs a
-body."""
+"""ingest-api (spec 5.3, 8.5, 12, 14.12): accepts the contract models only, claims every batch
+in the ledger before writing it (ADR 0034), refuses implausible observed_at values (ADR 0036),
+answers RFC 7807 problems without echoing input, caps bodies, takes zstd, records heartbeats,
+exposes metrics, echoes request ids and never logs a body."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -31,8 +31,11 @@ import carto_core.ingest.app as ingest_app_module
 from carto_common.ids import ULID_PATTERN, new_ulid
 from carto_common.logging import configure_logging
 from carto_common.mtls import ROLES, ActAsRole
+from carto_common.settings import RetentionSettings
 from carto_core.db.clickhouse import WriterError, WriteResult
 from carto_core.ingest.app import (
+    BUSY_RETRY_AFTER_SECONDS,
+    MAX_RANGE_ERRORS,
     PROBLEM_CONTENT_TYPE,
     ROUTE_ROLES,
     ZSTD_MAX_WINDOW_BYTES,
@@ -41,7 +44,12 @@ from carto_core.ingest.app import (
     decompress_capped,
 )
 from carto_core.ingest.health import InMemorySourceHealthStore
-from carto_core.ingest.ledger import InMemoryBatchLedger, LedgerEntry, LedgerError
+from carto_core.ingest.ledger import (
+    ClaimState,
+    InMemoryBatchLedger,
+    LedgerEntry,
+    LedgerError,
+)
 from carto_core.settings import MIB, CoreSettings, IngestListenerSettings
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
@@ -56,11 +64,12 @@ class FakeWriter:
     def __init__(self) -> None:
         self.batches: list[list[CanonicalEvent]] = []
         self.fail = False
+        self.permanent = False
         self.ready = True
 
     def write_events(self, events: Sequence[CanonicalEvent]) -> WriteResult:
         if self.fail:
-            raise WriterError("ClickHouse insert failed: DatabaseError")
+            raise WriterError("ClickHouse insert failed: DatabaseError", permanent=self.permanent)
         self.batches.append(list(events))
         return WriteResult(len(events), sum(len(event.identifiers) for event in events))
 
@@ -69,8 +78,15 @@ class FakeWriter:
 
 
 class FailingLedger(InMemoryBatchLedger):
-    def record(self, entry: LedgerEntry) -> bool:
+    """Claims work; marking the batch done fails."""
+
+    def complete(self, entry: LedgerEntry, done_at: datetime) -> None:
         raise LedgerError("ledger unavailable: OperationalError")
+
+
+class DownLedger(InMemoryBatchLedger):
+    def claim(self, entry: LedgerEntry, stale_before: datetime) -> Any:
+        raise LedgerError("ledger claim failed: OperationalError")
 
 
 @dataclass
@@ -100,11 +116,13 @@ def world() -> World:
     return _world()
 
 
-def _event(index: int = 0) -> CanonicalEvent:
+def _event(index: int = 0, observed_at: datetime | None = None) -> CanonicalEvent:
     suffix = "ABCDEFGHJKMNPQRSTVWXYZ"[index]
     data = CanonicalEvent.example().model_dump() | {
         "event_id": f"01J9ZK8X5Q8V3N6M2T4R7W1Y0{suffix}"
     }
+    if observed_at is not None:
+        data["observed_at"] = observed_at
     return CanonicalEvent.model_validate(data)
 
 
@@ -167,9 +185,9 @@ def test_valid_batch_is_accepted_and_written_once(world: World) -> None:
         payload["events"][0]["event_id"],
         payload["events"][1]["event_id"],
     ]
-    assert world.ledger.contains("default", payload["batch_id"])
     (entry,) = world.ledger.entries
     assert entry == LedgerEntry("default", payload["batch_id"], "src_wms_db", 2, NOW)
+    assert world.ledger.state_of("default", payload["batch_id"]) == "done"
 
 
 def test_same_batch_id_twice_is_a_duplicate_and_not_rewritten(world: World) -> None:
@@ -185,14 +203,47 @@ def test_same_batch_id_twice_is_a_duplicate_and_not_rewritten(world: World) -> N
     assert "carto_ingest_batches_total 1\n" in metrics
 
 
-def test_the_order_is_ledger_lookup_then_write_then_ledger_insert(world: World) -> None:
-    """ADR 0015: a failed write leaves no ledger row, so the edge's retry is not a duplicate."""
+def _claim(ledger: InMemoryBatchLedger, batch_id: str, at: datetime) -> None:
+    entry = LedgerEntry("default", batch_id, "src_wms_db", 1, at)
+    assert ledger.claim(entry, at - timedelta(seconds=120)).state is ClaimState.CLAIMED
+
+
+def test_a_retry_while_the_first_delivery_writes_is_503_and_writes_nothing() -> None:
+    """ADR 0034 item 1: a fresh pending claim means another delivery is writing the batch."""
+    ledger = InMemoryBatchLedger()
+    world = _world(ledger=ledger)
+    payload = _payload()
+    _claim(ledger, payload["batch_id"], NOW - timedelta(seconds=30))
+    response = _post(world, "/internal/ingest", payload)
+    _assert_problem(response, 503)
+    assert response.headers["retry-after"] == str(BUSY_RETRY_AFTER_SECONDS)
+    assert world.writer.batches == []
+    assert ledger.state_of("default", payload["batch_id"]) == "pending"
+    assert "carto_ingest_claims_busy_total 1\n" in world.client.get("/metrics").text
+
+
+def test_a_stale_claim_is_taken_over_and_the_batch_written() -> None:
+    """ADR 0034 item 1: a claim older than the claim timeout belongs to a dead writer."""
+    ledger = InMemoryBatchLedger()
+    world = _world(_settings(claim_timeout_seconds=60), ledger=ledger)
+    payload = _payload()
+    _claim(ledger, payload["batch_id"], NOW - timedelta(seconds=61))
+    response = _post(world, "/internal/ingest", payload)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"accepted": 1, "duplicate": False}
+    assert len(world.writer.batches) == 1
+    assert ledger.state_of("default", payload["batch_id"]) == "done"
+    assert "carto_ingest_claims_taken_over_total 1\n" in world.client.get("/metrics").text
+
+
+def test_a_failed_write_releases_the_claim_so_the_retry_is_taken_at_once(world: World) -> None:
     payload = _payload()
     world.writer.fail = True
-    body = _assert_problem(_post(world, "/internal/ingest", payload), 503)
+    response = _post(world, "/internal/ingest", payload)
+    body = _assert_problem(response, 503)
     assert "retry" in body["detail"]
-    assert not world.ledger.contains("default", payload["batch_id"])
-    assert world.writer.batches == []
+    assert response.headers["retry-after"] == "1"
+    assert world.ledger.state_of("default", payload["batch_id"]) is None
     world.writer.fail = False
     retry = _post(world, "/internal/ingest", payload)
     assert retry.status_code == 200
@@ -200,12 +251,86 @@ def test_the_order_is_ledger_lookup_then_write_then_ledger_insert(world: World) 
     assert len(world.writer.batches) == 1
 
 
-def test_ledger_failure_after_the_write_is_503_so_the_edge_retries() -> None:
+def test_clickhouse_refusing_the_data_is_a_422_so_the_edge_parks_the_batch(world: World) -> None:
+    """ADR 0036 item 2: a permanent error would fail every retry and stall the source."""
+    payload = _payload()
+    world.writer.fail = world.writer.permanent = True
+    body = _assert_problem(_post(world, "/internal/ingest", payload), 422)
+    assert body["title"] == "event store refused the batch"
+    assert world.ledger.state_of("default", payload["batch_id"]) is None
+    assert "carto_ingest_refused_total 1\n" in world.client.get("/metrics").text
+
+
+def test_a_ledger_failure_after_the_write_is_503_and_the_retry_writes_again() -> None:
+    """The replacing tables merge the second copy (ADR 0034)."""
     world = _world(ledger=FailingLedger())
     payload = _payload()
-    _assert_problem(_post(world, "/internal/ingest", payload), 503)
-    assert len(world.writer.batches) == 1, "written once; the retry writes again (ADR 0015)"
+    response = _post(world, "/internal/ingest", payload)
+    _assert_problem(response, 503)
+    assert response.headers["retry-after"] == "1"
+    assert len(world.writer.batches) == 1
     assert world.ledger.entries == ()
+
+
+def test_an_unreachable_ledger_is_503_before_anything_is_written() -> None:
+    world = _world(ledger=DownLedger())
+    response = _post(world, "/internal/ingest", _payload())
+    _assert_problem(response, 503)
+    assert response.headers["retry-after"] == "1"
+    assert world.writer.batches == []
+
+
+# --- the plausible observed_at range (ADR 0036) ------------------------------------------------
+
+
+def test_events_at_the_ends_of_the_plausible_range_are_accepted(world: World) -> None:
+    lower, upper = RetentionSettings().observed_at_range(NOW)
+    payload = _payload([_event(0, lower), _event(1, upper)])
+    response = _post(world, "/internal/ingest", payload)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("offset", "kind"),
+    [
+        (-timedelta(days=31, milliseconds=1), "observed_at_too_old"),
+        (timedelta(days=1, milliseconds=1), "observed_at_future"),
+        (datetime(1970, 1, 1, tzinfo=UTC) - NOW, "observed_at_too_old"),
+        (datetime(2099, 1, 1, tzinfo=UTC) - NOW, "observed_at_future"),
+    ],
+)
+def test_an_event_outside_the_range_refuses_the_batch_with_422(
+    world: World, offset: timedelta, kind: str
+) -> None:
+    payload = _payload([_event(0), _event(1, NOW + offset)])
+    response = _post(world, "/internal/ingest", payload)
+    body = _assert_problem(response, 422)
+    assert body["errors"] == [
+        {
+            "loc": ["events", 1, "observed_at"],
+            "msg": "observed_at is outside the plausible range",
+            "type": kind,
+        }
+    ]
+    assert payload["events"][1]["observed_at"][:10] not in response.text, "the time is not echoed"
+    assert world.writer.batches == []
+    assert world.ledger.rows == (), "refused before the claim"
+    assert "carto_ingest_out_of_range_total 1\n" in world.client.get("/metrics").text
+
+
+def test_the_range_follows_the_configured_retention() -> None:
+    settings = CoreSettings(retention=RetentionSettings(events_days=7))
+    world = _world(settings)
+    response = _post(world, "/internal/ingest", _payload([_event(0, NOW - timedelta(days=9))]))
+    _assert_problem(response, 422)
+
+
+def test_a_422_lists_a_bounded_number_of_out_of_range_events(world: World) -> None:
+    old = NOW - timedelta(days=400)
+    payload = _payload([_event(index, old) for index in range(MAX_RANGE_ERRORS + 2)])
+    body = _assert_problem(_post(world, "/internal/ingest", payload), 422)
+    assert len(body["errors"]) == MAX_RANGE_ERRORS
+    assert body["detail"].startswith(f"{MAX_RANGE_ERRORS + 2} events")
 
 
 # --- rejecting what is not the contract --------------------------------------------------
