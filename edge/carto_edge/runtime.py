@@ -125,7 +125,8 @@ class EdgeRuntime:
     def flush(self) -> None:
         """Persist templates and, in gateway mode, field statistics; in gateway mode also run
         :meth:`housekeeping` when its period has passed. The statistics are saved and the
-        housekeeping runs even when an earlier step fails; the first error is raised afterwards."""
+        housekeeping runs even when an earlier step fails; an error propagates once every step
+        ran, with any earlier one chained as its context."""
         try:
             self.pipeline.flush()
         finally:
