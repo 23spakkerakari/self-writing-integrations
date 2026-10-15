@@ -525,7 +525,8 @@ def test_postgres_ledger_claims_take_over_release_complete_and_prune(
         ).scalar_one()
     assert state == "done"
     assert ledger.prune(datetime(2000, 1, 1, tzinfo=UTC)) == 0
-    assert ledger.prune(t0 + timedelta(seconds=1)) >= 1
+    # released and claimed again at `later`, so that is the receipt time the prune sees
+    assert ledger.prune(later + timedelta(seconds=1)) >= 1
     assert ledger.claim(entry(much_later), much_later - timeout).state is ClaimState.CLAIMED
 
 
