@@ -28,6 +28,7 @@ import ssl
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -215,7 +216,14 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
         return _fail(f"bundle rejected: {exc}")
     try:
         with _open_stores(settings) as (writer, ledger):
-            result = load_bundle(verified, writer, ledger, chunk_size=args.chunk_size)
+            result = load_bundle(
+                verified,
+                writer,
+                ledger,
+                chunk_size=args.chunk_size,
+                retention=settings.retention,
+                claim_timeout=timedelta(seconds=settings.ingest.claim_timeout_seconds),
+            )
     except BundleError as exc:
         return _fail(f"bundle rejected while loading: {exc}")
     except (WriterError, LedgerError, SQLAlchemyError, CoreConfigError) as exc:
@@ -224,6 +232,11 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
         f"bundle {verified.manifest.bundle_id} loaded: {result.events_written} events written "
         f"in {result.chunks} chunks, {result.duplicates} chunks already present"
     )
+    if result.too_old or result.future:
+        _emit(
+            f"skipped outside the plausible range (ADR 0036): {result.too_old} events older "
+            f"than retention, {result.future} in the future"
+        )
     return EXIT_OK
 
 
