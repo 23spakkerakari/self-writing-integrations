@@ -400,8 +400,10 @@ class EdgePipeline:
         """Persist templates and field names; the caller flushes the statistics store on its
         own clock."""
         with self._lock:
-            self._templates.flush()
-            self._names.flush()
+            try:
+                self._templates.flush()
+            finally:
+                self._names.flush()
 
     def parser_internal_errors(self) -> int:
         return sum(parser.internal_errors for parser in self._parsers.values())

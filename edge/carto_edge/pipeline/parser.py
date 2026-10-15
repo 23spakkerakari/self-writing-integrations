@@ -171,7 +171,9 @@ class RecordParser:
             get_logger(component="parser").warning(
                 "parse_internal_error",
                 source_id=raw.source_id,
-                locator_kind=raw.locator.partition(":")[0],
+                # The record kind, a fixed set: an upload locator starts with the customer's
+                # file name, which product logs never carry (spec 2.3 invariant 7).
+                record_kind=raw.kind.value,
                 error=type(exc).__name__,
             )
             return ParseFailure(REASON_INTERNAL)

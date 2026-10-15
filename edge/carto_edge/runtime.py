@@ -20,6 +20,7 @@ record value.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -102,18 +103,26 @@ class EdgeRuntime:
         return self.vault.put_many(entries)
 
     def flush(self) -> None:
-        """Persist templates and, in gateway mode, field statistics."""
-        self.pipeline.flush()
-        if self.stats.path is not None:
-            self.stats.save()
+        """Persist templates and, in gateway mode, field statistics. The statistics are saved
+        even when the template flush fails; the first error is raised afterwards."""
+        try:
+            self.pipeline.flush()
+        finally:
+            if self.stats.path is not None:
+                self.stats.save()
 
     def close(self) -> None:
-        self.flush()
-        self.templates.close()
-        self.vault.close()
-        self.audit.close()
-        if self.secrets is not None:
-            self.secrets.close()
+        """Flush, then close the templates, the vault, the audit file and the secret resolver.
+        Every step runs even when an earlier one raises (an error propagates once all steps ran,
+        with any earlier one chained as its context), so a failed flush never leaves the vault
+        or the audit file open."""
+        with contextlib.ExitStack() as stack:
+            if self.secrets is not None:
+                stack.callback(self.secrets.close)
+            stack.callback(self.audit.close)
+            stack.callback(self.vault.close)
+            stack.callback(self.templates.close)
+            stack.callback(self.flush)
 
 
 def ensure_local_keys(keys: KeyManager, settings: EdgeSettings) -> bool:
