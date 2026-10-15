@@ -331,6 +331,32 @@ def test_dropped_records_advance_the_cursor_only_behind_durable_events(
     assert r.metrics.get("carto_edge_dropped_total", source_id="src_web", reason="empty") == 3
 
 
+def test_records_out_of_the_plausible_range_are_counted_by_source_and_reason(
+    runtime: EdgeRuntime, buffer: DiskBuffer, cursors: CursorStore
+) -> None:
+    """ADR 0036: the gateway range is read on the wall clock, pinned to 2026-10-15 in tests."""
+    r = rig(runtime, buffer, cursors, events=10)
+
+    def at(i: int, ts: str) -> RawRecord:
+        payload = {"ts": ts, "level": "info", "msg": "cart created"}
+        return record(i, text=json.dumps(payload))
+
+    outcome = r.ingestor.ingest(
+        [
+            at(1, "2026-08-01T00:00:00Z"),
+            at(2, "2026-08-02T00:00:00Z"),
+            at(3, "2027-01-01T00:00:00Z"),
+            at(4, "2026-10-15T00:00:00Z"),
+        ]
+    )
+    assert outcome.events == 2
+    assert outcome.dropped == {"too_old": 2}
+    metric = "carto_edge_events_out_of_range_total"
+    assert r.metrics.get(metric, source_id="src_web", reason="too_old") == 2
+    assert r.metrics.get(metric, source_id="src_web", reason="future") == 1
+    assert r.metrics.get("carto_edge_dropped_total", source_id="src_web", reason="too_old") == 2
+
+
 def test_unknown_source_is_dropped_and_counted(
     runtime: EdgeRuntime, buffer: DiskBuffer, cursors: CursorStore
 ) -> None:

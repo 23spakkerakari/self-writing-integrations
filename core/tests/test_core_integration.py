@@ -16,7 +16,7 @@ import os
 import warnings
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,7 @@ from carto_schema.bundle import (
 )
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
-from carto_simulator.api import DEFAULT_START_DATE, GenerationRequest, generate
+from carto_simulator.api import GenerationRequest, generate, run_as_of
 
 with warnings.catch_warnings():
     # starlette 1.7 deprecates httpx (vs httpx2) under its TestClient at import time.
@@ -610,15 +610,19 @@ def test_scenario_a_bundle_from_the_analyzer_loads_into_core(
     sim = tmp_path / "shop"
     generate(GenerationRequest(days=2, daily_volume=20, seed=11), sim)
     out = tmp_path / "shop.carto"
+    # The scenario has fixed dates: analyze and load it as of its end (ADR 0036).
+    as_of = run_as_of(sim)
     result = analyze(
-        ROOT / "simulator" / "analyze.shop.yaml", sim, out, state_dir=tmp_path / "state"
+        ROOT / "simulator" / "analyze.shop.yaml",
+        sim,
+        out,
+        state_dir=tmp_path / "state",
+        as_of=as_of,
     )
     expected = result.manifest.counts.events
     assert expected > 0
     verified = verify_bundle(out)
     writer, ledger = ClickHouseWriter(client), PostgresBatchLedger(engine)
-    # The scenario has fixed dates; load it as of its last day so ADR 0036's range keeps it.
-    as_of = datetime.combine(DEFAULT_START_DATE + timedelta(days=2), time(), UTC)
     loaded = load_bundle(verified, writer, ledger, clock=lambda: as_of)
     assert loaded.events_written == expected
     assert loaded.duplicates == 0
