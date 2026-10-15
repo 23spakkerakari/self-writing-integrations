@@ -231,7 +231,7 @@ async def test_polling_by_watermark(mysql: dict[str, Any]) -> None:
         # minus the settle delay), past every row; a later read finds nothing.
         assert all(r.commit_cursor is None for r in records)
         checkpoints = [item for item in items if isinstance(item, CursorCheckpoint)]
-        assert checkpoints and checkpoints[-1].source_id == "src_wms_db"
+        assert checkpoints and checkpoints[-1].source_id == "src_wms_mysql"
         final = checkpoints[-1].cursor["watermarks"]["purchase_orders"]
         assert final["t"] == "datetime"
         assert datetime.fromisoformat(final["v"]) > datetime(2026, 9, 23, 22, 4)
