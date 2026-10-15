@@ -219,10 +219,13 @@ class PipelineResult:
     ``event`` is ``None`` when the record was dropped, and ``dropped_reason`` says why
     (``unparseable``, ``too_large``, ``no_timestamp_and_no_ingest_fallback`` and so on). The
     locator travels with the result so the eval-mode locator map (ADR 0006) can be written
-    without the pipeline knowing about eval.
+    without the pipeline knowing about eval. ``out_of_range`` is ``too_old`` for a record dropped
+    because its time lies before the plausible range (ADR 0036) and ``future`` for an event
+    whose time lay after it and was replaced by the ingest time; ``None`` otherwise.
     """
 
     locator: str
     event: CanonicalEvent | None
     vault_entries: list[VaultEntry] = field(default_factory=list)
     dropped_reason: str | None = None
+    out_of_range: str | None = None

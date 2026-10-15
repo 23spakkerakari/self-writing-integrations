@@ -212,6 +212,16 @@ class IngestListenerSettings(_Frozen):
             "with Retry-After, which bounds the memory that decoded batches take."
         ),
     )
+    claim_timeout_seconds: int = Field(
+        default=120,
+        ge=30,
+        le=3600,
+        description=(
+            "How long a ledger claim protects a batch being written (ADR 0034). A retry within "
+            "it is answered 503; after it the claim is taken over and the batch written again. "
+            "Keep it above the edge's request timeout."
+        ),
+    )
     require_client_cert: bool = Field(
         default=True,
         description="Mutual TLS (spec 14.4). Only false for a local smoke test, never in service.",

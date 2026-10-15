@@ -203,9 +203,13 @@ def build_runtime(
     clock: Callable[[], datetime] | None = None,
     detector: PiiDetector | None = None,
     init_local_keys: bool = False,
+    range_clock: Callable[[], datetime] | None = None,
 ) -> EdgeRuntime:
     """Build the stack described in the module docstring. Raises
-    :class:`~carto_edge.keys.KeyManagementError` when the keys are missing or unusable."""
+    :class:`~carto_edge.keys.KeyManagementError` when the keys are missing or unusable.
+
+    ``range_clock`` is the time the pipeline checks ``observed_at`` against (ADR 0036); it
+    defaults to ``clock``. The analyzer passes its ``--as-of`` time."""
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     keys = KeyManager(settings, clock=clock)
     if init_local_keys:
@@ -249,7 +253,7 @@ def build_runtime(
         tokenizer=tokenizer,
         tenant_id=tenant_id,
         retention_days=settings.retention.events_days,
-        clock=clock,
+        clock=range_clock if range_clock is not None else clock,
         observe_on_process=not analyze,
         names=names,
     )

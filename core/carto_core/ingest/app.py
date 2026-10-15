@@ -8,10 +8,13 @@ Endpoints, all internal (mutual TLS, never behind the ingress; see :mod:`.server
   :data:`ZSTD_MAX_WINDOW_BYTES`, and decompression and validation run in the threadpool, never
   on the event loop. At most ``ingest.max_inflight_batches`` requests are decoded or written at
   once; the next is answered 429 with ``Retry-After``. Only the contract models are accepted,
-  so a raw value cannot arrive in a slot the schema does not have (spec 2.3 invariant 2). A
-  batch whose id the ledger knows is acknowledged as a duplicate and not rewritten; otherwise
-  the order is ledger lookup, ClickHouse write, ledger insert (ADR 0015), and a failed write is
-  a 503 so the edge retries.
+  so a raw value cannot arrive in a slot the schema does not have (spec 2.3 invariant 2). An
+  event whose ``observed_at`` lies outside the plausible range (ADR 0036) refuses the batch
+  with 422, so the edge parks it. Then the batch is claimed in the ledger (ADR 0034): a batch
+  already written is acknowledged as a duplicate, one another delivery is writing is a 503, and
+  otherwise the batch is written and marked done. A transient write failure releases the claim
+  and is a 503 so the edge retries; ClickHouse refusing the data itself is a 422. Every 503
+  carries ``Retry-After``.
 - ``POST /internal/heartbeat``: one :class:`~carto_schema.ingest.SourceHeartbeat`, upserted into
   the source health store.
 - ``GET /healthz``, ``GET /readyz`` (no detail in the body), ``GET /metrics`` (Prometheus text).
@@ -30,7 +33,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog.contextvars
@@ -49,7 +52,7 @@ from carto_common.logging import get_logger
 from carto_common.mtls import ANY_ROLE, peer_role, role_allowed
 from carto_core.db.clickhouse import WriterError
 from carto_core.ingest.health import HealthStoreError, SourceHealthRecord
-from carto_core.ingest.ledger import LedgerEntry, LedgerError
+from carto_core.ingest.ledger import ClaimState, LedgerEntry, LedgerError
 from carto_schema.ingest import IngestBatch, SourceHeartbeat
 
 if TYPE_CHECKING:
@@ -59,6 +62,8 @@ if TYPE_CHECKING:
     from carto_core.settings import CoreSettings, IngestListenerSettings
 
 __all__ = [
+    "BUSY_RETRY_AFTER_SECONDS",
+    "MAX_RANGE_ERRORS",
     "METRIC_NAMES",
     "PROBLEM_CONTENT_TYPE",
     "REQUEST_ID_HEADER",
@@ -69,6 +74,7 @@ __all__ = [
     "RequestIdMiddleware",
     "create_app",
     "decompress_capped",
+    "out_of_range_errors",
 ]
 
 PROBLEM_CONTENT_TYPE: Final = "application/problem+json"
@@ -86,7 +92,12 @@ _CHECKSUM_BYTES: Final = 4
 _RLE_BLOCK: Final = 1
 _RESERVED_BLOCK: Final = 3
 RETRY_AFTER_SECONDS: Final = 1
-"""``Retry-After`` on a 429 (in-flight cap) and a 503: the edge honours it, capped."""
+"""``Retry-After`` on a 429 (in-flight cap) and on a 503 for an unavailable store. The edge
+honours it on a 429, capped, and backs off on its own after a 503."""
+BUSY_RETRY_AFTER_SECONDS: Final = 5
+"""``Retry-After`` on the 503 for a batch another delivery is still writing (ADR 0034)."""
+MAX_RANGE_ERRORS: Final = 20
+"""Out-of-range events listed in one 422; the rest are counted in its detail."""
 
 METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_ingest_batches_total", "Batches accepted and written to ClickHouse."),
@@ -96,6 +107,10 @@ METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_heartbeats_total", "Source heartbeats recorded."),
     ("carto_ingest_mtls_refused_total", "Requests refused for the client certificate's role."),
     ("carto_ingest_busy_total", "Requests answered 429 because too many were in flight."),
+    ("carto_ingest_claims_busy_total", "Batches answered 503 because another delivery held them."),
+    ("carto_ingest_claims_taken_over_total", "Stale ledger claims taken over and rewritten."),
+    ("carto_ingest_out_of_range_total", "Batches refused for an observed_at out of range."),
+    ("carto_ingest_refused_total", "Batches refused because ClickHouse rejected their data."),
 )
 ROUTE_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
     ("POST", "/internal/ingest"): frozenset({"edge-gateway"}),
@@ -236,6 +251,30 @@ def decompress_capped(data: bytes, limit: int) -> bytes:
     return bytes(out)
 
 
+def out_of_range_errors(
+    batch: IngestBatch, lower: datetime, upper: datetime
+) -> tuple[list[dict[str, Any]], int]:
+    """The problem entries of the events whose ``observed_at`` lies outside ``[lower, upper]``
+    (ADR 0036), at most :data:`MAX_RANGE_ERRORS`, and how many there are. An entry names the
+    event's position and whether it is too old or in the future, never its time."""
+    errors: list[dict[str, Any]] = []
+    count = 0
+    for index, event in enumerate(batch.events):
+        if lower <= event.observed_at <= upper:
+            continue
+        count += 1
+        if len(errors) < MAX_RANGE_ERRORS:
+            reason = "too_old" if event.observed_at < lower else "future"
+            errors.append(
+                {
+                    "loc": ["events", index, "observed_at"],
+                    "msg": "observed_at is outside the plausible range",
+                    "type": f"observed_at_{reason}",
+                }
+            )
+    return errors, count
+
+
 def _request_id(request: Request) -> str:
     value = getattr(request.state, "request_id", "")
     return str(value) if value else ""
@@ -320,6 +359,8 @@ def create_app(
     now = clock if clock is not None else lambda: datetime.now(UTC)
     listener = settings.ingest
     tenant_id = settings.tenant_id
+    retention = settings.retention
+    claim_timeout = timedelta(seconds=listener.claim_timeout_seconds)
     metrics = IngestMetrics()
 
     async def authorize(request: Request) -> None:
@@ -365,34 +406,84 @@ def create_app(
         raw, zstd = await _read_body(request, listener)
         return await run_in_threadpool(_decode, model, raw, zstd, listener.max_decompressed_bytes)
 
+    def unavailable(title: str, retry_after: int = RETRY_AFTER_SECONDS) -> Problem:
+        return Problem(
+            503, title, "retry the batch later", headers={"Retry-After": str(retry_after)}
+        )
+
+    def check_range(batch: IngestBatch, at: datetime) -> None:
+        """ADR 0036: refuse the batch when an event's observed_at is implausible."""
+        lower, upper = retention.observed_at_range(at)
+        errors, count = out_of_range_errors(batch, lower, upper)
+        if count:
+            metrics.inc("carto_ingest_out_of_range_total")
+            log.warning(
+                "batch refused, observed_at out of range",
+                tenant_id=batch.tenant_id,
+                source_id=batch.source_id,
+                batch_id=batch.batch_id,
+                out_of_range=count,
+            )
+            raise Problem(
+                422,
+                "observed_at out of range",
+                f"{count} events lie outside the plausible range; see errors",
+                errors=errors,
+            )
+
     def process_batch(batch: IngestBatch) -> bool:
-        """Ledger lookup, write, ledger insert (ADR 0015). Returns True for a duplicate."""
+        """Range check, claim, write, mark done (ADR 0034, 0036). True for a duplicate."""
+        received_at = now()
+        check_range(batch, received_at)
         context = {
             "tenant_id": batch.tenant_id,
             "source_id": batch.source_id,
             "batch_id": batch.batch_id,
             "events": len(batch.events),
         }
+        entry = LedgerEntry(
+            batch.tenant_id, batch.batch_id, batch.source_id, len(batch.events), received_at
+        )
         try:
-            if ledger.contains(batch.tenant_id, batch.batch_id):
-                metrics.inc("carto_ingest_duplicates_total")
-                log.info("batch already in the ledger", **context)
-                return True
-            result = writer.write_events(batch.events)
-            recorded = ledger.record(
-                LedgerEntry(
-                    batch.tenant_id, batch.batch_id, batch.source_id, len(batch.events), now()
-                )
-            )
-        except WriterError as exc:
-            log.warning("batch write failed", error=type(exc).__name__, **context)
-            raise Problem(503, "event store unavailable", "retry the batch later") from exc
+            claim = ledger.claim(entry, received_at - claim_timeout)
         except LedgerError as exc:
+            log.warning("batch claim failed", error=type(exc).__name__, **context)
+            raise unavailable("ledger unavailable") from exc
+        if claim.state is ClaimState.DONE:
+            metrics.inc("carto_ingest_duplicates_total")
+            log.info("batch already in the ledger", **context)
+            return True
+        if claim.state is ClaimState.BUSY:
+            metrics.inc("carto_ingest_claims_busy_total")
+            log.info("batch is being written by another delivery", **context)
+            raise unavailable("batch in progress", BUSY_RETRY_AFTER_SECONDS)
+        if claim.took_over:
+            metrics.inc("carto_ingest_claims_taken_over_total")
+            log.warning("stale batch claim taken over", **context)
+        try:
+            result = writer.write_events(batch.events)
+        except WriterError as exc:
+            log.warning("batch write failed", error=str(exc), permanent=exc.permanent, **context)
+            try:
+                ledger.release(batch.tenant_id, batch.batch_id, claim.claimed_at)
+            except LedgerError as release_exc:
+                log.warning("batch claim release failed", error=type(release_exc).__name__)
+            if exc.permanent:
+                metrics.inc("carto_ingest_refused_total")
+                raise Problem(
+                    422, "event store refused the batch", "the batch cannot be written as sent"
+                ) from exc
+            raise unavailable("event store unavailable") from exc
+        try:
+            ledger.complete(entry, now())
+        except LedgerError as exc:
+            # Written but not marked done: the retry writes it again and the replacing tables
+            # merge the copies (ADR 0034).
             log.warning("batch ledger failed", error=type(exc).__name__, **context)
-            raise Problem(503, "ledger unavailable", "retry the batch later") from exc
+            raise unavailable("ledger unavailable") from exc
         metrics.inc("carto_ingest_batches_total")
         metrics.inc("carto_ingest_events_total", result.events)
-        log.info("batch accepted", identifiers=result.identifiers, raced=not recorded, **context)
+        log.info("batch accepted", identifiers=result.identifiers, **context)
         return False
 
     @app.exception_handler(Problem)
@@ -440,7 +531,12 @@ def create_app(
                 tenant_id=beat.tenant_id,
                 source_id=beat.source_id,
             )
-            raise Problem(503, "health store unavailable", "retry the heartbeat later") from exc
+            raise Problem(
+                503,
+                "health store unavailable",
+                "retry the heartbeat later",
+                headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+            ) from exc
         metrics.inc("carto_heartbeats_total")
         log.info(
             "heartbeat recorded",

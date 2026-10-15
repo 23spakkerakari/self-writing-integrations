@@ -1,6 +1,7 @@
 # ADR 0034: ingest-api claims a batch before writing it; event tables replace duplicates
 
-Status: accepted by the founder, 2026-10-12 (spec 7.2, 8.5). Amends ADR 0015.
+Status: accepted by the founder, 2026-10-12 (spec 7.2, 8.5). Amends ADR 0015. Built on
+2026-10-15; ADR 0043 sections 10 and 12 record how, and where the build departs from it.
 
 ## Context
 
