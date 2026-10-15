@@ -282,17 +282,18 @@ def test_apply_retention_rewrites_an_unreadable_ttl() -> None:
 # --- postgres scripts --------------------------------------------------------------------------
 
 
-def test_postgres_scripts_form_one_linear_history_with_the_m1_revision() -> None:
+def test_postgres_scripts_form_one_linear_history() -> None:
     assert (POSTGRES_MIGRATIONS_DIR / "alembic.ini").is_file()
     assert (POSTGRES_MIGRATIONS_DIR / "env.py").is_file()
     assert (POSTGRES_MIGRATIONS_DIR / "script.py.mako").is_file()
     config = Config()
     config.set_main_option("script_location", str(POSTGRES_MIGRATIONS_DIR))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0001"]
+    assert script.get_heads() == ["0002"]
     revisions = list(script.walk_revisions())
-    assert [revision.revision for revision in revisions] == ["0001"]
-    assert revisions[0].down_revision is None
+    assert [revision.revision for revision in revisions] == ["0002", "0001"]
+    assert revisions[-1].down_revision is None
+    assert revisions[0].down_revision == "0001"
 
 
 def test_clickhouse_migrations_dir_is_the_repository_layout_of_section_20() -> None:

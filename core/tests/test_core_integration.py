@@ -13,6 +13,7 @@ import json
 import os
 import warnings
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,14 @@ from carto_core.bundle import LoadResult, iter_events, load_bundle, verify_bundl
 from carto_core.db.clickhouse import ClickHouseWriter, create_client
 from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.app import create_app
-from carto_core.ingest.health import PostgresSourceHealthStore
+from carto_core.ingest.health import PostgresSourceHealthStore, SourceHealthRecord
 from carto_core.ingest.ledger import PostgresBatchLedger
 from carto_core.migrations import (
+    MIGRATION_LOCK_KEY,
     apply_clickhouse_migrations,
     apply_postgres_migrations,
     apply_retention,
+    migration_lock,
 )
 from carto_core.settings import ClickHouseSettings, CoreSettings, PostgresSettings
 from carto_edge.cli.analyze import analyze
@@ -299,9 +302,27 @@ def test_postgres_migrations_apply_idempotently(postgres: PostgresSettings) -> N
             version = connection.execute(
                 sqlalchemy.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert version == "0001"
+        assert version == "0002"
+        health_columns = {column["name"] for column in inspector.get_columns("source_health")}
+        assert "sent_at" in health_columns
     finally:
         engine.dispose()
+
+
+def test_the_migration_lock_excludes_a_second_migrate_run(postgres: PostgresSettings) -> None:
+    engine = create_engine_from_settings(postgres)
+    other = create_engine_from_settings(postgres)
+    probe = sqlalchemy.text("SELECT pg_try_advisory_lock(:key)")
+    release = sqlalchemy.text("SELECT pg_advisory_unlock(:key)")
+    try:
+        with migration_lock(engine), other.connect() as connection:
+            assert connection.execute(probe, {"key": MIGRATION_LOCK_KEY}).scalar_one() is False
+        with other.connect() as connection:
+            assert connection.execute(probe, {"key": MIGRATION_LOCK_KEY}).scalar_one() is True
+            connection.execute(release, {"key": MIGRATION_LOCK_KEY})
+    finally:
+        engine.dispose()
+        other.dispose()
 
 
 def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
@@ -395,6 +416,39 @@ def test_batch_through_the_app_lands_in_clickhouse_and_the_ledger(
     assert record.message == "splunk export slow"
 
 
+def test_postgres_heartbeat_upsert_never_goes_back_in_time(
+    migrated: tuple[Client, sqlalchemy.Engine],
+) -> None:
+    _client, engine = migrated
+    store = PostgresSourceHealthStore(engine)
+    base = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+
+    def record(status: str, sent_minute: int) -> SourceHealthRecord:
+        sent = base.replace(minute=sent_minute)
+        return SourceHealthRecord(
+            tenant_id="default",
+            source_id="src_order_svc",
+            status=status,
+            last_success_at=None,
+            lag_seconds=0.0,
+            error_count=0,
+            buffer_depth=0,
+            oldest_buffered_at=None,
+            message="",
+            received_at=base.replace(minute=59),
+            sent_at=sent,
+        )
+
+    store.upsert(record("ok", 30))
+    store.upsert(record("failing", 10))
+    stored = store.get("default", "src_order_svc")
+    assert stored is not None
+    assert (stored.status, stored.sent_at) == ("ok", base.replace(minute=30))
+    store.upsert(record("degraded", 40))
+    stored = store.get("default", "src_order_svc")
+    assert stored is not None and stored.status == "degraded"
+
+
 def test_bundle_loads_into_clickhouse_idempotently(
     migrated: tuple[Client, sqlalchemy.Engine], tmp_path: Path
 ) -> None:
@@ -416,6 +470,19 @@ def test_bundle_loads_into_clickhouse_idempotently(
             {"source_id": f"bundle_{BUNDLE_ID.lower()}"},
         ).scalar_one()
     assert chunks == 3
+
+
+def test_one_client_takes_concurrent_inserts(migrated: tuple[Client, sqlalchemy.Engine]) -> None:
+    """ingest-api shares one client across its threadpool: concurrent inserts must not trip
+    over a ClickHouse session (SESSION_IS_LOCKED)."""
+    client, _engine = migrated
+    writer = ClickHouseWriter(client)
+    groups = [[_event(f"concurrent{group}", index) for index in range(20)] for group in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(writer.write_events, groups))
+    assert [result.events for result in results] == [20] * 8
+    ids = [event.event_id for group in groups for event in group]
+    assert _count(client, "events", ids) == len(ids)
 
 
 def _leak_scan_module() -> Any:
