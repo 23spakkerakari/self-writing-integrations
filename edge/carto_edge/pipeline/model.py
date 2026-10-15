@@ -7,6 +7,9 @@ and were built by separate hands (plan M1, "Interfaces"):
   (``locator``, ADR 0006) from which ``event_id`` is derived, raw ``text`` for log lines or
   pre-parsed ``fields`` for rows, OTLP key-values, webhook bodies and file metadata, and the
   cursor to commit once the record is durable.
+- :class:`CursorCheckpoint`: a cursor with no record (ADR 0035), yielded by a connector between
+  records when a read moved past a stretch of the source that held nothing, so the cursor can
+  advance across empty windows and ranges. :data:`ReadItem` is what ``read`` yields.
 - :class:`ParsedRecord`: after parsing and template mining (spec 8.2): a flat ``fields``
   mapping of path to string value, the template, the source timestamp and its quality, the
   severity and the raw actor value. Still in clear; never leaves the edge.
@@ -30,12 +33,14 @@ from carto_schema.event import CanonicalEvent, EventKind, ObservedAtQuality, Sev
 
 __all__ = [
     "FIELD_REF_SEPARATOR",
+    "CursorCheckpoint",
     "FieldClass",
     "FieldDecision",
     "ParsedRecord",
     "PipelineResult",
     "Policy",
     "RawRecord",
+    "ReadItem",
     "VaultEntry",
     "field_ref",
     "split_field_ref",
@@ -101,6 +106,24 @@ class RawRecord:
     """Per-record override of ``ParseConfig.actor_field``: the column a row connector's query
     names as the actor (``actor_column``, spec Appendix A, 7.1). Its value becomes the event's
     ``actor`` token and is never an attribute or an identifier."""
+
+
+@dataclass(frozen=True, slots=True)
+class CursorCheckpoint:
+    """A cursor to commit once every record yielded before it is durable (ADR 0035 item 1).
+
+    A connector yields one when it has fully read a stretch of the source, whether or not that
+    stretch held records: a Splunk window, a SQL time range, the end of a page. It carries no
+    event data and never reaches the pipeline; the ingestor treats it like the
+    ``commit_cursor`` of a record that produced no event.
+    """
+
+    source_id: str
+    cursor: Mapping[str, Any]
+
+
+ReadItem = RawRecord | CursorCheckpoint
+"""What a connector's ``read`` yields."""
 
 
 @dataclass(slots=True)

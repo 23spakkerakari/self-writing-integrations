@@ -561,13 +561,16 @@ Common requirements for every connector:
 - Uses the Splunk REST search export endpoint (`/services/search/jobs/export`) with `output_mode=json`, bounded `earliest_time`/`latest_time` windows, and a saved search string from config.
 - Auth: Splunk authentication token for a dedicated user whose role can search only the configured indexes. Document the role setup in the install guide.
 - Incremental: sliding windows with overlap (default 2 min) and dedupe on `_cd` + `_indextime` + hash; cursor = last fully processed window end.
+- *Note (ADR 0035):* windows are on index time (`index_earliest`/`index_latest`), end no later than `now - settle_seconds` (default 60), and every fully searched window, even an empty one, commits the cursor through a cursor-only checkpoint. `earliest_time` is set to the window start minus `max_event_lag_hours` (default 24) only to bound the buckets scanned.
 - Backfill: chunked windows (default 1 hour) with concurrency limit (default 2) to protect the Splunk search head.
 - `test()`: runs a 1-minute search with `| head 1`, checks token capabilities are read-only where Splunk exposes them, and reports the indexes visible.
+- *Note (ADR 0037):* the configured search may run only built-in read-only commands (every pipeline stage and subsearch is checked against an allowlist in code; macros are refused), and any token capability that is not on the read list (`search`, `rtsearch`, `list_*`, `get_*` and a few named read capabilities) makes the token write-capable.
 
 #### 8.1.4 SQL databases (read-only polling)
 
 - Supported: PostgreSQL, SQL Server, MySQL. Connect to a **read replica** whenever available; the install guide says so.
-- Config: one or more **query templates** written by an admin, e.g. `SELECT id, po_num, order_ref, status, created_by, updated_at FROM purchase_orders WHERE updated_at > :watermark ORDER BY updated_at LIMIT :batch`. Only named bind parameters `:watermark` and `:batch`; no string interpolation.
+- Config: one or more **query templates** written by an admin, e.g. `SELECT id, po_num, order_ref, status, created_by, updated_at FROM purchase_orders WHERE updated_at > :watermark AND updated_at <= :upper ORDER BY updated_at LIMIT :batch`. Only named bind parameters `:watermark`, `:upper` and `:batch`; no string interpolation.
+- *Note (ADR 0035):* a query with a time-typed watermark (`watermark_type` datetime or date, the default) reads the closed range `(:watermark, :upper]`, where `:upper` is the database's own clock minus `settle_seconds` (default 30); when the range is fully read the cursor moves to `:upper` even if it held no row. Integer and decimal watermarks bind `:watermark` and `:batch` only and advance on the rows found.
 - Read-only enforcement, three layers:
   1. **Grants:** a dedicated login with SELECT-only grants on the needed tables or views (the install guide ships scripts per engine; prefer granting on views that expose only needed columns).
   2. **Session:** PostgreSQL sessions run with `default_transaction_read_only = on` and each poll in a `READ ONLY` transaction; MySQL polls run in `START TRANSACTION READ ONLY`; SQL Server has no read-only transaction mode, so rely on the grant plus `ApplicationIntent=ReadOnly` when connecting through an availability group listener (which routes to a readable secondary that rejects writes).
@@ -1399,6 +1402,7 @@ sources:
             SELECT id, po_num, order_ref, status, warehouse_code, created_by, updated_at
             FROM purchase_orders
             WHERE updated_at > :watermark
+            AND updated_at <= :upper
             ORDER BY updated_at
             LIMIT :batch
           watermark_column: updated_at

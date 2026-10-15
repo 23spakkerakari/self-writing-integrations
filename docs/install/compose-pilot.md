@@ -409,6 +409,7 @@ Server: through the availability group listener; carto connects with
             SELECT id, po_num, order_ref, status, warehouse_code, created_by, updated_at
             FROM carto_purchase_orders
             WHERE updated_at > :watermark
+            AND updated_at <= :upper
             ORDER BY updated_at
             LIMIT :batch
           watermark_column: updated_at
@@ -481,7 +482,9 @@ token in Vault as the whole secret value.
 | --- | --- | --- |
 | `base_url` | required | Origin only (`https://host:port`, no path, no credentials) |
 | `search` | required | The search string run through `/services/search/jobs/export` |
-| `window_minutes`, `overlap_minutes` | 5, 2 | Sliding windows and their overlap; results are deduplicated on `_cd`, `_indextime` and a hash |
+| `window_minutes`, `overlap_minutes` | 5, 2 | Sliding windows of **index time** and their overlap; results are deduplicated on `_cd`, `_indextime` and a hash. Every searched window moves the cursor, even an empty one (ADR 0035) |
+| `settle_seconds` | 60 | A window ends no later than now minus this, so events still being indexed are read on the next poll |
+| `max_event_lag_hours` | 24 | Bounds the event time searched (`earliest_time` = window start minus this). An event whose own timestamp is older than this when it is indexed is not read; raise it for sources with long forwarder backlogs |
 | `max_concurrency`, `backfill_chunk_minutes` | 2, 60 | Backfill protection for the search head |
 | `verify_tls`, `ca_file` | `true`, none | Certificate verification and a custom CA |
 | `allow_plaintext` | `false` | Admin flag to allow `http://`; leave it off |
@@ -490,9 +493,15 @@ token in Vault as the whole secret value.
 | `failure_threshold`, `breaker_reset_seconds` | 5, 60 | Circuit breaker |
 
 Splunk's extracted fields are parsed; `_raw`, `linecount` and `splunk_server` are dropped and
-`_time` is among the default timestamp fields. The test reads the token's roles and capabilities
-and reports the token as write-capable when any capability starts with `edit_`, `delete_`,
-`admin_`, `change_`, `restart_` or `output_file`.
+`_time` is among the default timestamp fields. The search may use only built-in read-only
+commands (ADR 0037): every pipeline stage and subsearch is checked when the configuration loads,
+and commands that write, send, call out or start other searches (`outputlookup`, `collect`,
+`delete`, `sendemail`, `outputcsv`, `rest`, `map`, `script`, custom commands) and macros are
+refused with the command's name. If you need a read-only command that is refused, ask for it to
+be added; there is no setting to widen the list. The test reads the token's roles and
+capabilities and reports the token as write-capable when any capability is not on the read list:
+`search`, `rtsearch`, `list_*`, `get_*`, `rest_properties_get`, `rest_apps_view`,
+`export_results_is_visible` and `pattern_detect`.
 
 #### SFTP or file-drop watch (spec 8.1.5)
 
