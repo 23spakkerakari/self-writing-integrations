@@ -1,7 +1,8 @@
 # ADR 0036: An event's observed_at must fall in a plausible range
 
-Status: accepted by the founder, 2026-10-12 (spec 7.1, 7.2, 14.10, 2.3 invariant 8). Core
-half built on 2026-10-15 (ADR 0043 sections 11 and 12); the edge half is not built yet.
+Status: accepted by the founder, 2026-10-12 (spec 7.1, 7.2, 14.10, 2.3 invariant 8). Built on
+2026-10-15: core in ADR 0043 sections 11 and 12, the edge in section 13 (the analyzer's
+`--as-of`, chosen by the founder that day).
 
 ## Context
 

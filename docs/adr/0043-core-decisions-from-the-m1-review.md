@@ -2,8 +2,8 @@
 
 Status: proposed, 2026-10-15 (plan `docs/plans/M1-review-fixes.md`, package E; spec 2.3
 invariants 2 and 8, 5.5, 8.5, 14.4, 14.6). Records the choices made while fixing the core
-findings, and, in sections 10 and 11 (added 2026-10-15), how core builds ADR 0034 and the core
-half of ADR 0036, without repeating what those ADRs decide. Section 12 lists where the build
+findings, and, in sections 10, 11 and 13 (added 2026-10-15), how core builds ADR 0034 and both
+halves of ADR 0036, without repeating what those ADRs decide. Section 12 lists where the build
 departs from them. The founder reviews it with the package.
 
 ## 1. Ingest decodes at most one bounded zstd frame
@@ -195,13 +195,42 @@ every service and the largest memory for ClickHouse, so a new service without li
 - A chunk loaded with some events skipped as future stays `done`, so a later re-run does not
   load those events even once they are in range.
 
+## 13. The edge range and the analyzer's reference time (ADR 0036 item 1)
+
+**Context.** Simulator batch runs have fixed dates (`DEFAULT_START_DATE` 2026-09-23), and so do
+the records of most edge tests. Checked against the wall clock, they fall out of the range a
+month later, and the leak test, `make analyze`, `make bench` and the analyzer tests would drop
+every record.
+
+**Decision** (the founder chose the reference-time option on 2026-10-15):
+
+- `EdgePipeline.process` checks the parsed time with `carto_common.settings.observed_at_range`
+  against the pipeline's clock, after parsing and before classification. Older: dropped with
+  reason `too_old`. Later: `observed_at` becomes the record's `received_at` with
+  `observed_at_quality=ingest`, so the event id derives from the ingest time. Both are counted
+  in `PipelineCounters.out_of_range` and marked on `PipelineResult.out_of_range`.
+- The gateway's clock is `carto_edge.pipeline.pipeline.wall_clock`. Its new counter
+  `carto_edge_events_out_of_range_total{source_id, reason}` counts both cases; `too_old` is also
+  a `carto_edge_dropped_total` reason.
+- The analyzer checks against its run time unless `--as-of` names another time: an ISO 8601
+  date (midnight UTC) or a time with an offset. A naive time is refused. The manifest notes the
+  time used. `carto-edge bench` takes the same option. `BundleCounts` gains `events_too_old` and
+  `events_future`, both defaulting to 0 so manifests written before them still load;
+  `MANIFEST.md` and the summary show them.
+- `carto-sim as-of --out DIR` prints the start of the day after a run, read from its
+  manifest. `make analyze`, `make bench` and `make bench-gateway` pass it as `--as-of`.
+- The edge tests pin `wall_clock` to 2026-10-15 12:00 UTC (autouse fixture in
+  `edge/tests/conftest.py`). The range tests pass explicit clocks. Core's integration test
+  analyzes and loads scenario A as of `carto_simulator.api.run_as_of`.
+
+**Alternatives.** Dating simulator runs relative to today: the eval ground truth would change
+by the day and fault days could fall on weekends. Skipping the check for simulator input: a
+special case in product code.
+
 ## Consequences
 
-- **Not built, decided by the founder:** the edge half of ADR 0036 (dropping old events,
-  stamping future ones with their ingest time, the edge counters and the manifest counts). It
-  waits on the founder's question of what "run time" means for the offline analyzer over
-  simulator scenarios, which have fixed dates (`DEFAULT_START_DATE` 2026-09-23). The simulator
-  output falls out of the range a month after that date.
+- A simulator run longer than event retention loses its first days to the range, as a
+  backfill would.
 - Queries that need exact counts must read with `FINAL` (ADR 0034 item 3). No core query needs
   one in M1.
 - **Not built, from the plan:** `load-bundle` keys chunks by index, not by event range, so a

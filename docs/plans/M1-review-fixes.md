@@ -32,8 +32,8 @@ Each package lands as conventional commits with tests first. ADR numbers 0038 to
 reserved for decisions made inside the packages: one per package, A1 0038, A2 0039, B 0040,
 C 0041, D 0042, E 0043; 0044 and 0045 stay free. ADRs 0038, 0039, 0041 and 0043 list, under
 Consequences, the plan items below that their package had not built by 2026-10-15. On
-2026-10-15 branch `fix-e2` built ADR 0034 and the core half of ADR 0036 (ADR 0043 sections 10
-to 12); the edge half of ADR 0036 waits on a founder question.
+2026-10-15 branch `fix-e2` built ADR 0034 and ADR 0036 (ADR 0043 sections 10 to 13), with the
+founder's choice of an `--as-of` reference time for the analyzer.
 
 ### A1. Field names and structure (`pipeline/parse/names.py`, `parser.py`, `parse/common.py`, `parse/csv.py`)
 
