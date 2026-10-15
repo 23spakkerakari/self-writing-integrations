@@ -424,7 +424,7 @@ Rules:
 ### 7.2 ClickHouse tables (core)
 
 ```sql
--- events: one row per canonical event
+-- events: one row per canonical event; a second copy of an event merges away (ADR 0034)
 CREATE TABLE events (
   tenant_id LowCardinality(String),
   event_id String,
@@ -439,7 +439,7 @@ CREATE TABLE events (
   attributes Map(LowCardinality(String), String),
   actor_token Nullable(String),
   actor_kind LowCardinality(Nullable(String))
-) ENGINE = MergeTree
+) ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMMDD(observed_at)
 ORDER BY (tenant_id, system_id, template_id, observed_at, event_id)
 TTL toDateTime(observed_at) + INTERVAL 30 DAY;
@@ -454,9 +454,9 @@ CREATE TABLE event_identifiers (
   event_id String,
   system_id LowCardinality(String),
   observed_at DateTime64(3, 'UTC')
-) ENGINE = MergeTree
+) ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(observed_at)
-ORDER BY (tenant_id, token, observed_at)
+ORDER BY (tenant_id, token, observed_at, event_id, field_ref, form)
 TTL toDateTime(observed_at) + INTERVAL 30 DAY;
 
 -- transaction membership (append-only; latest assignment wins via version)
@@ -653,7 +653,7 @@ Forms that collapse to fewer than 3 characters are skipped. Forms identical to a
 ### 8.5 Forwarding
 
 - Disk buffer: append-only segment files (or SQLite in WAL mode) with size cap (default 20 GB) and backpressure: when the buffer is above 80%, pull connectors slow down; push receivers return 429/503 so upstream collectors retain data.
-- Batches of up to 5,000 events or 5 MB, zstd-compressed, sent over HTTPS with mutual TLS to `ingest-api`. Idempotent by `event_id`.
+- Batches of up to 5,000 events or 5 MB, zstd-compressed, sent over HTTPS with mutual TLS to `ingest-api`. Idempotent by `event_id`: `ingest-api` claims each batch id in its ledger before writing, and the event tables replace duplicates (ADR 0034). An event whose `observed_at` lies outside `now - events retention - 1 day` to `now + 1 day` refuses its batch with 422 (ADR 0036).
 - Delivery metrics: buffer depth, oldest event age, send errors.
 
 ---

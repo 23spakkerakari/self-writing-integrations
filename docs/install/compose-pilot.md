@@ -249,7 +249,9 @@ The one-shot `migrate` service runs `carto-core migrate` once PostgreSQL and Cli
 healthy. It creates the ClickHouse tables `events` and `event_identifiers` with the retention TTL
 (`CARTO_RETENTION__EVENTS_DAYS`, default 30, range 7 to 400; spec 14.10) and brings PostgreSQL to
 the head revision (the batch ledger and source health tables). It is idempotent: a second run
-prints `clickhouse: up to date` and `postgres: at head`. To run it by hand:
+prints `clickhouse: up to date` and `postgres: at head`. Migrations 0003 to 0006 drop and
+recreate both event tables as `ReplacingMergeTree` (ADR 0034), so a stack installed before them
+loses the events it held; load or replay them again after the upgrade. To run it by hand:
 
 ```sh
 docker compose -f deploy/compose/compose.yaml run --rm migrate
@@ -754,7 +756,7 @@ done
 | Service | Metrics (Prometheus text, `GET /metrics`, internal network only; spec 16) |
 | --- | --- |
 | `edge-gateway` | Counters `carto_edge_records_total`, `carto_edge_events_total`, `carto_edge_dropped_total` (by source and reason), `carto_edge_vault_entries_total`, `carto_edge_vault_purged_total` (expired reveal vault entries removed by the hourly housekeeping), `carto_edge_batches_sealed_total`, `carto_edge_batches_sent_total`, `carto_edge_batches_parked_total`, `carto_edge_send_errors_total`, `carto_edge_heartbeats_total`, `carto_edge_requests_total`, `carto_edge_mtls_refused_total` (by route), `carto_edge_connector_errors_total`; gauges `carto_edge_buffer_bytes`, `carto_edge_buffer_depth`, `carto_edge_buffer_oldest_age_seconds`, `carto_edge_backpressure` (0 ok, 1 above 80%, 2 full), `carto_edge_connector_lag_seconds`, `carto_edge_key_versions` |
-| `ingest-api` | `carto_ingest_batches_total`, `carto_ingest_events_total`, `carto_ingest_duplicates_total`, `carto_ingest_errors_total`, `carto_heartbeats_total`, `carto_ingest_mtls_refused_total` |
+| `ingest-api` | `carto_ingest_batches_total`, `carto_ingest_events_total`, `carto_ingest_duplicates_total`, `carto_ingest_errors_total`, `carto_heartbeats_total`, `carto_ingest_mtls_refused_total`, `carto_ingest_busy_total` (429, too many batches in flight), `carto_ingest_claims_busy_total` (503, another delivery is writing the batch), `carto_ingest_claims_taken_over_total` (stale claims rewritten), `carto_ingest_out_of_range_total` (422, an `observed_at` out of range), `carto_ingest_refused_total` (422, ClickHouse refused the data) |
 
 The stack has no Prometheus server in M1. A scraper needs a client certificate from each
 listener's CA, so name it in `--services` when you run `pki init` (step 4); a name that is not a
@@ -827,8 +829,13 @@ Back up after `key init` and every key change, and at least daily for the vault 
 ### Buffer, batching and backpressure
 
 The gateway seals batches of at most 5,000 events or 5 MB (zstd), or after 2 seconds, appends them
-to `buffer.sqlite`, and only then commits the source cursor (at-least-once; core deduplicates by
-batch id, ADR 0015). The forwarder posts the oldest pending batch to `ingest-api`, retries 429,
+to `buffer.sqlite`, and only then commits the source cursor (at-least-once; core claims each
+batch id in its ledger before writing it, and the event tables merge a second copy of an event,
+ADR 0034). `ingest-api` refuses a batch with 422 when an event's time lies more than one day
+past event retention or more than one day ahead (ADR 0036), so a backfill deeper than retention
+loads nothing past retention; `carto-core load-bundle` skips such events and reports how many.
+Ledger rows older than retention plus one day are pruned hourly. The forwarder posts the oldest
+pending batch to `ingest-api`, retries 429,
 5xx and network errors with jittered backoff up to 60 seconds, and parks batches that `ingest-api`
 refuses for good (400, 403, 413, 415, 422). Parked batches count toward the cap and appear in
 `carto_edge_batches_parked_total`; this build has no command to inspect or clear them.
