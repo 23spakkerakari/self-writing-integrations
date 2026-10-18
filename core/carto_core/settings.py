@@ -298,6 +298,14 @@ class LinkerSettings(_Frozen):
     )
     transaction_fanout_median_max: float = Field(default=3.0, ge=1.0)
     transaction_fanout_p99_max: float = Field(default=20.0, ge=1.0)
+    batch_other_end_median_max: float = Field(
+        default=1.5,
+        ge=1.0,
+        description=(
+            "Spec 9.3 batch role: one end fans out past the p99 limit while the other end's "
+            "median fan-out stays at or below this (one token to many transactions)."
+        ),
+    )
     bridge_consistency_min: float = Field(default=0.98, ge=0.0, le=1.0, description="9.4.")
     bridge_min_events: int = Field(default=20, ge=1, description="Co-occurring events needed.")
     proposal_threshold: float = Field(

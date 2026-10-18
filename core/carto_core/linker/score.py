@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from carto_core.store.model import CooccurrenceRow
 
 __all__ = [
-    "BATCH_OTHER_END_MEDIAN_MAX",
     "LAG_FLOOR_SECONDS",
     "Scorer",
     "direction_of",
@@ -54,11 +53,6 @@ __all__ = [
 LAG_FLOOR_SECONDS: Final = 60.0
 """The lag spread is judged against the median lag or one minute, whichever is larger, so a
 link whose events land within seconds is not called inconsistent by a few seconds of jitter."""
-
-BATCH_OTHER_END_MEDIAN_MAX: Final = 1.5
-"""Spec 9.3 batch role: one token to many transactions means the *other* end is near one-to-one.
-A spec 9.x number that is not yet a setting; see the report's "Needs orchestrator" item."""
-
 
 def _or(value: float | None, default: float) -> float:
     return default if value is None else value
@@ -154,9 +148,10 @@ def role_of(features: PairFeatures, settings: LinkerSettings) -> LinkRole:
     ab_median = features.fanout_ab_median or 0.0
     ba_median = features.fanout_ba_median or 0.0
     p99_max = settings.transaction_fanout_p99_max
-    if ab_p99 > p99_max and ba_median <= BATCH_OTHER_END_MEDIAN_MAX:
+    other_end_max = settings.batch_other_end_median_max
+    if ab_p99 > p99_max and ba_median <= other_end_max:
         return LinkRole.BATCH
-    if ba_p99 > p99_max and ab_median <= BATCH_OTHER_END_MEDIAN_MAX:
+    if ba_p99 > p99_max and ab_median <= other_end_max:
         return LinkRole.BATCH
     return LinkRole.ASSOCIATION
 
