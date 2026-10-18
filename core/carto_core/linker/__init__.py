@@ -1,7 +1,7 @@
 """carto-core linker (spec Section 5.3, 9.2 to 9.6, 9.9): candidates, verification, scoring,
-bridges, the review state machine, entity families, heuristic naming and the evidence sentence.
-:class:`LinkPass` is the one entry point the worker and ``carto-core discover`` call; the
-composite matcher (spec 9.5) attaches through its ``composite_hook``.
+bridges, the review state machine, entity families, heuristic naming, the evidence sentence and
+composite links. :class:`LinkPass` is the one entry point the worker and ``carto-core discover``
+call; :class:`CompositeMatcher` (spec 9.5) attaches through its ``composite_hook``.
 """
 
 from __future__ import annotations
@@ -15,6 +15,17 @@ from carto_core.linker.candidates import (
     default_containment,
     default_minhash_decoder,
     pair_allowed,
+)
+from carto_core.linker.composite import (
+    CompositeMatch,
+    CompositeMatcher,
+    CompositeOutcome,
+    CompositeReport,
+    CompositeRuleRepository,
+    InMemoryCompositeRuleRepository,
+    PostgresCompositeRuleRepository,
+    StoredCompositeRule,
+    SystemPairTrigger,
 )
 from carto_core.linker.families import (
     EntityNamer,
@@ -78,7 +89,12 @@ __all__ = [
     "CandidateSet",
     "CompositeComponent",
     "CompositeHook",
+    "CompositeMatch",
+    "CompositeMatcher",
+    "CompositeOutcome",
+    "CompositeReport",
     "CompositeRule",
+    "CompositeRuleRepository",
     "ContainmentFn",
     "Decision",
     "DecisionError",
@@ -92,6 +108,7 @@ __all__ = [
     "Family",
     "FamilyBuilder",
     "FamilyReport",
+    "InMemoryCompositeRuleRepository",
     "InMemoryEntityRepository",
     "InMemoryLinkRepository",
     "KeyLink",
@@ -105,6 +122,7 @@ __all__ = [
     "MinHashDecoder",
     "NotFoundError",
     "PairFeatures",
+    "PostgresCompositeRuleRepository",
     "PostgresEntityRepository",
     "PostgresLinkRepository",
     "ProfileSource",
@@ -116,6 +134,8 @@ __all__ = [
     "ScoredLink",
     "Scorer",
     "StaleVersionError",
+    "StoredCompositeRule",
+    "SystemPairTrigger",
     "Weights",
     "WeightsError",
     "build_families",
