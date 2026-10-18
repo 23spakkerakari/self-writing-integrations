@@ -1,10 +1,22 @@
-"""``carto-core``: migrations, the ingest-api service, bundle verification and loading.
+"""``carto-core``: migrations, the services, bundle verification and loading, discovery.
 
     carto-core migrate [--clickhouse-only | --postgres-only]
     carto-core ingest-api
+    carto-core api
+    carto-core worker [--once]
     carto-core verify-bundle --bundle PATH
     carto-core load-bundle --bundle PATH [--chunk-size N]
+    carto-core discover --out DIR [--bundle PATH] [--as-of TIME]
+    carto-core gate-report --predictions DIR --confirmed links.csv [--out PATH]
+    carto-core openapi [--out PATH]
+    carto-core audit-verify
     carto-core healthcheck --url https://localhost:8443/healthz [--timeout SECONDS]
+
+``api`` serves the console API (spec 12), ``worker`` leases the profiler and linker jobs
+(spec 5.3), ``discover`` runs one profile and link pass over the store (loading ``--bundle``
+first when given) and writes the eval prediction files, ``gate-report`` compares the partner's
+hand-confirmed links with the engine's top proposals (spec 21 gate), ``openapi`` prints the
+committed OpenAPI document and ``audit-verify`` walks the audit log's hash chain (spec 14.9).
 
 Settings come from the environment (``CARTO_...``, :class:`carto_core.settings.CoreSettings`);
 ``verify-bundle`` needs none. ``migrate`` runs with the configured database users, so point
@@ -105,6 +117,28 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--clickhouse-only", action="store_true")
     scope.add_argument("--postgres-only", action="store_true")
     commands.add_parser("ingest-api", help="Serve the ingest API over mutual TLS")
+    commands.add_parser("api", help="Serve the console API (spec 12)")
+    worker = commands.add_parser("worker", help="Lease and run profiler and linker jobs")
+    worker.add_argument("--once", action="store_true", help="Run the runnable jobs once and exit")
+    discover = commands.add_parser(
+        "discover", help="One profile and link pass; writes eval prediction files"
+    )
+    discover.add_argument("--out", type=Path, required=True, help="Prediction directory")
+    discover.add_argument("--bundle", type=Path, help="Verify and load this bundle first")
+    discover.add_argument(
+        "--as-of", help="Window end as ISO 8601 UTC (default: the latest event in the store)"
+    )
+    gate = commands.add_parser(
+        "gate-report", help="Top-3 proposals per confirmed partner link (spec 21 gate)"
+    )
+    gate.add_argument("--predictions", type=Path, required=True, help="discover --out directory")
+    gate.add_argument(
+        "--confirmed", type=Path, required=True, help="CSV: system_a,field_a,system_b,field_b"
+    )
+    gate.add_argument("--out", type=Path, help="Write the Markdown report here (else stdout)")
+    openapi = commands.add_parser("openapi", help="Print the OpenAPI document of the console API")
+    openapi.add_argument("--out", type=Path, help="Write the document here instead of stdout")
+    commands.add_parser("audit-verify", help="Verify the audit log hash chain (spec 14.9)")
     verify = commands.add_parser("verify-bundle", help="Verify a bundle's signature and digests")
     verify.add_argument("--bundle", type=Path, required=True, help="Path of the .carto directory")
     load = commands.add_parser("load-bundle", help="Verify a bundle and load it into ClickHouse")
@@ -281,6 +315,90 @@ def _healthcheck(args: argparse.Namespace, settings: CoreSettings) -> int:
     return _fail(f"healthcheck failed: HTTP {response.status_code}")
 
 
+def _openapi(args: argparse.Namespace) -> int:
+    from carto_core.api.openapi import render_openapi  # noqa: PLC0415  (fastapi app import)
+
+    text = render_openapi()
+    if args.out is None:
+        _emit(text.rstrip("\n"))
+        return EXIT_OK
+    try:
+        args.out.write_text(text, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        return _fail(f"cannot write {args.out}: {_describe(exc)}")
+    return EXIT_OK
+
+
+def _gate_report(args: argparse.Namespace) -> int:
+    from carto_core.gate import GateError, gate_report  # noqa: PLC0415
+
+    try:
+        text = gate_report(args.predictions, args.confirmed)
+    except GateError as exc:
+        return _fail(f"gate report failed: {exc}")
+    if args.out is None:
+        _emit(text.rstrip("\n"))
+        return EXIT_OK
+    try:
+        args.out.write_text(text, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        return _fail(f"cannot write {args.out}: {_describe(exc)}")
+    return EXIT_OK
+
+
+def _api(settings: CoreSettings) -> int:
+    from carto_core.api.server import run_api  # noqa: PLC0415
+
+    try:
+        return run_api(settings)
+    except (CoreConfigError, WriterError, SQLAlchemyError, OSError) as exc:
+        return _fail(f"api cannot start: {_describe(exc)}")
+
+
+def _worker(args: argparse.Namespace, settings: CoreSettings) -> int:
+    from carto_core.worker import run_worker  # noqa: PLC0415
+
+    try:
+        return run_worker(settings, once=args.once)
+    except (CoreConfigError, WriterError, SQLAlchemyError, OSError) as exc:
+        return _fail(f"worker cannot start: {_describe(exc)}")
+
+
+def _discover(args: argparse.Namespace, settings: CoreSettings) -> int:
+    from carto_core.discover import DiscoverError, run_discover  # noqa: PLC0415
+
+    configure_logging(PROG, settings.log_level, settings.log_json)
+    try:
+        summary = run_discover(settings, out_dir=args.out, bundle=args.bundle, as_of=args.as_of)
+    except DiscoverError as exc:
+        return _fail(f"discover failed: {exc}")
+    except (WriterError, LedgerError, SQLAlchemyError, CoreConfigError, BundleError) as exc:
+        return _fail(f"discover failed: {_describe(exc)}")
+    for line in summary:
+        _emit(line)
+    return EXIT_OK
+
+
+def _audit_verify(settings: CoreSettings) -> int:
+    from carto_core.audit_postgres import verify_audit_log  # noqa: PLC0415
+
+    try:
+        engine = create_engine_from_settings(settings.postgres)
+        try:
+            problem = verify_audit_log(engine, settings.tenant_id)
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, CoreConfigError) as exc:
+        return _fail(f"audit verify failed: {_describe(exc)}")
+    if problem is None:
+        _emit("audit log chain intact")
+        return EXIT_OK
+    return _fail(
+        f"audit log chain broken at row {problem.row_id}: expected {problem.expected}, "
+        f"found {problem.found}"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point; returns the exit code instead of exiting."""
     try:
@@ -292,6 +410,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code if isinstance(code, int) else EXIT_USAGE
     if args.command == "verify-bundle":
         return _verify(args)
+    if args.command == "openapi":
+        return _openapi(args)
+    if args.command == "gate-report":
+        return _gate_report(args)
     settings = _settings()
     if isinstance(settings, int):
         return settings
@@ -299,6 +421,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _migrate(args, settings)
     if args.command == "ingest-api":
         return _ingest_api(settings)
+    if args.command == "api":
+        return _api(settings)
+    if args.command == "worker":
+        return _worker(args, settings)
+    if args.command == "discover":
+        return _discover(args, settings)
+    if args.command == "audit-verify":
+        return _audit_verify(settings)
     if args.command == "healthcheck":
         return _healthcheck(args, settings)
     return _load(args, settings)

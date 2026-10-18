@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -145,14 +146,22 @@ def test_llm_enabled_requires_a_provider() -> None:
     assert LlmSettings(enabled=False, provider=None).enabled is False
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "bedrock", "vertex"])
-def test_llm_providers_are_the_adr_0004_set(provider: str) -> None:
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "bedrock", "vertex"])
+def test_llm_providers_are_the_adr_0004_set_plus_openai_compatible(provider: str) -> None:
+    """ADR 0004 names Anthropic, Bedrock and Vertex; plan M2 decision 12 adds any
+    OpenAI-compatible endpoint as the adapter most self-hosted deployments speak."""
     assert LlmSettings(enabled=True, provider=provider).provider == provider  # type: ignore[arg-type]
 
 
 def test_llm_rejects_other_providers() -> None:
     with pytest.raises(ValidationError):
-        LlmSettings(enabled=True, provider="openai")  # type: ignore[arg-type]
+        LlmSettings(enabled=True, provider="cohere")  # type: ignore[arg-type]
+
+
+def test_llm_credential_comes_from_a_file_not_a_value() -> None:
+    settings = LlmSettings(api_key_file=Path("/run/secrets/llm_key"))
+    assert settings.api_key_file == Path("/run/secrets/llm_key")
+    assert "api_key" not in {name for name in LlmSettings.model_fields if name != "api_key_file"}
 
 
 def test_llm_endpoint_must_be_https() -> None:

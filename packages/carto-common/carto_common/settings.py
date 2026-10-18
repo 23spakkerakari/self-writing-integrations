@@ -24,6 +24,7 @@ reference belongs does not end up in a log line.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Final, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -155,8 +156,10 @@ class RetentionSettings(_FrozenModel):
         return observed_at_range(now, self.events_days)
 
 
-LlmProvider = Literal["anthropic", "bedrock", "vertex"]
-"""Providers the customer can route ``llm-gateway`` through (spec 9.9, ADR 0004)."""
+LlmProvider = Literal["anthropic", "openai", "bedrock", "vertex"]
+"""Providers the customer can route ``llm-gateway`` through (spec 9.9, ADR 0004). ``openai`` is
+any OpenAI-compatible chat completions endpoint (most self-hosted and gateway deployments);
+``bedrock`` and ``vertex`` are adapters added when a partner asks (plan M2 decision 12)."""
 
 
 class LlmSettings(_FrozenModel):
@@ -171,6 +174,12 @@ class LlmSettings(_FrozenModel):
         description="Customer-approved endpoint; the only egress the gateway allows (spec 9.9).",
     )
     model: str | None = Field(default=None, description="Model name at the provider.")
+    api_key_file: Path | None = Field(
+        default=None,
+        description="File holding the provider credential; never an environment value (14.3).",
+    )
+    timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    max_output_tokens: int = Field(default=512, ge=64, le=4096)
 
     @field_validator("endpoint")
     @classmethod
