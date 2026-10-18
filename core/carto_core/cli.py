@@ -62,7 +62,12 @@ from carto_core.migrations import (
     apply_retention,
     migration_lock,
 )
-from carto_core.settings import CoreConfigError, CoreSettings
+from carto_core.settings import (
+    ApiSettings,
+    CoreConfigError,
+    CoreSettings,
+    IngestListenerSettings,
+)
 from carto_schema.ingest import MAX_EVENTS_PER_BATCH
 
 if TYPE_CHECKING:
@@ -158,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=HEALTHCHECK_TIMEOUT,
         help=f"Seconds before giving up (default {HEALTHCHECK_TIMEOUT:g})",
+    )
+    health.add_argument(
+        "--listener",
+        choices=("ingest", "api"),
+        default="ingest",
+        help="Whose certificate files to present and trust (default ingest)",
     )
     return parser
 
@@ -274,15 +285,18 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
     return EXIT_OK
 
 
-def health_ssl_context(settings: CoreSettings) -> ssl.SSLContext:
+def health_ssl_context(settings: CoreSettings, listener_name: str = "ingest") -> ssl.SSLContext:
     """Client context for :func:`_healthcheck`: the service's own pair as the client
-    certificate, the install CA as the trust anchor, TLS 1.2 minimum (spec 14.4)."""
-    listener = settings.ingest
+    certificate, the install CA as the trust anchor, TLS 1.2 minimum (spec 14.4). ``api`` probes
+    the console API listener with the api service's files."""
+    listener: IngestListenerSettings | ApiSettings = (
+        settings.api if listener_name == "api" else settings.ingest
+    )
     if listener.tls_cert_file is None or listener.tls_key_file is None:
-        msg = "ingest.tls_cert_file and ingest.tls_key_file are required for the healthcheck"
+        msg = f"{listener_name}.tls_cert_file and tls_key_file are required for the healthcheck"
         raise CoreConfigError(msg)
     if listener.client_ca_file is None:
-        msg = "ingest.client_ca_file is required for the healthcheck"
+        msg = f"{listener_name}.client_ca_file is required for the healthcheck"
         raise CoreConfigError(msg)
     context = ssl.create_default_context(cafile=str(listener.client_ca_file))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -290,10 +304,12 @@ def health_ssl_context(settings: CoreSettings) -> ssl.SSLContext:
     return context
 
 
-def _health_client(settings: CoreSettings, timeout: float) -> httpx.Client:
+def _health_client(
+    settings: CoreSettings, timeout: float, listener_name: str = "ingest"
+) -> httpx.Client:
     """The probe's HTTP client (tests substitute one with a mock transport)."""
     return httpx.Client(
-        verify=health_ssl_context(settings),
+        verify=health_ssl_context(settings, listener_name),
         timeout=timeout,
         trust_env=False,
         follow_redirects=False,
@@ -306,7 +322,7 @@ def _healthcheck(args: argparse.Namespace, settings: CoreSettings) -> int:
     if not 0 < args.timeout <= 60:
         return _usage("--timeout must be between 0 and 60 seconds")
     try:
-        with _health_client(settings, args.timeout) as client:
+        with _health_client(settings, args.timeout, args.listener) as client:
             response = client.get(args.url)
     except (CoreConfigError, OSError, ssl.SSLError, httpx.HTTPError) as exc:
         return _fail(f"healthcheck failed: {_describe(exc)}")

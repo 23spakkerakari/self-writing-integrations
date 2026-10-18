@@ -126,8 +126,10 @@ def _mock_client(monkeypatch: pytest.MonkeyPatch, status: int, seen: list[str]) 
         seen.append(str(request.url))
         return httpx.Response(status, json={"status": "ok"})
 
-    def factory(settings: CoreSettings, timeout: float) -> httpx.Client:
-        cli.health_ssl_context(settings)  # the real context must build from the files
+    def factory(
+        settings: CoreSettings, timeout: float, listener_name: str = "ingest"
+    ) -> httpx.Client:
+        cli.health_ssl_context(settings, listener_name)  # the real context builds from files
         return httpx.Client(transport=httpx.MockTransport(handler), timeout=timeout)
 
     monkeypatch.setattr(cli, "_health_client", factory)

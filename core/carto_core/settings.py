@@ -340,6 +340,18 @@ class OidcSettings(_Frozen):
     allow_http_issuer: bool = Field(
         default=False, description="Plain http:// issuer for the Compose dev profile only."
     )
+    backchannel_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL the api process uses for discovery, token and JWKS calls when the issuer "
+            "URL is only reachable by browsers (the Compose stack serves Dex under the console "
+            "origin): discovered endpoints that start with the issuer are rewritten to it. The "
+            "ID token's iss claim must still equal the issuer."
+        ),
+    )
+    ca_file: Path | None = Field(
+        default=None, description="CA bundle for the provider's TLS certificate (private CA)."
+    )
 
     @field_validator("issuer")
     @classmethod
@@ -355,15 +367,23 @@ class OidcSettings(_Frozen):
             raise ValueError(msg)
         return value.rstrip("/")
 
+    @field_validator("backchannel_url")
+    @classmethod
+    def _backchannel(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username:
+            msg = "api.oidc.backchannel_url must be an http(s):// URL without credentials"
+            raise ValueError(msg)
+        return value.rstrip("/")
+
     @model_validator(mode="after")
     def _https_unless_allowed(self) -> Self:
-        if (
-            self.issuer is not None
-            and self.issuer.startswith("http://")
-            and not self.allow_http_issuer
-        ):
-            msg = "api.oidc.issuer must be https:// unless api.oidc.allow_http_issuer is set"
-            raise ValueError(msg)
+        for name, url in (("issuer", self.issuer), ("backchannel_url", self.backchannel_url)):
+            if url is not None and url.startswith("http://") and not self.allow_http_issuer:
+                msg = f"api.oidc.{name} must be https:// unless api.oidc.allow_http_issuer is set"
+                raise ValueError(msg)
         return self
 
     def read_client_secret(self) -> str:
@@ -386,6 +406,17 @@ class ApiSettings(_Frozen):
     insecure_http: bool = Field(
         default=False,
         description="Serve plain HTTP behind a TLS-terminating proxy on a private network; tests.",
+    )
+    client_ca_file: Path | None = Field(
+        default=None,
+        description=(
+            "CA that signs the web proxy's client certificate (carto-ctl pki init, role web). "
+            "Browsers never reach this listener; the web service does (ADR 0052)."
+        ),
+    )
+    require_client_cert: bool = Field(
+        default=False,
+        description="Mutual TLS from the web proxy; needs client_ca_file. False for tests only.",
     )
     oidc: OidcSettings = Field(default_factory=OidcSettings)
     session_idle_minutes: int = Field(default=30, ge=5, le=240, description="Spec 14.1.")
@@ -424,6 +455,9 @@ class ApiSettings(_Frozen):
                 "api.tls_cert_file and api.tls_key_file are required unless api.insecure_http is "
                 "set (spec 14.4: TLS for every connection)"
             )
+            raise ValueError(msg)
+        if self.require_client_cert and self.client_ca_file is None:
+            msg = "api.client_ca_file is required when api.require_client_cert is set"
             raise ValueError(msg)
         for group, role in self.bootstrap_group_roles.items():
             if role not in ROLE_NAMES:

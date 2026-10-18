@@ -90,8 +90,8 @@ images: ## Build the service images (edge, core, ctl, simulator) from deploy/doc
 > docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=simulator --build-arg ENTRY=carto-sim -t carto-simulator:dev .
 
 dev: images ## Compose stack + simulator live mode (spec Section 20)
-> @test -s deploy/compose/secrets/pg_password || openssl rand -hex 24 | tr -d '\r\n' > deploy/compose/secrets/pg_password
-> @test -s deploy/compose/secrets/ch_password || openssl rand -hex 24 | tr -d '\r\n' > deploy/compose/secrets/ch_password
+> @for s in pg_password ch_password pg_ingest_password pg_app_password pg_worker_password oidc_client_secret; do test -s deploy/compose/secrets/$$s || openssl rand -hex 24 | tr -d '\r\n' > deploy/compose/secrets/$$s; done
+> @test -s deploy/compose/proxy-tls/tls.crt || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 -subj /CN=localhost -addext subjectAltName=DNS:localhost -keyout deploy/compose/proxy-tls/tls.key -out deploy/compose/proxy-tls/tls.crt 2>/dev/null && chmod 644 deploy/compose/proxy-tls/tls.key
 > docker compose -f deploy/compose/compose.yaml --profile dev up --remove-orphans
 
 dev-down: ## Stop the Compose stack and remove its volumes
