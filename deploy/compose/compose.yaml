@@ -283,7 +283,7 @@ services:
       CARTO_POSTGRES__USER: carto_app
       CARTO_POSTGRES__PASSWORD_FILE: /run/secrets/pg_app_password
       CARTO_API__HOST: 0.0.0.0
-      CARTO_API__PORT: "8444"
+      CARTO_API__PORT: "8443"
       # The console origin (what the browser uses); the web service publishes this port.
       CARTO_API__PUBLIC_URL: https://localhost:${CARTO_WEB_PORT:-8080}
       # Its own listener CA signs its server certificate and the web proxy's client one.
@@ -308,7 +308,7 @@ services:
       - pki-api:/etc/carto/pki:ro
     command: ["api"]
     healthcheck:
-      test: ["CMD", "carto-core", "healthcheck", "--url", "https://localhost:8444/api/v1/healthz", "--listener", "api"]
+      test: ["CMD", "carto-core", "healthcheck", "--url", "https://localhost:8443/api/v1/healthz", "--listener", "api"]
       interval: 15s
       timeout: 10s
       retries: 8
@@ -339,18 +339,21 @@ services:
       context: ../../web
       dockerfile: deploy/Dockerfile
     <<: *hardening
-    tmpfs: ["/tmp:size=64m", "/var/cache/nginx:size=32m", "/var/run:size=1m"]
+    tmpfs: ["/tmp:size=64m", "/var/cache/nginx:size=32m"]
     # The console origin: the one published port besides the push proxies (spec 14.5).
     networks: [core, ingress]
     ports:
       - "${CARTO_WEB_PORT:-8080}:8443"
     depends_on:
       api: { condition: service_healthy }
-    environment:
-      CARTO_WEB_PORT: ${CARTO_WEB_PORT:-8080}
     volumes:
       - ./proxy-tls:/etc/carto/proxy-tls:ro
       - pki-web:/etc/carto/pki:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
 
   dex:
     image: ghcr.io/dexidp/dex:v2.41.1

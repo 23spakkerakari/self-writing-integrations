@@ -14,7 +14,7 @@ SEED ?= 1
 SIM_OUT ?= sim-out
 EVAL_OUT ?= eval/reports
 
-.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench bench-gateway analyze sec sbom images dev dev-down release clean
+.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench bench-gateway analyze sec sbom images dev dev-down release clean web-setup web-check web-e2e
 
 help: ## Show targets
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -71,6 +71,15 @@ bench: ## Edge pipeline throughput benchmark (spec 17, M1 acceptance: 2,000 even
 bench-gateway: ## Full gateway ingest path benchmark: buffer, cursors, forwarder (ADR 0028)
 > AS_OF="$$($(UV) run carto-sim as-of --out $(SIM_OUT)/$(SCENARIO))" && $(UV) run carto-edge bench --path gateway --input $(SIM_OUT)/$(SCENARIO) --config simulator/analyze.$(SCENARIO).yaml --seconds 30 --as-of "$$AS_OF"
 
+web-setup: ## Install the console's locked npm dependencies (web/, ADR 0052)
+> cd web && npm ci
+
+web-check: ## Console lint, types, format, unit tests and production build (CI's web job minus e2e)
+> cd web && npm run lint && npm run typecheck && npm run format:check && npm run test && npm run build
+
+web-e2e: ## Console end-to-end tests with axe and the XSS corpus against the mock API (Playwright)
+> cd web && npm run e2e
+
 sec: ## Security scanners available locally; CI runs the full set (ADR 0007)
 > $(UV) run bandit -c pyproject.toml -r packages edge core simulator eval tools -q
 > $(UV) export --all-packages --no-emit-workspace --no-emit-package en-core-web-sm --no-hashes --format requirements-txt -o requirements-export.txt
@@ -88,6 +97,7 @@ images: ## Build the service images (edge, core, ctl, simulator) from deploy/doc
 > docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=core --build-arg ENTRY=carto-core -t carto-core:dev .
 > docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=ctl --build-arg ENTRY=carto-ctl -t carto-ctl:dev .
 > docker build -f deploy/docker/base.Dockerfile --build-arg MEMBER=simulator --build-arg ENTRY=carto-sim -t carto-simulator:dev .
+> docker build -f web/deploy/Dockerfile -t carto-web:dev web
 
 dev: images ## Compose stack + simulator live mode (spec Section 20)
 > @for s in pg_password ch_password pg_ingest_password pg_app_password pg_worker_password oidc_client_secret; do test -s deploy/compose/secrets/$$s || openssl rand -hex 24 | tr -d '\r\n' > deploy/compose/secrets/$$s; done

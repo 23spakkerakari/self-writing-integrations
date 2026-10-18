@@ -18,6 +18,6 @@ FROM nginxinc/nginx-unprivileged:1.30.4-alpine
 COPY --chown=10001:10001 deploy/nginx.conf /etc/nginx/nginx.conf
 COPY --chown=10001:10001 --from=build /src/dist /usr/share/nginx/html
 USER 10001:10001
-EXPOSE 8080
+EXPOSE 8080 8443
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 ENTRYPOINT ["nginx", "-g", "daemon off;"]
