@@ -13,16 +13,16 @@ records in M2) and logs through the root logger, redaction included (spec 14.12)
 
 The identity stores (sessions, users, role bindings, audit) are the PostgreSQL ones of
 :mod:`carto_core.api.stores_postgres` and :mod:`carto_core.audit_postgres`. The data ports
-(links, entities, systems, sources, fields) are built by :func:`data_ports`, which the
-orchestrator points at the stores of packages A and C; until then it raises and the command
-refuses to start rather than serving an empty in-memory queue as if it were the install's.
+(links, entities, systems, sources, fields) are the adapters of :mod:`carto_core.api.data_ports`
+over the metadata store (package A) and the linker's repositories and review service (package
+C), built by :func:`data_ports` on the same engine; ``run_api`` takes a ``ports_factory`` so a
+test can serve other ports.
 """
 
 from __future__ import annotations
 
 import ssl
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,7 +31,8 @@ import uvicorn
 from carto_common.logging import configure_logging, get_logger
 from carto_common.mtls import peer_role_h11_protocol
 from carto_core.api.app import create_app
-from carto_core.api.ports import ApiPorts, EntityPort, FieldPort, LinkPort, SourcePort, SystemPort
+from carto_core.api.data_ports import DataPorts, build_data_ports
+from carto_core.api.ports import ApiPorts
 from carto_core.api.stores_postgres import (
     PostgresRoleBindingStore,
     PostgresSessionStore,
@@ -60,22 +61,11 @@ __all__ = [
 log = get_logger(component="api")
 
 
-@dataclass(frozen=True, slots=True)
-class DataPorts:
-    """The engine-side ports (packages A and C) the identity stores are combined with."""
-
-    links: LinkPort
-    entities: EntityPort
-    systems: SystemPort
-    sources: SourcePort
-    fields: FieldPort
-
-
 def data_ports(engine: Engine, settings: CoreSettings) -> DataPorts:
-    """The production data ports. Wired by the orchestrator once packages A and C land."""
-    del engine, settings
-    msg = "the console API data ports are not wired to the metadata store yet"
-    raise CoreConfigError(msg)
+    """The production data ports: :func:`carto_core.api.data_ports.build_data_ports` over the
+    engine the identity stores share (``key_links``, ``entities``, ``systems``, ``sources``,
+    ``fields`` of migrations 0001 and 0004)."""
+    return build_data_ports(engine, settings)
 
 
 def build_ports(engine: Engine, data: DataPorts) -> ApiPorts:

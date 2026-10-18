@@ -15,7 +15,9 @@ staleness and families over the window ``[now - window_days, now + 1 day)``:
 4. :meth:`ReviewService.propose` upserts proposals, refreshes evidence, applies the re-proposal
    and staleness rules and auto-accept when enabled;
 5. :class:`~carto_core.linker.families.FamilyBuilder` rebuilds the entity families;
-6. ``composite_hook`` (package D) runs last over the same window, if wired.
+6. ``composite_hook`` (package D, :meth:`~carto_core.linker.composite.CompositeMatcher.hook`)
+   runs last over the same window, if wired; the composite links it returns go through the
+   same :meth:`ReviewService.propose`, which never auto-accepts them (spec 9.5).
 
 Everything a review item shows (the sentence, the top shapes) is computed here from metadata
 and stored with the evidence; nothing in it is a token (spec 2.3 invariant 2).
@@ -52,14 +54,15 @@ if TYPE_CHECKING:
     from carto_core.profiler.model import FieldProfile, WindowSketch
     from carto_core.settings import LinkerSettings, ProfilerSettings
     from carto_core.store.model import EventStore
+    from carto_core.worker import WorkerContext
 
 __all__ = ["CompositeHook", "LinkPass", "LinkReport", "ProfileSource"]
 
 log = get_logger(component="linker")
 
-CompositeHook = Callable[..., None]
+CompositeHook = Callable[..., "Sequence[ScoredLink] | None"]
 """Package D's entry point, called as ``hook(tenant_id=..., window=..., links=...)`` with the
-links scored in this pass; None until it lands."""
+links scored in this pass; it returns the composite links the pass then proposes (or None)."""
 
 
 @runtime_checkable
@@ -93,6 +96,16 @@ class LinkReport:
     recovered: int
     families: int
     families_named: int
+    composite_links: int = 0
+    """Composite links the hook returned (spec 9.5)."""
+    composite_proposed: int = 0
+    """Of those, new review-queue rows."""
+
+    @property
+    def new_sketches(self) -> bool:
+        """The worker's follow-up flag (:func:`carto_core.worker.default_handler_factory`):
+        a link pass never produces sketches, so it never queues another pass."""
+        return False
 
 
 class LinkPass:
@@ -143,6 +156,75 @@ class LinkPass:
     @property
     def scorer(self) -> Scorer:
         return self._scorer
+
+    @classmethod
+    def from_context(cls, context: WorkerContext) -> LinkPass:
+        """The pass as ``carto-core worker`` builds it
+        (:func:`carto_core.worker.default_handler_factory`): the context's event store,
+        ``key_links``, ``entities`` and ``audit_log`` on
+        ``context.engine``, the profiler's sketches as the :class:`ProfileSource` and its
+        estimators (:mod:`carto_core.linker.profile_source`; the linker's own defaults when the
+        profiler package is missing, logged), system names from the metadata store, and the LLM
+        gateway as the entity namer when ``llm.enabled`` with the dictionary as its fallback
+        (:mod:`carto_core.linker.gateway_namer`), and the composite matcher (spec 9.5, package
+        D) over ``composite_rules`` as the ``composite_hook``."""
+        from carto_core.audit_postgres import PostgresAuditLog  # noqa: PLC0415 - wiring only
+        from carto_core.linker.composite import (  # noqa: PLC0415
+            CompositeMatcher,
+            PostgresCompositeRuleRepository,
+        )
+        from carto_core.linker.gateway_namer import gateway_namer_for  # noqa: PLC0415
+        from carto_core.linker.profile_source import (  # noqa: PLC0415
+            profile_source_for,
+            profiler_seams,
+        )
+        from carto_core.linker.repository import (  # noqa: PLC0415
+            PostgresEntityRepository,
+            PostgresLinkRepository,
+        )
+
+        settings = context.settings
+        seams = profiler_seams(settings.profiler)
+        links = PostgresLinkRepository(context.engine)
+        entities = PostgresEntityRepository(context.engine)
+        system_names = {
+            system.id: system.name for system in context.metadata.list_systems(context.tenant_id)
+        }
+        matcher = CompositeMatcher(
+            store=context.events,
+            settings=settings.linker,
+            rules=PostgresCompositeRuleRepository(context.engine),
+            clock=context.clock,
+            system_names=system_names,
+        )
+        link_pass = cls(
+            store=context.events,
+            profiles=profile_source_for(context),
+            links=links,
+            entities=entities,
+            audit=PostgresAuditLog(context.engine),
+            settings=settings.linker,
+            profiler_settings=settings.profiler,
+            clock=context.clock,
+            containment=seams.containment,
+            domain_size=seams.domain_size,
+            decode_minhash=seams.decode_minhash,
+            system_names=system_names,
+            composite_hook=matcher.hook,
+        )
+        namer = gateway_namer_for(
+            settings, context.engine, context.tenant_id, fallback=link_pass._default_namer
+        )
+        if namer is not None:
+            link_pass._families = FamilyBuilder(links, entities, namer=namer)
+        log.info(
+            "link pass wired",
+            tenant_id=context.tenant_id,
+            estimators=seams.source,
+            profiles=type(link_pass._profiles).__name__,
+            llm_namer=namer is not None,
+        )
+        return link_pass
 
     def window_for(self, now: datetime) -> Window:
         start = now - timedelta(days=self._profiler.window_days)
@@ -205,8 +287,14 @@ class LinkPass:
             scored.append(self._with_sentence(tenant_id, item, outcome.filter_reason))
         proposed = self._review.propose(tenant_id, scored, now=at)
         families = self._families.rebuild(tenant_id, now=at)
+        composite_links = 0
+        composite_proposed = 0
         if self._composite_hook is not None:
-            self._composite_hook(tenant_id=tenant_id, window=window, links=tuple(scored))
+            returned = self._composite_hook(tenant_id=tenant_id, window=window, links=tuple(scored))
+            composite = list(returned) if returned else []
+            composite_links = len(composite)
+            if composite:
+                composite_proposed = self._review.propose(tenant_id, composite, now=at).proposed
         report = LinkReport(
             tenant_id=tenant_id,
             window=window,
@@ -226,6 +314,8 @@ class LinkPass:
             recovered=proposed.recovered,
             families=families.families,
             families_named=families.names_inherited + families.names_suggested,
+            composite_links=composite_links,
+            composite_proposed=composite_proposed,
         )
         log.info(
             "link pass done",
@@ -237,6 +327,7 @@ class LinkPass:
             auto_accepted=report.auto_accepted,
             stale=report.stale,
             families=report.families,
+            composite_links=report.composite_links,
         )
         return report
 

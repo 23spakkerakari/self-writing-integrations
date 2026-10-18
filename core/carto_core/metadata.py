@@ -34,7 +34,7 @@ import json
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import sqlalchemy
@@ -57,12 +57,15 @@ __all__ = [
     "InMemoryMetadataStore",
     "InventoryResult",
     "MetadataError",
+    "MetadataNotFoundError",
+    "MetadataStaleError",
     "MetadataStore",
     "PostgresMetadataStore",
     "SourceRecord",
     "SystemRecord",
     "TemplateRecord",
     "pin_matches",
+    "updated_at_version",
 ]
 
 DEFAULT_PAGE: Final = 100
@@ -74,6 +77,30 @@ Shapes = tuple[tuple[str, float], ...]
 
 class MetadataError(Exception):
     """The metadata store could not be read or written; the message names the cause only."""
+
+
+class MetadataNotFoundError(MetadataError):
+    """No row with that id for that tenant."""
+
+
+class MetadataStaleError(MetadataError):
+    """``expected_version`` did not match the row's ``updated_at`` (optimistic concurrency)."""
+
+
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+_MILLISECOND: Final = timedelta(milliseconds=1)
+
+
+def updated_at_version(at: datetime | None) -> int:
+    """The optimistic-concurrency version of a row that has ``updated_at`` but no version
+    column (``systems``, ``entities``): whole milliseconds since the epoch, UTC, computed with
+    integer arithmetic so Python and ``FLOOR(EXTRACT(EPOCH FROM updated_at) * 1000)`` in
+    PostgreSQL agree to the millisecond. ``None`` (a row never written) is version 0. Two writes
+    inside one millisecond share a version; a version column (a later migration) removes that."""
+    if at is None:
+        return 0
+    aware = at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+    return (aware.astimezone(UTC) - _EPOCH) // _MILLISECOND
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +177,8 @@ class SystemRecord:
     description: str = ""
     owner_group: str | None = None
     criticality: str = "medium"
+    updated_at: datetime | None = None
+    """When the row last changed; :func:`updated_at_version` derives the console's ETag from it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +198,7 @@ class SourceRecord:
     edge_id: str | None = None
     status: str = "unknown"
     health: SourceHealthRecord | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +260,22 @@ class MetadataStore(Protocol):
         ...
 
     def list_systems(self, tenant_id: str) -> list[SystemRecord]: ...
+
+    def rename_system(
+        self,
+        tenant_id: str,
+        system_id: str,
+        *,
+        name: str | None,
+        description: str | None,
+        expected_version: int,
+        now: datetime,
+    ) -> SystemRecord:
+        """The console's ``PATCH /systems/{id}`` (spec 12): set the name and/or description
+        when :func:`updated_at_version` of the stored row equals ``expected_version``, stamping
+        ``updated_at = now``. Raises :class:`MetadataNotFoundError` or
+        :class:`MetadataStaleError`. The edge's next inventory overwrites the name (ADR 0050)."""
+        ...
 
     def list_sources(self, tenant_id: str) -> list[SourceRecord]: ...
 
@@ -392,6 +438,7 @@ class InMemoryMetadataStore:
                     name=system.name,
                     owner_group=system.owner_group or None,
                     criticality=system.criticality,
+                    updated_at=received_at,
                 )
             listed = {source.id for source in inventory.sources}
             disabled = 0
@@ -403,7 +450,7 @@ class InMemoryMetadataStore:
                 ):
                     if current.enabled:
                         disabled += 1
-                    self._sources[key] = replace(current, enabled=False)
+                    self._sources[key] = replace(current, enabled=False, updated_at=received_at)
             for source in inventory.sources:
                 previous = self._sources.get((tenant, source.id))
                 self._sources[tenant, source.id] = SourceRecord(
@@ -419,6 +466,7 @@ class InMemoryMetadataStore:
                     last_test_at=source.last_test_at,
                     edge_id=inventory.edge_id,
                     status=previous.status if previous is not None else "unknown",
+                    updated_at=received_at,
                 )
             self._pins[tenant, inventory.edge_id] = list(inventory.field_policies)
             self._inventories[tenant, inventory.edge_id] = {
@@ -449,6 +497,33 @@ class InMemoryMetadataStore:
                 (record for (tenant, _id), record in self._systems.items() if tenant == tenant_id),
                 key=lambda record: record.id,
             )
+
+    def rename_system(
+        self,
+        tenant_id: str,
+        system_id: str,
+        *,
+        name: str | None,
+        description: str | None,
+        expected_version: int,
+        now: datetime,
+    ) -> SystemRecord:
+        with self._lock:
+            current = self._systems.get((tenant_id, system_id))
+            if current is None:
+                msg = "system not found"
+                raise MetadataNotFoundError(msg)
+            if updated_at_version(current.updated_at) != expected_version:
+                msg = "system changed"
+                raise MetadataStaleError(msg)
+            updated = replace(
+                current,
+                name=name if name is not None else current.name,
+                description=description if description is not None else current.description,
+                updated_at=now,
+            )
+            self._systems[(tenant_id, system_id)] = updated
+            return updated
 
     def _with_health(self, tenant_id: str, record: SourceRecord) -> SourceRecord:
         return replace(record, health=self.health.get((tenant_id, record.id)))
@@ -588,13 +663,23 @@ _PIN_FIELDS = sqlalchemy.text(
 _PINS = sqlalchemy.text(
     "SELECT payload -> 'field_policies' AS pins FROM edge_inventories WHERE tenant_id = :tenant_id"
 )
+_SYSTEM_COLUMNS: Final = "id, name, description, owner_group, criticality, updated_at"
 _SYSTEMS = sqlalchemy.text(
-    "SELECT id, name, description, owner_group, criticality FROM systems "
-    "WHERE tenant_id = :tenant_id ORDER BY id"
+    "SELECT " + _SYSTEM_COLUMNS + " FROM systems WHERE tenant_id = :tenant_id ORDER BY id"  # noqa: S608
+)
+_SYSTEM = sqlalchemy.text(
+    "SELECT " + _SYSTEM_COLUMNS + " FROM systems WHERE tenant_id = :tenant_id AND id = :id"  # noqa: S608
+)
+_RENAME_SYSTEM = sqlalchemy.text(
+    "UPDATE systems SET name = COALESCE(:name, name), "  # noqa: S608 - the only interpolation is the constant column list
+    "description = COALESCE(:description, description), updated_at = :now "
+    "WHERE tenant_id = :tenant_id AND id = :id "
+    "AND FLOOR(EXTRACT(EPOCH FROM updated_at) * 1000) = :expected_version "
+    "RETURNING " + _SYSTEM_COLUMNS
 )
 _SOURCE_COLUMNS: Final = (
     "s.id, s.system_id, s.type, s.enabled, s.config_json, s.secret_ref, s.backfill_days, "
-    "s.schedule, s.last_test, s.last_test_at, s.edge_id, s.status, "
+    "s.schedule, s.last_test, s.last_test_at, s.edge_id, s.status, s.updated_at, "
     "h.status AS h_status, h.last_success_at AS h_last_success_at, h.lag_seconds AS h_lag_seconds, "
     "h.error_count AS h_error_count, h.buffer_depth AS h_buffer_depth, "
     "h.oldest_buffered_at AS h_oldest_buffered_at, h.message AS h_message, "
@@ -711,6 +796,18 @@ def _source_from(row: Row[Any]) -> SourceRecord:
         edge_id=row.edge_id,
         status=str(row.status),
         health=health,
+        updated_at=row.updated_at,
+    )
+
+
+def _system_from(row: Row[Any]) -> SystemRecord:
+    return SystemRecord(
+        id=str(row.id),
+        name=str(row.name),
+        description=str(row.description),
+        owner_group=row.owner_group,
+        criticality=str(row.criticality),
+        updated_at=row.updated_at,
     )
 
 
@@ -991,15 +1088,43 @@ class PostgresMetadataStore:
 
     def list_systems(self, tenant_id: str) -> list[SystemRecord]:
         return [
-            SystemRecord(
-                id=str(row.id),
-                name=str(row.name),
-                description=str(row.description),
-                owner_group=row.owner_group,
-                criticality=str(row.criticality),
-            )
-            for row in self._rows(_SYSTEMS, {"tenant_id": tenant_id}, "systems")
+            _system_from(row) for row in self._rows(_SYSTEMS, {"tenant_id": tenant_id}, "systems")
         ]
+
+    def rename_system(
+        self,
+        tenant_id: str,
+        system_id: str,
+        *,
+        name: str | None,
+        description: str | None,
+        expected_version: int,
+        now: datetime,
+    ) -> SystemRecord:
+        parameters = {
+            "tenant_id": tenant_id,
+            "id": system_id,
+            "name": name,
+            "description": description,
+            "expected_version": expected_version,
+            "now": now,
+        }
+        try:
+            with self._engine.begin() as connection:
+                row = connection.execute(_RENAME_SYSTEM, parameters).first()
+                if row is None:
+                    exists = connection.execute(
+                        _SYSTEM, {"tenant_id": tenant_id, "id": system_id}
+                    ).first()
+                    if exists is None:
+                        msg = "system not found"
+                        raise MetadataNotFoundError(msg)
+                    msg = "system changed"
+                    raise MetadataStaleError(msg)
+        except SQLAlchemyError as exc:
+            msg = f"system rename failed: {type(exc).__name__}"
+            raise MetadataError(msg) from exc
+        return _system_from(row)
 
     def list_sources(self, tenant_id: str) -> list[SourceRecord]:
         rows = self._rows(_SOURCES, {"tenant_id": tenant_id}, "sources")
