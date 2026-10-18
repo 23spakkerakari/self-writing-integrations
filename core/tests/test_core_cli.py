@@ -19,6 +19,7 @@ from carto_core import cli
 from carto_core.cli import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, build_parser, main
 from carto_core.db.clickhouse import ClickHouseWriter
 from carto_core.ingest.ledger import PostgresBatchLedger
+from carto_core.metadata import PostgresMetadataStore
 from carto_core.settings import CoreSettings
 
 
@@ -194,9 +195,10 @@ def test_open_stores_closes_the_client_and_disposes_the_engine(
     monkeypatch.setattr(cli, "create_client", lambda _settings: client)
     monkeypatch.setattr(cli, "create_engine_from_settings", lambda _settings: engine)
     expected = pytest.raises(RuntimeError) if fail else contextlib.nullcontext()
-    with expected, cli._open_stores(CoreSettings()) as (writer, ledger):
+    with expected, cli._open_stores(CoreSettings()) as (writer, ledger, metadata):
         assert isinstance(writer, ClickHouseWriter)
         assert isinstance(ledger, PostgresBatchLedger)
+        assert isinstance(metadata, PostgresMetadataStore)
         if fail:
             raise RuntimeError("load failed")
     assert client.closed == 1

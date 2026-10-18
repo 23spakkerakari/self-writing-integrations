@@ -1,10 +1,11 @@
-"""Row building for the spec 7.2 tables from the spec 7.1 example event, and the ClickHouse
-writer against a fake client (column-oriented inserts, error wrapping, readiness)."""
+"""Row building for the spec 7.2 tables from the spec 7.1 example event (with ``stored_at``
+from the writer's clock, ADR 0046), and the ClickHouse writer against a fake client
+(column-oriented inserts, error wrapping, readiness)."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -25,12 +26,14 @@ from carto_core.db.clickhouse import (
     field_ref,
     identifier_rows,
     partition_day_groups,
+    stored_at_now,
 )
 from carto_core.settings import ClickHouseSettings
 from carto_schema.event import CanonicalEvent
 
 OBSERVED = datetime(2026, 10, 6, 21, 12, 3, 412000, tzinfo=UTC)
 INGESTED = datetime(2026, 10, 6, 21, 12, 9, 20000, tzinfo=UTC)
+STORED = datetime(2026, 10, 7, 8, 0, 0, 123000, tzinfo=UTC)
 
 
 class FakeClient:
@@ -67,8 +70,8 @@ class FakeClient:
 
 
 def test_event_row_reproduces_the_spec_example_column_for_column() -> None:
-    row = event_row(CanonicalEvent.example())
-    assert len(row) == len(EVENT_COLUMNS) == 13
+    row = event_row(CanonicalEvent.example(), STORED)
+    assert len(row) == len(EVENT_COLUMNS) == 14
     assert dict(zip(EVENT_COLUMNS, row, strict=True)) == {
         "tenant_id": "default",
         "event_id": "01J9ZK8X5Q8V3N6M2T4R7W1Y0A",
@@ -83,19 +86,20 @@ def test_event_row_reproduces_the_spec_example_column_for_column() -> None:
         "attributes": {"status": "CREATED", "warehouse_code": "DC-03"},
         "actor_token": "t1.Hh3Vq6Zt1Nm4Rk8Pw2Ls7D",
         "actor_kind": "human",
+        "stored_at": STORED,
     }
 
 
 def test_enum_columns_are_plain_strings_not_enum_members() -> None:
-    row = dict(zip(EVENT_COLUMNS, event_row(CanonicalEvent.example()), strict=True))
+    row = dict(zip(EVENT_COLUMNS, event_row(CanonicalEvent.example(), STORED), strict=True))
     for column in ("kind", "observed_at_quality", "actor_kind"):
         assert type(row[column]) is str, column
 
 
 def test_identifier_rows_explode_one_row_per_identifier_with_field_ref() -> None:
-    rows = identifier_rows(CanonicalEvent.example())
+    rows = identifier_rows(CanonicalEvent.example(), STORED)
     assert len(rows) == 4
-    assert all(len(row) == len(IDENTIFIER_COLUMNS) == 8 for row in rows)
+    assert all(len(row) == len(IDENTIFIER_COLUMNS) == 9 for row in rows)
     as_dicts = [dict(zip(IDENTIFIER_COLUMNS, row, strict=True)) for row in rows]
     assert [row["field_ref"] for row in as_dicts] == [
         "sys_warehouse/tpl_4f1c9a/po_num",
@@ -114,7 +118,17 @@ def test_identifier_rows_explode_one_row_per_identifier_with_field_ref() -> None
         "event_id": "01J9ZK8X5Q8V3N6M2T4R7W1Y0A",
         "system_id": "sys_warehouse",
         "observed_at": OBSERVED,
+        "stored_at": STORED,
     }
+
+
+def test_stored_at_now_is_utc_at_millisecond_precision() -> None:
+    """ADR 0046: the writer's wall clock, in UTC, truncated like every contract timestamp."""
+    local = datetime(2026, 10, 7, 10, 0, 0, 123456, tzinfo=timezone(timedelta(hours=2)))
+    assert stored_at_now(lambda: local) == STORED
+    assert stored_at_now().tzinfo is UTC
+    with pytest.raises(ValueError, match="aware"):
+        stored_at_now(lambda: datetime(2026, 10, 7, 10))
 
 
 def test_field_ref_is_system_template_field() -> None:
@@ -125,7 +139,7 @@ def test_nullable_actor_and_severity() -> None:
     bare = CanonicalEvent.model_validate(
         CanonicalEvent.example().model_dump() | {"actor": None, "severity": "error"}
     )
-    row = dict(zip(EVENT_COLUMNS, event_row(bare), strict=True))
+    row = dict(zip(EVENT_COLUMNS, event_row(bare, STORED), strict=True))
     assert row["actor_token"] is None
     assert row["actor_kind"] is None
     assert row["severity"] == "error"
@@ -133,8 +147,8 @@ def test_nullable_actor_and_severity() -> None:
 
 
 def test_timestamps_are_utc_aware_datetimes_at_millisecond_precision() -> None:
-    row = dict(zip(EVENT_COLUMNS, event_row(CanonicalEvent.example()), strict=True))
-    for column in ("observed_at", "ingested_at"):
+    row = dict(zip(EVENT_COLUMNS, event_row(CanonicalEvent.example(), STORED), strict=True))
+    for column in ("observed_at", "ingested_at", "stored_at"):
         value = row[column]
         assert isinstance(value, datetime)
         assert value.tzinfo is UTC
@@ -146,15 +160,15 @@ def test_columns_of_transposes_rows_into_one_list_per_column() -> None:
     other = CanonicalEvent.model_validate(
         event.model_dump() | {"event_id": "01J9ZK8X5Q8V3N6M2T4R7W1Y0B"}
     )
-    columns = columns_of([event_row(event), event_row(other)], len(EVENT_COLUMNS))
-    assert len(columns) == 13
+    columns = columns_of([event_row(event, STORED), event_row(other, STORED)], len(EVENT_COLUMNS))
+    assert len(columns) == 14
     assert columns[1] == ["01J9ZK8X5Q8V3N6M2T4R7W1Y0A", "01J9ZK8X5Q8V3N6M2T4R7W1Y0B"]
-    assert columns_of([], len(EVENT_COLUMNS)) == [[] for _ in range(13)]
+    assert columns_of([], len(EVENT_COLUMNS)) == [[] for _ in range(14)]
 
 
 def test_writer_inserts_both_tables_column_oriented() -> None:
     client = FakeClient()
-    writer = ClickHouseWriter(client)
+    writer = ClickHouseWriter(client, clock=lambda: STORED)
     event = CanonicalEvent.example()
     result = writer.write_events([event, event])
     assert result == WriteResult(events=2, identifiers=8)
@@ -162,12 +176,23 @@ def test_writer_inserts_both_tables_column_oriented() -> None:
     events_insert, identifiers_insert = client.inserts
     assert events_insert["column_names"] == list(EVENT_COLUMNS)
     assert events_insert["column_oriented"] is True
-    assert len(events_insert["data"]) == 13
+    assert len(events_insert["data"]) == 14
     assert all(len(column) == 2 for column in events_insert["data"])
+    assert events_insert["data"][-1] == [STORED, STORED], "stored_at from the clock"
     assert identifiers_insert["column_names"] == list(IDENTIFIER_COLUMNS)
     assert identifiers_insert["column_oriented"] is True
-    assert len(identifiers_insert["data"]) == 8
+    assert len(identifiers_insert["data"]) == 9
     assert all(len(column) == 8 for column in identifiers_insert["data"])
+    assert identifiers_insert["data"][-1] == [STORED] * 8
+
+
+def test_writer_without_a_clock_stamps_the_wall_clock() -> None:
+    client = FakeClient()
+    before = datetime.now(UTC)
+    ClickHouseWriter(client).write_events([CanonicalEvent.example()])
+    (stored_at,) = client.inserts[0]["data"][-1]
+    assert stored_at.tzinfo is UTC
+    assert before - timedelta(seconds=1) <= stored_at <= datetime.now(UTC)
 
 
 def test_writer_skips_the_identifier_insert_when_there_are_none() -> None:

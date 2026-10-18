@@ -6,7 +6,10 @@ workhorse"), with ``field_ref = system_id/template_id/field`` (spec 7.2, ADR 001
 built by pure functions so the mapping is unit-tested without a server; inserts are
 column-oriented, which is what clickhouse-connect sends most cheaply. ``template_text`` is not a
 column of ``events`` (spec 7.2) and is not written here; templates live in PostgreSQL (spec 7.3)
-from M2 on.
+from M2 on. Both rows carry ``stored_at``, core's wall clock at the insert (migrations 0007 and
+0008, ADR 0046): the profiler's incremental watermark, which the edge's ``ingested_at`` cannot
+be because a backed-up disk buffer delivers hours late. The writer takes a ``clock`` so tests
+and the bundle loader control it; it is UTC at millisecond precision like every timestamp.
 
 Both tables are partitioned by the day of ``observed_at``, and ClickHouse refuses an insert
 that touches more than 100 partitions. The writer therefore inserts the events of at most
@@ -23,7 +26,7 @@ not migrated yet) is transient: 503, and the edge retries.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -58,6 +61,7 @@ __all__ = [
     "identifier_rows",
     "is_permanent",
     "partition_day_groups",
+    "stored_at_now",
 ]
 
 MAX_PARTITION_DAYS: Final = 90
@@ -107,8 +111,10 @@ EVENT_COLUMNS: Final[tuple[str, ...]] = (
     "attributes",
     "actor_token",
     "actor_kind",
+    "stored_at",
 )
-"""``events`` columns in DDL order (spec 7.2, ``core/migrations/clickhouse/0001_events.sql``)."""
+"""``events`` columns in DDL order (spec 7.2, ``0004_events_replacing.sql`` plus ``stored_at``
+from ``0007_events_stored_at.sql``)."""
 
 IDENTIFIER_COLUMNS: Final[tuple[str, ...]] = (
     "tenant_id",
@@ -119,8 +125,10 @@ IDENTIFIER_COLUMNS: Final[tuple[str, ...]] = (
     "event_id",
     "system_id",
     "observed_at",
+    "stored_at",
 )
-"""``event_identifiers`` columns in DDL order (spec 7.2, ``0002_event_identifiers.sql``)."""
+"""``event_identifiers`` columns in DDL order (spec 7.2, ``0006_event_identifiers_replacing.sql``
+plus ``stored_at`` from ``0008_event_identifiers_stored_at.sql``)."""
 
 type EventRow = tuple[
     str,
@@ -136,10 +144,11 @@ type EventRow = tuple[
     dict[str, str],
     str | None,
     str | None,
+    datetime,
 ]
 """One ``events`` row, in :data:`EVENT_COLUMNS` order."""
 
-type IdentifierRow = tuple[str, str, str, str, str, str, str, datetime]
+type IdentifierRow = tuple[str, str, str, str, str, str, str, datetime, datetime]
 """One ``event_identifiers`` row, in :data:`IDENTIFIER_COLUMNS` order."""
 
 
@@ -189,8 +198,20 @@ def field_ref(system_id: str, template_id: str, field: str) -> str:
     return f"{system_id}/{template_id}/{field}"
 
 
-def event_row(event: CanonicalEvent) -> EventRow:
-    """The ``events`` row of one canonical event (spec 7.1 to 7.2 mapping)."""
+def stored_at_now(clock: Callable[[], datetime] | None = None) -> datetime:
+    """The ``stored_at`` of rows written now: ``clock()`` (the wall clock by default) in UTC,
+    truncated to milliseconds like every contract timestamp."""
+    at = clock() if clock is not None else datetime.now(UTC)
+    if at.tzinfo is None:
+        msg = "the writer clock must return an aware datetime"
+        raise ValueError(msg)
+    at = at.astimezone(UTC)
+    return at.replace(microsecond=at.microsecond // 1000 * 1000)
+
+
+def event_row(event: CanonicalEvent, stored_at: datetime) -> EventRow:
+    """The ``events`` row of one canonical event (spec 7.1 to 7.2 mapping) stored at
+    ``stored_at`` (:func:`stored_at_now`)."""
     actor = event.actor
     return (
         event.tenant_id,
@@ -206,10 +227,11 @@ def event_row(event: CanonicalEvent) -> EventRow:
         dict(event.attributes),
         actor.token if actor is not None else None,
         actor.kind.value if actor is not None else None,
+        stored_at,
     )
 
 
-def identifier_rows(event: CanonicalEvent) -> list[IdentifierRow]:
+def identifier_rows(event: CanonicalEvent, stored_at: datetime) -> list[IdentifierRow]:
     """One ``event_identifiers`` row per identifier form of the event (spec 7.2)."""
     return [
         (
@@ -221,6 +243,7 @@ def identifier_rows(event: CanonicalEvent) -> list[IdentifierRow]:
             event.event_id,
             event.system_id,
             event.observed_at,
+            stored_at,
         )
         for identifier in event.identifiers
     ]
@@ -267,26 +290,31 @@ def columns_of(rows: Sequence[Sequence[Any]], width: int) -> list[list[Any]]:
 class ClickHouseWriter:
     """Writes canonical events to ``events`` and ``event_identifiers`` (spec 5.4 step 8)."""
 
-    __slots__ = ("_client",)
+    __slots__ = ("_client", "_clock")
 
-    def __init__(self, client: InsertClient) -> None:
+    def __init__(
+        self, client: InsertClient, *, clock: Callable[[], datetime] | None = None
+    ) -> None:
         self._client = client
+        self._clock = clock
 
     def write_events(self, events: Sequence[CanonicalEvent]) -> WriteResult:
         """Insert every event and its identifier forms, at most :data:`MAX_PARTITION_DAYS`
-        partition days per insert. Raises :class:`WriterError` on failure."""
+        partition days per insert, all with one ``stored_at`` read from the clock when the call
+        starts. Raises :class:`WriterError` on failure."""
+        stored_at = stored_at_now(self._clock)
         events_written = identifiers_written = 0
         for group in partition_day_groups(events):
-            result = self._write_group(group)
+            result = self._write_group(group, stored_at)
             events_written += result.events
             identifiers_written += result.identifiers
         return WriteResult(events=events_written, identifiers=identifiers_written)
 
-    def _write_group(self, events: Sequence[CanonicalEvent]) -> WriteResult:
-        rows = [event_row(event) for event in events]
+    def _write_group(self, events: Sequence[CanonicalEvent], stored_at: datetime) -> WriteResult:
+        rows = [event_row(event, stored_at) for event in events]
         id_rows: list[IdentifierRow] = []
         for event in events:
-            id_rows.extend(identifier_rows(event))
+            id_rows.extend(identifier_rows(event, stored_at))
         try:
             self._client.insert(
                 EVENTS_TABLE,

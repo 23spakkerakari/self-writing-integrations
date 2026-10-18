@@ -28,6 +28,7 @@ from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.app import create_app
 from carto_core.ingest.health import PostgresSourceHealthStore
 from carto_core.ingest.ledger import LedgerPruner, PostgresBatchLedger
+from carto_core.metadata import PostgresMetadataStore
 from carto_core.settings import CoreConfigError
 
 if TYPE_CHECKING:
@@ -127,5 +128,11 @@ def _build_app(settings: CoreSettings) -> tuple[ASGIApp, PostgresBatchLedger]:
     client = create_client(settings.clickhouse)
     engine = create_engine_from_settings(settings.postgres)
     ledger = PostgresBatchLedger(engine)
-    app = create_app(settings, ClickHouseWriter(client), ledger, PostgresSourceHealthStore(engine))
+    app = create_app(
+        settings,
+        ClickHouseWriter(client),
+        ledger,
+        PostgresSourceHealthStore(engine),
+        metadata=PostgresMetadataStore(engine),
+    )
     return app, ledger

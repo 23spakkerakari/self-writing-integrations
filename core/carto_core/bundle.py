@@ -22,6 +22,13 @@ Within a chunk, events whose ``observed_at`` lies outside the plausible range at
 (ADR 0036) are skipped and counted, not written: ClickHouse would delete an event older than
 retention on arrival, and ingest-api would refuse a future one. A bundle older than retention
 therefore loads only its recent part.
+
+After the events, :func:`record_bundle_metadata` upserts ``templates.json`` into ``templates``
+and ``fields.json`` into ``fields`` (ADR 0056: the edge's class, policy, pins, forms, shapes and
+counts; never the profiler's columns). Both files were digest-checked by :func:`verify_bundle`
+and are parsed as the contract models only. Template counts add up on every upsert, so the
+caller passes ``templates=False`` when the load wrote nothing new (a re-run of a finished load);
+field rows are overwritten and are safe to repeat.
 """
 
 from __future__ import annotations
@@ -32,23 +39,28 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import zstandard
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from carto_common.crypto import CryptoError, VerifyKey, b64url_decode
 from carto_common.ids import derive_ulid
 from carto_common.logging import get_logger
 from carto_common.settings import RetentionSettings
 from carto_core.ingest.ledger import ClaimState, LedgerEntry, LedgerError
+from carto_core.metadata import FieldRecord, TemplateRecord
 from carto_schema.bundle import (
     DATA_FILES,
     EVENTS_FILE,
+    FIELDS_FILE,
     MANIFEST_FILE,
     SIGNATURE_FILE,
+    TEMPLATES_FILE,
+    BundleField,
     BundleManifest,
     BundleSignature,
+    BundleTemplate,
 )
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import MAX_EVENTS_PER_BATCH
@@ -56,19 +68,24 @@ from carto_schema.ingest import MAX_EVENTS_PER_BATCH
 if TYPE_CHECKING:
     from carto_core.db.clickhouse import EventWriter
     from carto_core.ingest.ledger import BatchLedger
+    from carto_core.metadata import MetadataStore
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "DEFAULT_CLAIM_TIMEOUT",
     "MAX_LINE_BYTES",
     "MAX_MANIFEST_BYTES",
+    "MAX_METADATA_FILE_BYTES",
     "MAX_SIGNATURE_BYTES",
     "BundleError",
     "LoadResult",
+    "MetadataResult",
     "VerifiedBundle",
     "bundle_source_id",
     "iter_events",
     "load_bundle",
+    "read_bundle_metadata",
+    "record_bundle_metadata",
     "verify_bundle",
 ]
 
@@ -76,6 +93,10 @@ MAX_MANIFEST_BYTES: Final = 16 * 1024 * 1024
 MAX_SIGNATURE_BYTES: Final = 64 * 1024
 MAX_LINE_BYTES: Final = 4 * 1024 * 1024
 """Longest event line accepted: a maximal canonical event is well under 1 MiB."""
+MAX_METADATA_FILE_BYTES: Final = 64 * 1024 * 1024
+"""``templates.json`` and ``fields.json`` cap: thousands of fields are a few MiB."""
+_TEMPLATES_ADAPTER: Final = TypeAdapter(list[BundleTemplate])
+_FIELDS_ADAPTER: Final = TypeAdapter(list[BundleField])
 DEFAULT_CHUNK_SIZE: Final = MAX_EVENTS_PER_BATCH
 DEFAULT_CLAIM_TIMEOUT: Final = timedelta(seconds=120)
 """The ``ingest.claim_timeout_seconds`` default (ADR 0034)."""
@@ -109,6 +130,14 @@ class LoadResult:
     duplicates: int
     too_old: int = 0
     future: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataResult:
+    """What :func:`record_bundle_metadata` upserted."""
+
+    templates: int
+    fields: int
 
 
 def _read_small(path: Path, limit: int) -> bytes:
@@ -256,6 +285,75 @@ def iter_events(verified: VerifiedBundle) -> Iterator[CanonicalEvent]:
 def _utcnow() -> datetime:
     """The load clock (tests replace it)."""
     return datetime.now(UTC)
+
+
+def read_bundle_metadata(
+    verified: VerifiedBundle,
+) -> tuple[list[BundleTemplate], list[BundleField]]:
+    """``templates.json`` and ``fields.json`` as contract models (empty when a file is not in
+    the bundle). Raises :class:`BundleError` naming the file, never a line, when one is not
+    the contract."""
+    out: list[list[Any]] = []
+    for name, adapter in ((TEMPLATES_FILE, _TEMPLATES_ADAPTER), (FIELDS_FILE, _FIELDS_ADAPTER)):
+        file_path = verified.path / name
+        if name not in verified.manifest.files or not file_path.is_file():
+            out.append([])
+            continue
+        try:
+            out.append(adapter.validate_json(_read_small(file_path, MAX_METADATA_FILE_BYTES)))
+        except ValidationError as exc:
+            msg = f"{name} is not the bundle contract"
+            raise BundleError(msg) from exc
+    return out[0], out[1]
+
+
+def record_bundle_metadata(
+    verified: VerifiedBundle, metadata: MetadataStore, *, templates: bool = True
+) -> MetadataResult:
+    """Upsert the bundle's templates (when ``templates``) and fields (always) for its tenant."""
+    manifest = verified.manifest
+    bundle_templates, bundle_fields = read_bundle_metadata(verified)
+    first_seen = manifest.first_observed_at or manifest.created_at
+    template_count = 0
+    if templates and bundle_templates:
+        template_count = metadata.upsert_templates(
+            manifest.tenant_id,
+            [
+                TemplateRecord(
+                    system_id=item.system_id,
+                    template_id=item.template_id,
+                    template_text=item.template_text,
+                    kind=item.kind.value,
+                    first_seen=item.first_seen,
+                    last_seen=item.last_seen,
+                    count=item.count,
+                )
+                for item in bundle_templates
+            ],
+        )
+    field_count = 0
+    if bundle_fields:
+        field_count = metadata.upsert_fields(
+            manifest.tenant_id,
+            [
+                FieldRecord(
+                    field_ref=item.field_ref,
+                    system_id=item.system_id,
+                    template_id=item.template_id,
+                    path=item.path,
+                    field_class=item.field_class,
+                    policy=item.policy,
+                    pinned=item.pinned,
+                    forms=tuple(item.forms),
+                    count=item.count,
+                    shapes=tuple((share.shape, share.share) for share in item.top_shapes),
+                    first_seen=first_seen,
+                    last_seen=manifest.last_observed_at,
+                )
+                for item in bundle_fields
+            ],
+        )
+    return MetadataResult(templates=template_count, fields=field_count)
 
 
 def bundle_source_id(manifest: BundleManifest) -> str:

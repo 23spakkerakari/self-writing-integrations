@@ -15,8 +15,15 @@ Endpoints, all internal (mutual TLS, never behind the ingress; see :mod:`.server
   otherwise the batch is written and marked done. A transient write failure releases the claim
   and is a 503 so the edge retries; ClickHouse refusing the data itself is a 422. Every 503
   carries ``Retry-After``.
+  Before the ledger's ``done`` mark the batch's distinct templates are upserted into
+  ``templates`` (text, kind, first and last seen, count added) inside the same transaction
+  (ADR 0056), so a retried batch never double-counts.
 - ``POST /internal/heartbeat``: one :class:`~carto_schema.ingest.SourceHeartbeat`, upserted into
   the source health store.
+- ``POST /internal/inventory``: one :class:`~carto_schema.inventory.EdgeInventory` (ADR 0050),
+  validated against the contract (a tenant this core does not serve is a 422) and replaced as a
+  whole in the metadata store: systems, sources without secrets, the payload and the field
+  policy pins.
 - ``GET /healthz``, ``GET /readyz`` (no detail in the body), ``GET /metrics`` (Prometheus text).
 
 Errors are RFC 7807 problem documents (``application/problem+json``) that carry locations and
@@ -53,12 +60,17 @@ from carto_common.mtls import ANY_ROLE, peer_role, role_allowed
 from carto_core.db.clickhouse import WriterError
 from carto_core.ingest.health import HealthStoreError, SourceHealthRecord
 from carto_core.ingest.ledger import ClaimState, LedgerEntry, LedgerError
+from carto_core.metadata import InMemoryMetadataStore, MetadataError, TemplateRecord
 from carto_schema.ingest import IngestBatch, SourceHeartbeat
+from carto_schema.inventory import EdgeInventory
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
     from carto_core.db.clickhouse import EventWriter
     from carto_core.ingest.health import SourceHealthStore
     from carto_core.ingest.ledger import BatchLedger
+    from carto_core.metadata import MetadataStore
     from carto_core.settings import CoreSettings, IngestListenerSettings
 
 __all__ = [
@@ -72,6 +84,7 @@ __all__ = [
     "IngestMetrics",
     "Problem",
     "RequestIdMiddleware",
+    "batch_templates",
     "create_app",
     "decompress_capped",
     "out_of_range_errors",
@@ -111,10 +124,12 @@ METRIC_NAMES: Final[tuple[tuple[str, str], ...]] = (
     ("carto_ingest_claims_taken_over_total", "Stale ledger claims taken over and rewritten."),
     ("carto_ingest_out_of_range_total", "Batches refused for an observed_at out of range."),
     ("carto_ingest_refused_total", "Batches refused because ClickHouse rejected their data."),
+    ("carto_inventories_total", "Edge inventories recorded."),
 )
 ROUTE_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
     ("POST", "/internal/ingest"): frozenset({"edge-gateway"}),
     ("POST", "/internal/heartbeat"): frozenset({"edge-gateway"}),
+    ("POST", "/internal/inventory"): frozenset({"edge-gateway"}),
     ("GET", "/healthz"): frozenset({ANY_ROLE}),
     ("GET", "/readyz"): frozenset({ANY_ROLE}),
     ("GET", "/metrics"): frozenset({ANY_ROLE}),
@@ -275,6 +290,36 @@ def out_of_range_errors(
     return errors, count
 
 
+def batch_templates(batch: IngestBatch) -> list[TemplateRecord]:
+    """The distinct templates of a batch with their text, kind, seen range and event count
+    (ADR 0056), in first-appearance order."""
+    records: dict[tuple[str, str], TemplateRecord] = {}
+    for event in batch.events:
+        key = (event.system_id, event.template_id)
+        current = records.get(key)
+        if current is None:
+            records[key] = TemplateRecord(
+                system_id=event.system_id,
+                template_id=event.template_id,
+                template_text=event.template_text,
+                kind=event.kind.value,
+                first_seen=event.observed_at,
+                last_seen=event.observed_at,
+                count=1,
+            )
+            continue
+        records[key] = TemplateRecord(
+            system_id=current.system_id,
+            template_id=current.template_id,
+            template_text=current.template_text,
+            kind=current.kind,
+            first_seen=min(current.first_seen, event.observed_at),
+            last_seen=max(current.last_seen, event.observed_at),
+            count=current.count + 1,
+        )
+    return list(records.values())
+
+
 def _request_id(request: Request) -> str:
     value = getattr(request.state, "request_id", "")
     return str(value) if value else ""
@@ -353,10 +398,17 @@ def create_app(
     ledger: BatchLedger,
     health: SourceHealthStore,
     *,
+    metadata: MetadataStore | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
-    """Build the application with its stores injected (tests pass in-memory ones)."""
+    """Build the application with its stores injected (tests pass in-memory ones). Without a
+    ``metadata`` store (a smoke path, never ``ingest-api``, whose server wires PostgreSQL)
+    templates and inventories are kept in memory and a warning says so."""
     now = clock if clock is not None else lambda: datetime.now(UTC)
+    if metadata is None:
+        log.warning("no metadata store configured; templates and inventories stay in memory")
+        metadata = InMemoryMetadataStore()
+    templates = metadata
     listener = settings.ingest
     tenant_id = settings.tenant_id
     retention = settings.retention
@@ -474,16 +526,23 @@ def create_app(
                     422, "event store refused the batch", "the batch cannot be written as sent"
                 ) from exc
             raise unavailable("event store unavailable") from exc
+        records = batch_templates(batch)
+
+        def record_templates(connection: Connection | None) -> None:
+            templates.upsert_templates(batch.tenant_id, records, connection=connection)
+
         try:
-            ledger.complete(entry, now())
-        except LedgerError as exc:
+            ledger.complete(entry, now(), after=record_templates)
+        except (LedgerError, MetadataError) as exc:
             # Written but not marked done: the retry writes it again and the replacing tables
-            # merge the copies (ADR 0034).
+            # merge the copies (ADR 0034); the template counts roll back with the mark.
             log.warning("batch ledger failed", error=type(exc).__name__, **context)
             raise unavailable("ledger unavailable") from exc
         metrics.inc("carto_ingest_batches_total")
         metrics.inc("carto_ingest_events_total", result.events)
-        log.info("batch accepted", identifiers=result.identifiers, **context)
+        log.info(
+            "batch accepted", identifiers=result.identifiers, templates=len(records), **context
+        )
         return False
 
     @app.exception_handler(Problem)
@@ -546,13 +605,60 @@ def create_app(
         )
         return JSONResponse({"recorded": True})
 
+    @app.post("/internal/inventory")
+    async def inventory(request: Request) -> Response:
+        with admitted():
+            report = await receive(request, EdgeInventory)
+        if report.tenant_id != tenant_id:
+            raise Problem(
+                422,
+                "inventory tenant mismatch",
+                "inventory is for a tenant this core does not serve",
+            )
+        try:
+            result = await run_in_threadpool(templates.replace_inventory, report, now())
+        except MetadataError as exc:
+            log.warning(
+                "inventory store failed",
+                error=type(exc).__name__,
+                tenant_id=report.tenant_id,
+                edge_id=report.edge_id,
+            )
+            raise Problem(
+                503,
+                "metadata store unavailable",
+                "retry the inventory later",
+                headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+            ) from exc
+        metrics.inc("carto_inventories_total")
+        log.info(
+            "inventory recorded",
+            tenant_id=report.tenant_id,
+            edge_id=report.edge_id,
+            systems=result.systems,
+            sources=result.sources,
+            disabled=result.disabled,
+            pins=result.pins,
+            fields_pinned=result.fields_pinned,
+        )
+        return JSONResponse(
+            {
+                "recorded": True,
+                "systems": result.systems,
+                "sources": result.sources,
+                "pins": result.pins,
+            }
+        )
+
     @app.get("/healthz")
     async def healthz() -> Response:
         return JSONResponse({"status": "ok"})
 
     @app.get("/readyz")
     async def readyz() -> Response:
-        ready = await run_in_threadpool(lambda: writer.ping() and ledger.ping() and health.ping())
+        ready = await run_in_threadpool(
+            lambda: writer.ping() and ledger.ping() and health.ping() and templates.ping()
+        )
         if ready:
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "unavailable"}, status_code=503)

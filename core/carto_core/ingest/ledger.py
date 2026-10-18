@@ -9,7 +9,10 @@ A delivery claims its batch before writing it:
   acknowledge without writing. A fresh ``pending`` row is :attr:`ClaimState.BUSY`: another
   delivery is writing it, so the caller answers 503 and the edge retries later.
 - :meth:`BatchLedger.complete` marks the batch ``done`` after the write, whoever holds the claim
-  by then: the rows are in ClickHouse either way.
+  by then: the rows are in ClickHouse either way. Its ``after`` hook runs inside the same
+  transaction on PostgreSQL (the in-memory ledger just calls it), which is how ``ingest-api``
+  increments ``templates`` counts exactly once per accepted batch (ADR 0056): a retry of a batch
+  whose ``done`` mark failed writes the rows again and counts the templates again, in one unit.
 - :meth:`BatchLedger.release` deletes the caller's own ``pending`` row after a failed write, so
   the retry is taken at once instead of waiting out the claim timeout.
 - :meth:`BatchLedger.prune` deletes rows received before a cutoff (events retention plus one
@@ -40,9 +43,11 @@ from carto_core.db.postgres import ping_engine
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
+    from sqlalchemy.engine import Connection
 
 __all__ = [
     "PRUNE_BATCH_ROWS",
+    "AfterComplete",
     "BatchLedger",
     "Claim",
     "ClaimState",
@@ -58,6 +63,10 @@ PRUNE_BATCH_ROWS: Final = 10_000
 """Rows one pruning statement deletes, so a large backlog never holds one long lock."""
 
 log = get_logger(component="ledger")
+
+AfterComplete = Callable[["Connection | None"], None]
+"""Work that commits with the ``done`` mark; the connection is the ledger's own transaction on
+PostgreSQL and ``None`` on the in-memory ledger."""
 
 
 class LedgerError(Exception):
@@ -114,8 +123,11 @@ class BatchLedger(Protocol):
         ``stale_before`` is taken over."""
         ...
 
-    def complete(self, entry: LedgerEntry, done_at: datetime) -> None:
-        """Mark the batch ``done`` (inserting the row when it is missing)."""
+    def complete(
+        self, entry: LedgerEntry, done_at: datetime, *, after: AfterComplete | None = None
+    ) -> None:
+        """Mark the batch ``done`` (inserting the row when it is missing); run ``after`` in the
+        same transaction when the ledger has one (``None`` is passed otherwise)."""
         ...
 
     def release(self, tenant_id: str, batch_id: str, claimed_at: datetime) -> None:
@@ -166,7 +178,13 @@ class InMemoryBatchLedger:
                 return Claim(ClaimState.CLAIMED, now, took_over=True)
             return Claim(ClaimState.BUSY, row.claimed_at)
 
-    def complete(self, entry: LedgerEntry, done_at: datetime) -> None:
+    def complete(
+        self, entry: LedgerEntry, done_at: datetime, *, after: AfterComplete | None = None
+    ) -> None:
+        # The hook runs first: on PostgreSQL both commit or neither does, so a failing hook
+        # must leave the in-memory row pending too.
+        if after is not None:
+            after(None)
         key = (entry.tenant_id, entry.batch_id)
         with self._lock:
             row = self._rows.get(key)
@@ -268,8 +286,20 @@ class PostgresBatchLedger:
         # A fresh claim, or a row released or pruned between the two statements: retry later.
         return Claim(ClaimState.BUSY, row.claimed_at if row is not None else entry.received_at)
 
-    def complete(self, entry: LedgerEntry, done_at: datetime) -> None:
-        self._run(_COMPLETE, _entry_parameters(entry) | {"done_at": done_at}, "complete")
+    def complete(
+        self, entry: LedgerEntry, done_at: datetime, *, after: AfterComplete | None = None
+    ) -> None:
+        parameters = _entry_parameters(entry) | {"done_at": done_at}
+        if after is None:
+            self._run(_COMPLETE, parameters, "complete")
+            return
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(_COMPLETE, parameters)
+                after(connection)
+        except SQLAlchemyError as exc:
+            msg = f"ledger complete failed: {type(exc).__name__}"
+            raise LedgerError(msg) from exc
 
     def release(self, tenant_id: str, batch_id: str, claimed_at: datetime) -> None:
         parameters = {"tenant_id": tenant_id, "batch_id": batch_id, "claimed_at": claimed_at}

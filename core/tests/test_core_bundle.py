@@ -24,14 +24,18 @@ from carto_core import cli
 from carto_core.bundle import (
     BundleError,
     LoadResult,
+    MetadataResult,
     VerifiedBundle,
     bundle_source_id,
     iter_events,
     load_bundle,
+    read_bundle_metadata,
+    record_bundle_metadata,
     verify_bundle,
 )
 from carto_core.db.clickhouse import WriterError, WriteResult
 from carto_core.ingest.ledger import ClaimState, InMemoryBatchLedger, LedgerEntry, LedgerError
+from carto_core.metadata import InMemoryMetadataStore
 from carto_schema.bundle import (
     DATA_FILES,
     EVENTS_FILE,
@@ -42,12 +46,15 @@ from carto_schema.bundle import (
     SIGNATURE_FILE,
     TEMPLATES_FILE,
     BundleCounts,
+    BundleField,
     BundleManifest,
     BundleSignature,
     BundleSourceSummary,
+    BundleTemplate,
     FileDigest,
+    ShapeShare,
 )
-from carto_schema.event import CanonicalEvent
+from carto_schema.event import CanonicalEvent, EventKind
 
 CREATED_AT = datetime(2026, 10, 8, 9, 30, 0, 250000, tzinfo=UTC)
 BUNDLE_ID = "01K71Y5B2XQ0M4N8P3R6S9T1VW"
@@ -429,13 +436,14 @@ def test_cli_verify_bundle(bundle: Path, capsys: pytest.CaptureFixture[str]) -> 
 def test_cli_load_bundle_is_idempotent(
     bundle: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    writer, ledger = FakeWriter(), InMemoryBatchLedger()
+    writer, ledger, metadata = FakeWriter(), InMemoryBatchLedger(), InMemoryMetadataStore()
     monkeypatch.setattr(
-        cli, "_open_stores", lambda _settings: contextlib.nullcontext((writer, ledger))
+        cli, "_open_stores", lambda _settings: contextlib.nullcontext((writer, ledger, metadata))
     )
     assert cli.main(["load-bundle", "--bundle", str(bundle), "--chunk-size", "5"]) == 0
     first = capsys.readouterr().out
     assert "12 events written" in first and "3 chunks" in first
+    assert "0 templates and 0 fields recorded" in first, "the fixture bundle lists none"
     assert cli.main(["load-bundle", "--bundle", str(bundle), "--chunk-size", "5"]) == 0
     second = capsys.readouterr().out
     assert "0 events written" in second and "3 chunks already" in second
@@ -452,3 +460,109 @@ def test_cli_load_bundle_rejects_a_tampered_bundle_before_opening_stores(
     _flip_byte(bundle / MANIFEST_MD_FILE)
     assert cli.main(["load-bundle", "--bundle", str(bundle)]) == 1
     assert "rejected" in capsys.readouterr().err
+
+
+# --- templates.json and fields.json into the metadata store (ADR 0056) ---------------------------
+
+
+def _metadata_bundle(bundle: Path, tmp_path: Path) -> VerifiedBundle:
+    """A verified bundle whose data directory holds real templates and fields files. The
+    manifest is the fixture's: record_bundle_metadata trusts verify_bundle, which ran before."""
+    verified = verify_bundle(bundle)
+    data = tmp_path / "metadata.carto"
+    data.mkdir()
+    templates = [
+        BundleTemplate(
+            template_id="tpl_4f1c9a",
+            system_id="sys_warehouse",
+            template_text="INSERT purchase_orders",
+            kind=EventKind.ROW_CHANGE,
+            count=12,
+            first_seen=CREATED_AT - timedelta(days=2),
+            last_seen=CREATED_AT - timedelta(days=1),
+        )
+    ]
+    fields = [
+        BundleField(
+            field_ref="sys_warehouse/tpl_4f1c9a/po_num",
+            system_id="sys_warehouse",
+            template_id="tpl_4f1c9a",
+            path="po_num",
+            field_class="identifier",
+            policy="tokenize",
+            pinned=False,
+            count=12,
+            distinct_estimate=12,
+            null_rate=0.0,
+            top_shapes=[ShapeShare(shape="99-999", share=1.0)],
+            forms=["raw", "alnum"],
+        ),
+        BundleField(
+            field_ref="sys_warehouse/tpl_4f1c9a/customer_name",
+            system_id="sys_warehouse",
+            template_id="tpl_4f1c9a",
+            path="customer_name",
+            field_class="person_name",
+            policy="drop",
+            pinned=True,
+            reason="admin pin",
+            count=12,
+            distinct_estimate=11,
+            null_rate=0.0,
+            top_shapes=[],
+        ),
+    ]
+    (data / TEMPLATES_FILE).write_text(
+        json.dumps([json.loads(t.model_dump_json()) for t in templates]), encoding="utf-8"
+    )
+    (data / FIELDS_FILE).write_text(
+        json.dumps([json.loads(f.model_dump_json()) for f in fields]), encoding="utf-8"
+    )
+    return VerifiedBundle(manifest=verified.manifest, signature=verified.signature, path=data)
+
+
+def test_record_bundle_metadata_upserts_templates_and_fields(bundle: Path, tmp_path: Path) -> None:
+    verified = _metadata_bundle(bundle, tmp_path)
+    templates, fields = read_bundle_metadata(verified)
+    assert [t.template_id for t in templates] == ["tpl_4f1c9a"]
+    assert [f.path for f in fields] == ["po_num", "customer_name"]
+    store = InMemoryMetadataStore()
+    assert record_bundle_metadata(verified, store) == MetadataResult(templates=1, fields=2)
+    (template,) = store.list_templates("default")
+    assert (template.template_text, template.kind, template.count) == (
+        "INSERT purchase_orders",
+        "row_change",
+        12,
+    )
+    po_num = store.get_field("default", "sys_warehouse/tpl_4f1c9a/po_num")
+    assert po_num is not None
+    assert (po_num.field_class, po_num.policy, po_num.forms) == (
+        "identifier",
+        "tokenize",
+        ("raw", "alnum"),
+    )
+    assert po_num.shapes == (("99-999", 1.0),)
+    assert po_num.count == 12 and po_num.distinct_estimate == 0, "the profiler owns distinct"
+    name = store.get_field("default", "sys_warehouse/tpl_4f1c9a/customer_name")
+    assert name is not None and (name.policy, name.pinned) == ("drop", True)
+    assert po_num.first_seen == verified.manifest.created_at
+    # A re-run that wrote no events records fields again but never doubles the template count.
+    assert record_bundle_metadata(verified, store, templates=False) == MetadataResult(0, 2)
+    assert store.list_templates("default")[0].count == 12
+    assert record_bundle_metadata(verified, store).templates == 1
+    assert store.list_templates("default")[0].count == 24
+
+
+def test_bundle_metadata_files_must_be_the_contract(bundle: Path, tmp_path: Path) -> None:
+    verified = _metadata_bundle(bundle, tmp_path)
+    (verified.path / FIELDS_FILE).write_text(
+        json.dumps([{"field_ref": "x", "sample_values": ["SECRET-VALUE-4471"]}]), encoding="utf-8"
+    )
+    with pytest.raises(BundleError) as info:
+        read_bundle_metadata(verified)
+    assert FIELDS_FILE in str(info.value)
+    assert "SECRET-VALUE" not in str(info.value)
+    (verified.path / FIELDS_FILE).unlink()
+    (verified.path / TEMPLATES_FILE).unlink()
+    assert read_bundle_metadata(verified) == ([], [])
+    assert record_bundle_metadata(verified, InMemoryMetadataStore()) == MetadataResult(0, 0)

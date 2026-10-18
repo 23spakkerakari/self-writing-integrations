@@ -1,7 +1,8 @@
 """ingest-api (spec 5.3, 8.5, 12, 14.12): accepts the contract models only, claims every batch
 in the ledger before writing it (ADR 0034), refuses implausible observed_at values (ADR 0036),
 answers RFC 7807 problems without echoing input, caps bodies, takes zstd, records heartbeats,
-exposes metrics, echoes request ids and never logs a body."""
+upserts the batch's templates with the ledger's done mark (ADR 0056), records edge inventories
+(ADR 0050), exposes metrics, echoes request ids and never logs a body."""
 
 from __future__ import annotations
 
@@ -45,14 +46,17 @@ from carto_core.ingest.app import (
 )
 from carto_core.ingest.health import InMemorySourceHealthStore
 from carto_core.ingest.ledger import (
+    AfterComplete,
     ClaimState,
     InMemoryBatchLedger,
     LedgerEntry,
     LedgerError,
 )
+from carto_core.metadata import InMemoryMetadataStore, MetadataError
 from carto_core.settings import MIB, CoreSettings, IngestListenerSettings
 from carto_schema.event import CanonicalEvent
 from carto_schema.ingest import IngestBatch, SourceHeartbeat, SourceStatus
+from carto_schema.inventory import EdgeInventory
 
 NOW = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
 KIB = 1024
@@ -80,8 +84,17 @@ class FakeWriter:
 class FailingLedger(InMemoryBatchLedger):
     """Claims work; marking the batch done fails."""
 
-    def complete(self, entry: LedgerEntry, done_at: datetime) -> None:
+    def complete(
+        self, entry: LedgerEntry, done_at: datetime, *, after: AfterComplete | None = None
+    ) -> None:
         raise LedgerError("ledger unavailable: OperationalError")
+
+
+class FailingMetadata(InMemoryMetadataStore):
+    """The template upsert fails (the ledger's transaction rolls back with it)."""
+
+    def upsert_templates(self, tenant_id: str, records: Any, *, connection: Any = None) -> int:
+        raise MetadataError("template upsert failed: OperationalError")
 
 
 class DownLedger(InMemoryBatchLedger):
@@ -95,6 +108,7 @@ class World:
     writer: FakeWriter
     ledger: InMemoryBatchLedger
     health: InMemorySourceHealthStore
+    metadata: InMemoryMetadataStore
 
 
 def _settings(**ingest: Any) -> CoreSettings:
@@ -102,13 +116,18 @@ def _settings(**ingest: Any) -> CoreSettings:
 
 
 def _world(
-    settings: CoreSettings | None = None, ledger: InMemoryBatchLedger | None = None
+    settings: CoreSettings | None = None,
+    ledger: InMemoryBatchLedger | None = None,
+    metadata: InMemoryMetadataStore | None = None,
 ) -> World:
     writer = FakeWriter()
     ledger = ledger if ledger is not None else InMemoryBatchLedger()
     health = InMemorySourceHealthStore()
-    app = create_app(settings or _settings(), writer, ledger, health, clock=lambda: NOW)
-    return World(TestClient(ActAsRole(app, "edge-gateway")), writer, ledger, health)
+    metadata = metadata if metadata is not None else InMemoryMetadataStore()
+    app = create_app(
+        settings or _settings(), writer, ledger, health, metadata=metadata, clock=lambda: NOW
+    )
+    return World(TestClient(ActAsRole(app, "edge-gateway")), writer, ledger, health, metadata)
 
 
 @pytest.fixture
@@ -157,6 +176,39 @@ def _heartbeat(**overrides: Any) -> dict[str, Any]:
     return data | overrides
 
 
+def _inventory(**overrides: Any) -> dict[str, Any]:
+    inventory = EdgeInventory.model_validate(
+        {
+            "schema_version": "1",
+            "tenant_id": "default",
+            "edge_id": "edge-gateway",
+            "sent_at": NOW,
+            "sources_file_sha256": "b" * 64,
+            "systems": [{"id": "sys_warehouse", "name": "Warehouse"}],
+            "sources": [
+                {
+                    "id": "src_wms_db",
+                    "system_id": "sys_warehouse",
+                    "type": "sql",
+                    "config": {"host": "wms.internal", "tables": ["purchase_orders"]},
+                    "secret_ref": "vault://wms",
+                    "schedule": "every 60 s",
+                }
+            ],
+            "field_policies": [
+                {
+                    "field": "sys_warehouse/*/customer_name",
+                    "field_class": "person_name",
+                    "policy": "tokenize",
+                    "forms": ["phonetic.0"],
+                }
+            ],
+        }
+    )
+    data: dict[str, Any] = json.loads(inventory.model_dump_json())
+    return data | overrides
+
+
 def _post(world: World, path: str, payload: dict[str, Any], **kwargs: Any) -> Any:
     return world.client.post(path, content=json.dumps(payload).encode(), headers=JSON, **kwargs)
 
@@ -188,6 +240,34 @@ def test_valid_batch_is_accepted_and_written_once(world: World) -> None:
     (entry,) = world.ledger.entries
     assert entry == LedgerEntry("default", payload["batch_id"], "src_wms_db", 2, NOW)
     assert world.ledger.state_of("default", payload["batch_id"]) == "done"
+    (template,) = world.metadata.list_templates("default")
+    assert (template.system_id, template.template_id) == ("sys_warehouse", "tpl_4f1c9a")
+    assert template.template_text == "INSERT purchase_orders"
+    assert (template.kind, template.count) == ("row_change", 2)
+    assert template.first_seen == template.last_seen == CanonicalEvent.example().observed_at
+
+
+def test_templates_count_every_accepted_batch_once(world: World) -> None:
+    """ADR 0056: the increment commits with the ledger's done mark; a duplicate adds nothing."""
+    payload = _payload([_event(0), _event(1), _event(2)])
+    assert _post(world, "/internal/ingest", payload).status_code == 200
+    assert _post(world, "/internal/ingest", payload).status_code == 200
+    other = _payload([_event(3)])
+    other["events"][0]["template_id"] = "tpl_other"
+    other["events"][0]["template_text"] = "UPDATE purchase_orders"
+    assert _post(world, "/internal/ingest", other).status_code == 200, other
+    counts = {t.template_id: t.count for t in world.metadata.list_templates("default")}
+    assert counts == {"tpl_4f1c9a": 3, "tpl_other": 1}
+
+
+def test_a_failed_template_upsert_is_503_and_the_batch_is_not_marked_done() -> None:
+    world = _world(metadata=FailingMetadata())
+    payload = _payload()
+    response = _post(world, "/internal/ingest", payload)
+    _assert_problem(response, 503)
+    assert response.headers["retry-after"] == "1"
+    assert len(world.writer.batches) == 1, "written; the retry writes it again (ADR 0034)"
+    assert world.ledger.state_of("default", payload["batch_id"]) == "pending"
 
 
 def test_same_batch_id_twice_is_a_duplicate_and_not_rewritten(world: World) -> None:
@@ -620,6 +700,47 @@ def test_invalid_heartbeat_is_a_422_problem(world: World) -> None:
     assert world.health.get("default", "src_wms_db") is None
 
 
+# --- inventories (ADR 0050) ------------------------------------------------------------------
+
+
+def test_inventory_is_recorded_as_a_whole(world: World) -> None:
+    response = _post(world, "/internal/inventory", _inventory())
+    assert response.status_code == 200, response.text
+    assert response.json() == {"recorded": True, "systems": 1, "sources": 1, "pins": 1}
+    (system,) = world.metadata.list_systems("default")
+    assert (system.id, system.name) == ("sys_warehouse", "Warehouse")
+    source = world.metadata.get_source("default", "src_wms_db")
+    assert source is not None
+    assert source.config == {"host": "wms.internal", "tables": ["purchase_orders"]}
+    assert source.secret_ref == "vault://wms"  # noqa: S105 - a reference name
+    assert (source.schedule, source.edge_id) == ("every 60 s", "edge-gateway")
+    stored = world.metadata.inventories["default", "edge-gateway"]
+    assert stored["payload"]["sources_file_sha256"] == "b" * 64
+    assert stored["received_at"] == NOW
+    assert "carto_inventories_total 1\n" in world.client.get("/metrics").text
+
+
+def test_inventory_of_another_tenant_or_off_contract_is_422(world: World) -> None:
+    _assert_problem(_post(world, "/internal/inventory", _inventory(tenant_id="other")), 422)
+    payload = _inventory()
+    payload["sources"][0]["config"] = {"nested": {"password": "x"}}
+    body = _assert_problem(_post(world, "/internal/inventory", payload), 422)
+    assert "password" not in json.dumps(body)
+    _assert_problem(_post(world, "/internal/inventory", _inventory(extra=1)), 422)
+    assert world.metadata.list_systems("default") == []
+
+
+def test_an_unavailable_metadata_store_is_503_for_inventories() -> None:
+    class Down(InMemoryMetadataStore):
+        def replace_inventory(self, inventory: Any, received_at: datetime) -> Any:
+            raise MetadataError("inventory replace failed: OperationalError")
+
+    world = _world(metadata=Down())
+    response = _post(world, "/internal/inventory", _inventory())
+    _assert_problem(response, 503)
+    assert response.headers["retry-after"] == "1"
+
+
 # --- health, readiness, metrics, request ids ---------------------------------------------------
 
 
@@ -647,6 +768,7 @@ def test_metrics_are_prometheus_text(world: World) -> None:
         "carto_ingest_duplicates_total",
         "carto_ingest_errors_total",
         "carto_heartbeats_total",
+        "carto_inventories_total",
     ):
         assert f"# TYPE {name} counter\n" in text
         assert f"# HELP {name} " in text
@@ -725,7 +847,7 @@ def test_every_ingest_route_lists_its_roles(world: World) -> None:
     assert routes == set(ROUTE_ROLES)
 
 
-@pytest.mark.parametrize("path", ["/internal/ingest", "/internal/heartbeat"])
+@pytest.mark.parametrize("path", ["/internal/ingest", "/internal/heartbeat", "/internal/inventory"])
 def test_only_the_edge_gateway_may_send_batches_and_heartbeats(world: World, path: str) -> None:
     inner = _inner_app(world.client)
     for role in [*sorted(ROLES - {"edge-gateway"}), None]:

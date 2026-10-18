@@ -5,6 +5,7 @@ Alembic scripts form a single linear history."""
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import re
 import shutil
 import subprocess
@@ -40,6 +41,8 @@ ALL_MIGRATIONS = [
     "0004_events_replacing.sql",
     "0005_drop_event_identifiers.sql",
     "0006_event_identifiers_replacing.sql",
+    "0007_events_stored_at.sql",
+    "0008_event_identifiers_stored_at.sql",
 ]
 
 
@@ -219,6 +222,22 @@ def test_apply_runs_pending_migrations_in_order_and_records_them() -> None:
     assert "INTERVAL 45 DAY" in client.commands[4]
     assert "DROP TABLE IF EXISTS event_identifiers SYNC;" in client.commands[5]
     assert "ENGINE = ReplacingMergeTree" in client.commands[6]
+    assert (
+        client.commands[7]
+        .rstrip()
+        .endswith(
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS stored_at DateTime64(3, 'UTC') "
+            "DEFAULT ingested_at;"
+        )
+    ), "ADR 0046"
+    assert (
+        client.commands[8]
+        .rstrip()
+        .endswith(
+            "ALTER TABLE event_identifiers ADD COLUMN IF NOT EXISTS stored_at DateTime64(3, 'UTC') "
+            "DEFAULT observed_at;"
+        )
+    ), "ADR 0046: event_identifiers has no ingested_at"
     assert [name for name, _at, _sum in client.rows] == applied
     assert all(at.tzinfo is not None for _name, at, _sum in client.rows)
     checksums = {m.name: m.checksum for m in load_clickhouse_migrations()}
@@ -303,11 +322,36 @@ def test_postgres_scripts_form_one_linear_history() -> None:
     config = Config()
     config.set_main_option("script_location", str(POSTGRES_MIGRATIONS_DIR))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0003"]
+    assert script.get_heads() == ["0004"]
     revisions = list(script.walk_revisions())
-    assert [revision.revision for revision in revisions] == ["0003", "0002", "0001"]
+    assert [revision.revision for revision in revisions] == ["0004", "0003", "0002", "0001"]
     assert revisions[-1].down_revision is None
-    assert [revision.down_revision for revision in revisions[:-1]] == ["0002", "0001"]
+    assert [revision.down_revision for revision in revisions[:-1]] == ["0003", "0002", "0001"]
+
+
+def test_migration_0004_builds_only_fixed_grant_statements() -> None:
+    """Spec 14.7: the guarded GRANT blocks are fixed strings with the fixed role names."""
+    path = POSTGRES_MIGRATIONS_DIR / "versions" / "0004_map_discovery.py"
+    spec = importlib.util.spec_from_file_location("migration_0004", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    grants = module._grant_statements()
+    assert len(grants) == 3
+    for statement in grants:
+        assert statement.startswith(
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "
+        )
+        assert statement.endswith(" END IF; END $$;")
+        assert ":" not in statement and "%" not in statement
+    app, worker, ingest = grants
+    assert "TO carto_app;" in app and "GRANT SELECT, INSERT ON audit_log TO carto_app;" in app
+    assert "TO carto_worker;" in worker
+    assert "UPDATE, DELETE" not in ingest and "audit_log" not in ingest
+    assert "GRANT SELECT, INSERT, UPDATE ON templates, fields, systems, sources" in ingest
+    assert len(module._revoke_statements()) == 3
+    assert "RAISE EXCEPTION" in module.AUDIT_TRIGGER_FUNCTION
+    assert "BEFORE UPDATE OR DELETE ON audit_log" in module.AUDIT_TRIGGER_ROWS
 
 
 def test_clickhouse_migrations_dir_is_the_repository_layout_of_section_20() -> None:

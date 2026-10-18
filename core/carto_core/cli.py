@@ -50,11 +50,18 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from carto_common.logging import configure_logging
-from carto_core.bundle import DEFAULT_CHUNK_SIZE, BundleError, load_bundle, verify_bundle
+from carto_core.bundle import (
+    DEFAULT_CHUNK_SIZE,
+    BundleError,
+    load_bundle,
+    record_bundle_metadata,
+    verify_bundle,
+)
 from carto_core.db.clickhouse import ClickHouseWriter, WriterError, create_client
 from carto_core.db.postgres import create_engine_from_settings
 from carto_core.ingest.ledger import LedgerError, PostgresBatchLedger
 from carto_core.ingest.server import run_ingest_api
+from carto_core.metadata import MetadataError, PostgresMetadataStore
 from carto_core.migrations import (
     MigrationError,
     apply_clickhouse_migrations,
@@ -75,6 +82,7 @@ if TYPE_CHECKING:
 
     from carto_core.db.clickhouse import EventWriter
     from carto_core.ingest.ledger import BatchLedger
+    from carto_core.metadata import MetadataStore
 
 __all__ = ["EXIT_FAILURE", "EXIT_OK", "EXIT_USAGE", "build_parser", "main"]
 
@@ -237,14 +245,20 @@ def _verify(args: argparse.Namespace) -> int:
 
 
 @contextmanager
-def _open_stores(settings: CoreSettings) -> Iterator[tuple[EventWriter, BatchLedger]]:
-    """The writer and ledger of the configured stores, closed on exit (tests substitute
-    in-memory ones)."""
+def _open_stores(
+    settings: CoreSettings,
+) -> Iterator[tuple[EventWriter, BatchLedger, MetadataStore]]:
+    """The writer, ledger and metadata store of the configured stores, closed on exit (tests
+    substitute in-memory ones)."""
     client = create_client(settings.clickhouse)
     try:
         engine = create_engine_from_settings(settings.postgres)
         try:
-            yield ClickHouseWriter(client), PostgresBatchLedger(engine)
+            yield (
+                ClickHouseWriter(client),
+                PostgresBatchLedger(engine),
+                PostgresMetadataStore(engine),
+            )
         finally:
             engine.dispose()
     finally:
@@ -260,7 +274,7 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
     except BundleError as exc:
         return _fail(f"bundle rejected: {exc}")
     try:
-        with _open_stores(settings) as (writer, ledger):
+        with _open_stores(settings) as (writer, ledger, metadata):
             result = load_bundle(
                 verified,
                 writer,
@@ -269,13 +283,18 @@ def _load(args: argparse.Namespace, settings: CoreSettings) -> int:
                 retention=settings.retention,
                 claim_timeout=timedelta(seconds=settings.ingest.claim_timeout_seconds),
             )
+            # Template counts add up (ADR 0056): a re-run that wrote nothing records none.
+            recorded = record_bundle_metadata(
+                verified, metadata, templates=result.events_written > 0
+            )
     except BundleError as exc:
         return _fail(f"bundle rejected while loading: {exc}")
-    except (WriterError, LedgerError, SQLAlchemyError, CoreConfigError) as exc:
+    except (WriterError, LedgerError, MetadataError, SQLAlchemyError, CoreConfigError) as exc:
         return _fail(f"load failed, re-run to resume: {_describe(exc)}")
     _emit(
         f"bundle {verified.manifest.bundle_id} loaded: {result.events_written} events written "
-        f"in {result.chunks} chunks, {result.duplicates} chunks already present"
+        f"in {result.chunks} chunks, {result.duplicates} chunks already present; "
+        f"{recorded.templates} templates and {recorded.fields} fields recorded"
     )
     if result.too_old or result.future:
         _emit(
