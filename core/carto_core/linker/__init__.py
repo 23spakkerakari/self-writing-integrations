@@ -1,1 +1,138 @@
-"""carto-core linker (spec Section 5.3). Lands with its milestone."""
+"""carto-core linker (spec Section 5.3, 9.2 to 9.6, 9.9): candidates, verification, scoring,
+bridges, the review state machine, entity families, heuristic naming and the evidence sentence.
+:class:`LinkPass` is the one entry point the worker and ``carto-core discover`` call; the
+composite matcher (spec 9.5) attaches through its ``composite_hook``.
+"""
+
+from __future__ import annotations
+
+from carto_core.linker.candidates import (
+    CandidateError,
+    CandidateGenerator,
+    CandidateSet,
+    ContainmentFn,
+    MinHashDecoder,
+    default_containment,
+    default_minhash_decoder,
+    pair_allowed,
+)
+from carto_core.linker.families import (
+    EntityNamer,
+    Family,
+    FamilyBuilder,
+    FamilyReport,
+    build_families,
+    entity_id_for,
+    inherit_names,
+)
+from carto_core.linker.model import (
+    Candidate,
+    CompositeComponent,
+    CompositeRule,
+    Direction,
+    KeyLink,
+    LinkRole,
+    LinkScore,
+    LinkStatus,
+    LinkType,
+    PairFeatures,
+    RejectReason,
+)
+from carto_core.linker.naming import suggest_entity_name, suggest_field_label
+from carto_core.linker.repository import (
+    Decision,
+    DecisionWrite,
+    Entity,
+    EntityRepository,
+    InMemoryEntityRepository,
+    InMemoryLinkRepository,
+    LinkRepository,
+    NotFoundError,
+    PostgresEntityRepository,
+    PostgresLinkRepository,
+    RepositoryError,
+    StaleVersionError,
+)
+from carto_core.linker.review import (
+    LINKER_ACTOR,
+    DecisionError,
+    DecisionKind,
+    ProposeReport,
+    RequestContext,
+    ReviewService,
+    ScoredLink,
+    link_id_for,
+)
+from carto_core.linker.run import CompositeHook, LinkPass, LinkReport, ProfileSource
+from carto_core.linker.score import Scorer, direction_of, feature_vector, hard_filter, role_of
+from carto_core.linker.sentence import evidence_sentence
+from carto_core.linker.verify import DomainSizeFn, default_domain_size, verify
+from carto_core.linker.weights import DEFAULT_WEIGHTS, Weights, WeightsError, load_weights
+
+__all__ = [
+    "DEFAULT_WEIGHTS",
+    "LINKER_ACTOR",
+    "Candidate",
+    "CandidateError",
+    "CandidateGenerator",
+    "CandidateSet",
+    "CompositeComponent",
+    "CompositeHook",
+    "CompositeRule",
+    "ContainmentFn",
+    "Decision",
+    "DecisionError",
+    "DecisionKind",
+    "DecisionWrite",
+    "Direction",
+    "DomainSizeFn",
+    "Entity",
+    "EntityNamer",
+    "EntityRepository",
+    "Family",
+    "FamilyBuilder",
+    "FamilyReport",
+    "InMemoryEntityRepository",
+    "InMemoryLinkRepository",
+    "KeyLink",
+    "LinkPass",
+    "LinkReport",
+    "LinkRepository",
+    "LinkRole",
+    "LinkScore",
+    "LinkStatus",
+    "LinkType",
+    "MinHashDecoder",
+    "NotFoundError",
+    "PairFeatures",
+    "PostgresEntityRepository",
+    "PostgresLinkRepository",
+    "ProfileSource",
+    "ProposeReport",
+    "RejectReason",
+    "RepositoryError",
+    "RequestContext",
+    "ReviewService",
+    "ScoredLink",
+    "Scorer",
+    "StaleVersionError",
+    "Weights",
+    "WeightsError",
+    "build_families",
+    "default_containment",
+    "default_domain_size",
+    "default_minhash_decoder",
+    "direction_of",
+    "entity_id_for",
+    "evidence_sentence",
+    "feature_vector",
+    "hard_filter",
+    "inherit_names",
+    "link_id_for",
+    "load_weights",
+    "pair_allowed",
+    "role_of",
+    "suggest_entity_name",
+    "suggest_field_label",
+    "verify",
+]
