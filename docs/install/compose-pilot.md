@@ -793,6 +793,77 @@ NDJSON log records because the dev stack has no source database (the header of
 `deploy/compose/sources.dev.yaml` describes this gap). `make dev-down` stops the stack and
 **removes every volume**, keys and vault included: never run it against a pilot.
 
+## Step 11: The console (M2)
+
+The stack now runs the console: `api` (spec 12), `worker` (the profiler and linker jobs) and
+`web` (nginx serving the console and proxying `/api/` to `api` over mutual TLS). Users open
+one origin, `https://<host>:${CARTO_WEB_PORT:-8080}`, served with the certificate in
+`deploy/compose/proxy-tls/` (`make dev` generates a self-signed pair; install your own there).
+
+### Secrets and database roles
+
+`make dev` generates, next to `pg_password` and `ch_password`, the files `pg_ingest_password`,
+`pg_app_password`, `pg_worker_password` and `oidc_client_secret` under
+`deploy/compose/secrets/`. On the first start of an empty PostgreSQL volume,
+`postgres/init-roles.sh` creates the roles `carto_ingest`, `carto_app` and `carto_worker` from
+them; `migrate` (as the owner `carto`) grants each role what it needs (spec 14.4). A volume
+created by an M1 install has no such roles: create them once by hand before the first M2 start:
+
+```
+docker compose -f deploy/compose/compose.yaml exec -T postgres psql -U carto -d carto -c \
+  "CREATE ROLE carto_ingest LOGIN PASSWORD '$(cat deploy/compose/secrets/pg_ingest_password)'" \
+  -c "CREATE ROLE carto_app LOGIN PASSWORD '$(cat deploy/compose/secrets/pg_app_password)'" \
+  -c "CREATE ROLE carto_worker LOGIN PASSWORD '$(cat deploy/compose/secrets/pg_worker_password)'"
+```
+
+then run `migrate` again so the grants apply.
+
+### Login
+
+Login is single sign-on through your identity provider (OIDC authorization code flow with PKCE,
+spec 14.1). Set in the pilot `.env`:
+
+| Variable | Meaning |
+| --- | --- |
+| `CARTO_OIDC_ISSUER` | The provider's issuer URL (`https://login.example.com/realms/carto`). The redirect URI to register at the provider is `https://<host>:<port>/api/v1/auth/callback`. |
+| `CARTO_OIDC_CLIENT_ID` | The client id registered at the provider (default `carto-console`). |
+| `deploy/compose/secrets/oidc_client_secret` | The client secret, as a file (never an environment value). |
+| `CARTO_OIDC_GROUPS_CLAIM` | The ID token claim that carries group names (default `groups`; ask the provider to include it). |
+| `CARTO_OIDC_GROUP_ROLES` | JSON mapping group names to roles `admin`, `integration_engineer`, `business_viewer`, `auditor` (spec 14.2), applied once to `role_bindings` when the table is empty. |
+| `CARTO_OIDC_BACKCHANNEL_URL`, `CARTO_OIDC_ALLOW_HTTP` | Leave unset for a real provider: the api then reaches the issuer directly over HTTPS. |
+
+A user whose groups match no binding can sign in but may do nothing (deny by default); an
+admin changes bindings in M6's Admin screen, for now in `role_bindings`. Sessions idle out after
+30 minutes and end after 12 hours (`CARTO_API__SESSION_*`). The break-glass local admin arrives
+in M6; until then the console needs the provider.
+
+In the `dev` profile the stack runs Dex (ADR 0052) under the console origin at `/dex`, with
+four users bound by email: `admin@carto.local`, `engineer@carto.local`, `viewer@carto.local`,
+`auditor@carto.local`, password `password`. Dex is never part of a customer install.
+
+### First look
+
+After the edge has forwarded for a few minutes: Systems and Setup > Sources show what the edge
+reported through `POST /internal/inventory` (configuration without secrets, health, last test,
+ADR 0050); Setup > Field policies shows every field with its class, policy and shapes (never a
+value). The worker profiles every five minutes and links after each pass; the nightly rebuild
+runs at `CARTO_PROFILER__REBUILD_HOUR_UTC` (02:00) and the full link pass at
+`CARTO_WORKER__FULL_PASS_HOUR_UTC` (03:00). Map > Review lists proposed links by confidence
+times volume; accept, reject with a reason, or mark as association; accepted transaction links
+and bridges form entity families that Entities lets you name. Every decision is audited
+(`carto-core audit-verify` walks the chain; Admin > Audit shows it to admins and auditors).
+
+### Optional LLM assist
+
+Off by default (ADR 0004). To enable label and name suggestions through a provider you
+approve: `CARTO_LLM__ENABLED=true`, `CARTO_LLM__PROVIDER=anthropic` or `openai` (any
+OpenAI-compatible chat completions endpoint), `CARTO_LLM__ENDPOINT=https://...`,
+`CARTO_LLM__MODEL=...`, and the credential in a file named by `CARTO_LLM__API_KEY_FILE` (mount
+it as a Docker secret into `api` and `worker`). The gateway sends field paths, shapes and
+template text only, never tokens or values; suggestions appear as "Suggested" until a person
+confirms them; every call is audited in `llm_calls` (ADR 0054). The network policy should allow
+`api` and `worker` egress to that endpoint only.
+
 ## Operations
 
 ### Back up the edge state volume

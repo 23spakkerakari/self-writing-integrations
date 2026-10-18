@@ -354,6 +354,44 @@ not changed after it was written, not who wrote it. Origin comes from your hand-
 bundle over a channel you trust and, separately (by phone or a second channel), the
 `manifest_sha256` value from `signature.json` so we can confirm we received your bundle.
 
+## Map discovery over a bundle (M2)
+
+Loading a bundle gives core the events; discovery turns them into proposed links without an
+edge install. With the stack's databases reachable (`CARTO_` settings as for `load-bundle`):
+
+```
+carto-core discover --bundle customer.carto --out discovery/
+```
+
+verifies and loads the bundle (a bundle already loaded is skipped by the ledger), runs one full
+profile pass and one full link pass as of the bundle's last event, and writes `discovery/`:
+`engine_links.json` (every proposed link with its type, role, direction, score, both ends as
+system, template and field path, and the evidence features), `engine_entities.json` (the
+families) and `discover_summary.json` (counts, the settings in effect, the weights version).
+Nothing in these files is a token or a value. The same links appear in the console's
+Map > Review when the `api` and `web` services run.
+
+### The go/no-go gate (spec 21)
+
+On the review call, fill a CSV with the links the partner confirms by hand, independently of
+what the engine proposed, one row per link:
+
+```
+system_a,field_a,system_b,field_b
+sys_warehouse,po_num,sys_shipping,po_num
+sys_orders,merchant_ref,sys_payments,merchantRef
+```
+
+then
+
+```
+carto-core gate-report --predictions discovery/ --confirmed confirmed.csv --out gate.md
+```
+
+lists, for each confirmed link, the engine's top three proposals for `field_a` and whether
+`field_b` is among them, and ends with the share found. The gate asks for at least half; below
+that, stop and review with the founder before M3.
+
 ## Re-running
 
 Re-run with the **same** `--state-dir` and a new or empty `--out`. The key and the template state
