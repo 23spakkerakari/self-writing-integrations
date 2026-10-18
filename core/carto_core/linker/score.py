@@ -54,6 +54,7 @@ LAG_FLOOR_SECONDS: Final = 60.0
 """The lag spread is judged against the median lag or one minute, whichever is larger, so a
 link whose events land within seconds is not called inconsistent by a few seconds of jitter."""
 
+
 def _or(value: float | None, default: float) -> float:
     return default if value is None else value
 
