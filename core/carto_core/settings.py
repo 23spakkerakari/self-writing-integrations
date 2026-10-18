@@ -315,6 +315,20 @@ class LinkerSettings(_Frozen):
     composite_exact_ceiling: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Composite runs when no exact link scores above."
     )
+    composite_coverage_floor: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Composite matching also runs for a system pair whose best exact or bridge link "
+            "covers less than this share of the later end (scenario C: an exact reference is "
+            "present in 60% of HRIS rows and the rest is keyed by hand)."
+        ),
+    )
+    composite_adjacency_min_correlation: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Hourly volume cross-correlation (9.5 trigger)."
+    )
+    composite_em_iterations: int = Field(default=10, ge=1, le=200)
     composite_window_business_days: int = Field(default=3, ge=1, le=30)
     composite_target_precision: float = Field(default=0.9, ge=0.5, le=1.0)
     composite_max_pairs: int = Field(default=2_000_000, ge=1000, description="Blocking cap.")

@@ -64,14 +64,14 @@ def test_unusable_out_path_returns_2(tmp_path: Path, capsys: pytest.CaptureFixtu
 
 def test_list_prints_scenarios(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["list"]) == 0
-    assert capsys.readouterr().out.strip() == "shop"
-    assert list_scenarios() == ["shop"]
+    assert capsys.readouterr().out.split() == ["people_ops", "shop"]
+    assert list_scenarios() == ["people_ops", "shop"]
 
 
 def test_registry() -> None:
     scenario = get_scenario("shop")
     assert scenario.name == "shop" and scenario.description
-    with pytest.raises(KeyError, match="known scenarios: shop"):
+    with pytest.raises(KeyError, match="known scenarios: people_ops, shop"):
         get_scenario("payer")
 
 
