@@ -76,7 +76,9 @@ Ids match `^[a-z][a-z0-9_]{0,63}$`; `criticality` is `low`, `medium` (default) o
       primary_key: id
     parse:
       format: csv
-      timestamp_field: updated_at
+      # The time the row came into being, not its last status change: a row whose updated_at
+      # is set by a nightly job would place every record on the night it shipped.
+      timestamp_field: created_at
       timestamp_format: "%Y-%m-%d %H:%M:%S"
       timezone: America/New_York
       actor_field: created_by
@@ -275,8 +277,9 @@ order number or e-mail address from your own data; `zstd` is the Zstandard comma
 There should be no match:
 
 ```sh
-zstd -dc bundle.carto/events.ndjson.zst | grep -c 'SO-0004471'
-grep -c 'SO-0004471' bundle.carto/fields.json bundle.carto/templates.json bundle.carto/MANIFEST.md
+# replace SO-0004828 with an order reference that exists in your own export
+zstd -dc bundle.carto/events.ndjson.zst | grep -c 'SO-0004828'
+grep -c 'SO-0004828' bundle.carto/fields.json bundle.carto/templates.json bundle.carto/MANIFEST.md
 ```
 
 Look hardest for identifiers that repeat across many records: a nightly batch number, a carrier

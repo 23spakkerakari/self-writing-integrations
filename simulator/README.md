@@ -85,35 +85,43 @@ except the two warehouse sources, which use naive local time and run 90 s fast.
 
 | Source | System | Kind | Format | Timezone | Skew | Identifiers |
 | --- | --- | --- | --- | --- | --- | --- |
-| `src_webstore_log` | `sys_webstore` Webstore | log file | NDJSON | UTC | 0 | `cart_id` (`c-88213`) |
-| `src_orders_log` | `sys_orders` Order system | log file | logfmt | UTC | 0 | `order_id` (`4471`), `cart_id`, `merchant_ref` (`X9-0442`) |
+| `src_webstore_log` | `sys_webstore` Webstore | log file | NDJSON | UTC | 0 | `cart_id` (`c-12618424`, 8 digits) |
+| `src_orders_log` | `sys_orders` Order system | log file | logfmt | UTC | 0 | `order_id` (`4828`, 4 to 5 digits), `cart_id`, `merchant_ref` (`X9-249089`, 6 digits) |
 | `src_payments_xml` | `sys_payments` Payments | log file | XML lines | America/New_York (offset in data) | 0 | `merchantRef` |
-| `src_wms_db` | `sys_warehouse` Warehouse | SQL table | SQL seed + CSV | America/New_York (naive) | +90 s | `po_num` (`88-210`), `order_ref` (`SO-0004471`) |
+| `src_wms_db` | `sys_warehouse` Warehouse | SQL table | SQL seed + CSV | America/New_York (naive) | +90 s | `id` (`642876`, 6 digits), `po_num` (`93-035`, then `100-384` past 99,999), `order_ref` (`SO-0004828`) |
 | `src_wms_export_log` | `sys_warehouse` Warehouse | log file | text | America/New_York (naive) | +90 s | file names |
 | `src_ship_sftp` | `sys_shipping` Shipping | file drop | files | UTC (mtime) | 0 | file name (batch key) |
-| `src_ship_log` | `sys_shipping` Shipping | log file | logfmt | UTC | 0 | `shipment_no` (`SH-5521`), `po_num`, `file`, `manifest_id` |
+| `src_ship_log` | `sys_shipping` Shipping | log file | logfmt | UTC | 0 | `shipment_no` (`SH-3971593`, 7 digits), `po_num`, `file`, `manifest_id` |
+
+Every counter starts at its own magnitude plus a per-seed offset (`shop_model.CounterBases`:
+cart 10,000,000 + U(0, 5,000,000), order 4,471 + U(0, 1,000), merchant 200,000 + U(0, 50,000),
+PO 88,210 + U(0, 5,000), shipment 3,000,000 + U(0, 1,000,000), row id 600,000 + U(0, 100,000));
+the examples above are seed 1. The `digits`/`alnum` forms of two different identifiers therefore
+never share a value (only `order_id` and the digits of `order_ref` do, link L05) for runs below
+about 80,000 orders. The offsets come from their own generator, so the rest of the draw sequence
+does not depend on them.
 
 ## Formats, one example line each
 
 ```
-webstore   {"ts": "2026-09-23T13:04:06.001Z", "level": "info", "msg": "cart created", "cart_id": "c-88213", "items": 3, "region": "us-east", "channel": "web"}
-webstore   {"ts": "2026-09-23T13:16:40.381Z", "level": "info", "msg": "checkout completed", "cart_id": "c-88213", "total": 129.99, "payment_method": "card", "customer_name": "Jane Smith", "customer_email": "jane.smith+mk3f9a2c1e@example.com"}
-orders     ts=2026-09-23T13:16:46.566Z level=info msg="order created from cart" order_id=4471 cart_id=c-88213 total=129.99 channel=web
-orders     ts=2026-09-23T13:16:56.709Z level=info msg="payment requested" order_id=4471 merchant_ref=X9-0442 amount=129.99 currency=USD
-orders     ts=2026-09-28T14:20:19.579Z level=error msg="payment request failed" order_id=7816 merchant_ref=X9-3787 http_status=503
-orders     ts=2026-09-23T13:17:04.213Z level=info msg="order released" order_id=4471 status=RELEASED
-payments   <paymentMessage><timestamp>2026-09-23T09:17:01.292-04:00</timestamp><merchantRef>X9-0442</merchantRef><amount>129.99</amount><currency>USD</currency><cardholderName>Jane Smith</cardholderName><status>AUTHORIZED</status><httpStatus>200</httpStatus><processor>cardnet</processor></paymentMessage>
-payments   <paymentMessage><timestamp>2026-09-28T10:20:19.186-04:00</timestamp><merchantRef>X9-3787</merchantRef><amount>596.99</amount><currency>USD</currency><status>ERROR</status><httpStatus>503</httpStatus><error>Service Unavailable</error><processor>cardnet</processor></paymentMessage>
+webstore   {"ts": "2026-09-23T13:04:06.001Z", "level": "info", "msg": "cart created", "cart_id": "c-12618424", "items": 3, "region": "us-east", "channel": "web"}
+webstore   {"ts": "2026-09-23T13:16:40.381Z", "level": "info", "msg": "checkout completed", "cart_id": "c-12618424", "total": 129.99, "payment_method": "card", "customer_name": "Jane Smith", "customer_email": "jane.smith+mk3f9a2c1e@example.com"}
+orders     ts=2026-09-23T13:16:46.566Z level=info msg="order created from cart" order_id=4828 cart_id=c-12618424 total=129.99 channel=web
+orders     ts=2026-09-23T13:16:56.709Z level=info msg="payment requested" order_id=4828 merchant_ref=X9-249089 amount=129.99 currency=USD
+orders     ts=2026-09-28T14:20:19.579Z level=error msg="payment request failed" order_id=8173 merchant_ref=X9-252434 http_status=503
+orders     ts=2026-09-23T13:17:04.213Z level=info msg="order released" order_id=4828 status=RELEASED
+payments   <paymentMessage><timestamp>2026-09-23T09:17:01.292-04:00</timestamp><merchantRef>X9-249089</merchantRef><amount>129.99</amount><currency>USD</currency><cardholderName>Jane Smith</cardholderName><status>AUTHORIZED</status><httpStatus>200</httpStatus><processor>cardnet</processor></paymentMessage>
+payments   <paymentMessage><timestamp>2026-09-28T10:20:19.186-04:00</timestamp><merchantRef>X9-252434</merchantRef><amount>596.99</amount><currency>USD</currency><status>ERROR</status><httpStatus>503</httpStatus><error>Service Unavailable</error><processor>cardnet</processor></paymentMessage>
 payments   <heartbeat><timestamp>2026-09-23T00:23:06.570-04:00</timestamp><status>OK</status></heartbeat>
-warehouse  INSERT INTO purchase_orders (id, po_num, order_ref, status, warehouse_code, order_total, order_date, customer_name, ship_to_address, created_by, created_at, updated_at) VALUES (1, '88-210', 'SO-0004471', 'SHIPPED', 'DC-01', 129.99, '2026-09-23', 'Jane Smith', '282 mk5349da48 Street, Omaha, NE 52733', 'svc_wms_integration', '2026-09-23 09:21:04', '2026-09-23 21:41:31');
-warehouse  1,88-210,SO-0004471,SHIPPED,DC-01,129.99,2026-09-23,Jane Smith,"282 mk5349da48 Street, Omaha, NE 52733",svc_wms_integration,2026-09-23 09:21:04,2026-09-23 21:41:31
+warehouse  INSERT INTO purchase_orders (id, po_num, order_ref, status, warehouse_code, order_total, order_date, customer_name, ship_to_address, created_by, created_at, updated_at) VALUES (642876, '93-035', 'SO-0004828', 'SHIPPED', 'DC-01', 129.99, '2026-09-23', 'Jane Smith', '282 mk5349da48 Street, Omaha, NE 52733', 'svc_wms_integration', '2026-09-23 09:21:04', '2026-09-23 21:41:31');
+warehouse  642876,93-035,SO-0004828,SHIPPED,DC-01,129.99,2026-09-23,Jane Smith,"282 mk5349da48 Street, Omaha, NE 52733",svc_wms_integration,2026-09-23 09:21:04,2026-09-23 21:41:31
 export log 2026-09-23 21:12:41 INFO PO export finished: 412 POs written to SHIP_20260923_2112.csv
 export log 2026-09-23 21:13:36 INFO SFTP upload complete: SHIP_20260923_2112.csv (23891 bytes)
 export log 2026-10-01 21:14:30 ERROR SFTP upload failed: Permission denied (/outbound/shipping/SHIP_20261001_2113.csv)
 export log 2026-09-23 10:00:12 INFO export scheduler idle, next run 21:10
-SHIP file  po_num,order_ref,warehouse_code,carrier,service_level,weight_kg  /  88-210,SO-0004471,DC-01,UPS,GROUND,15.38
-shipping   ts=2026-09-24T01:20:39.439Z level=info msg="shipment created" shipment_no=SH-5521 po_num=88-210 file=SHIP_20260923_2112.csv carrier=UPS service=GROUND
-shipping   ts=2026-09-24T02:13:52.000Z level=info msg="carrier pickup" shipment_no=SH-5521 manifest_id=MAN-20260923-01 carrier=UPS
+SHIP file  po_num,order_ref,warehouse_code,carrier,service_level,weight_kg  /  93-035,SO-0004828,DC-01,UPS,GROUND,15.38
+shipping   ts=2026-09-24T01:20:39.439Z level=info msg="shipment created" shipment_no=SH-3971593 po_num=93-035 file=SHIP_20260923_2112.csv carrier=UPS service=GROUND
+shipping   ts=2026-09-24T02:13:52.000Z level=info msg="carrier pickup" shipment_no=SH-3971593 manifest_id=MAN-20260923-01 carrier=UPS
 shipping   ts=2026-09-24T00:05:53.606Z level=info msg="carrier rate table refreshed" carrier=USPS rows=412
 ```
 
@@ -131,21 +139,22 @@ from 07:00 and are highest from 11:00 to 21:00; the time within the hour is unif
 
 | Step | Node | When | Line |
 | --- | --- | --- | --- |
-| 1 | `webstore:cart_created` | t0 | `cart created`, `cart_id` = `c-` + counter from 88213 |
+| 1 | `webstore:cart_created` | t0 | `cart created`, `cart_id` = `c-` + 8-digit counter (`CounterBases.cart`) |
 | 2 | `webstore:checkout_completed` | t0 + U(2, 20) min | `checkout completed`; `customer_name` and `customer_email` with probability `pii_density` |
-| 3 | `orders:order_created` | + U(5, 60) s | `order created from cart`, `order_id` from 4471 (bridge `cart_id` ~ `order_id`) |
-| 4 | `orders:payment_requested` | + U(5, 30) s | `payment requested`, `merchant_ref` = `X9-` + counter from 442, at least 4 digits (bridge) |
+| 3 | `orders:order_created` | + U(5, 60) s | `order created from cart`, `order_id` from `CounterBases.order` (4,471 to 5,470; bridge `cart_id` ~ `order_id`) |
+| 4 | `orders:payment_requested` | + U(5, 30) s | `payment requested`, `merchant_ref` = `X9-` + 6-digit counter from `CounterBases.merchant` (bridge) |
 | 5 | `payments:authorized` | + U(1, 15) s | `AUTHORIZED` message; `cardholderName` (same name as the checkout) with probability `pii_density` |
 | 6 | `orders:order_released` | + U(1, 10) s | `order released` |
 | 7 | `warehouse:po_created` | automated (70%): authorized + U(1, 5) min, `created_by=svc_wms_integration`, actor service. Clerk (30%): the first instant at or after authorized + 20 min inside Mon to Fri 08:00 to 18:00, plus U(0, 240) min; past 18:00 it moves to the next business day 08:00 + U(0, 60) min; `created_by` one of 8 clerks, actor human | one `purchase_orders` row; `order_ref` = `SO-` + order id zero-padded to 7 digits; 2% of clerk rows get a typo in `order_ref` (one digit replaced or two adjacent differing digits swapped), so the `digits.0` form no longer equals the order id |
 | 8 | picking | created + U(30, 240) min inside 06:00 to 22:00; otherwise the next opening at 06:00 + U(0, 60) min (same day when before opening) | status `PICKED`; POs picked before 21:00 ride that day's export, later ones the next day's |
 | 8 | `warehouse:export_finished`, `warehouse:upload_complete` | 21:10 + U(0, 5) min local on every day with at least one due PO; upload 30 to 60 s later | `PO export finished: N POs written to SHIP_YYYYMMDD_HHMM.csv`; HHMM is the warehouse's own clock (true + 90 s) |
 | 9 | `shipping:file_arrived` | export + U(3, 8) min | the SHIP file lands; mtime = arrival; `batch_<file name without .csv>` |
-| 10 | `shipping:shipment_created` | arrival + U(5, 70) min per PO | `shipment_no` = `SH-` + counter from 5521 in creation order; row status `SHIPPED` |
+| 10 | `shipping:shipment_created` | arrival + U(5, 70) min per PO | `shipment_no` = `SH-` + 7-digit counter from `CounterBases.shipment` in creation order; row status `SHIPPED` |
 | 11 | `shipping:carrier_pickup` | 22:00 + U(0, 30) min local per day | one line per shipment created before the pickup time; later shipments ride the next day's manifest `MAN-YYYYMMDD-01` |
 
-Row ids and PO numbers (`88-210` from a counter starting at 88210, three-digit prefix past 99999)
-follow `created_at` order. `order_date` is the local date of `orders:order_created`. Rows carry
+Row ids (6 digits from `CounterBases.row`) and PO numbers (`93-035` from `CounterBases.po`, 88,210
+to 93,209; three-digit prefix past 99,999, so a default run reaches `100-384`) follow `created_at`
+order. `order_date` is the local date of `orders:order_created`. Rows carry
 the final status (`CREATED`, `PICKED`, `SHIPPED`) and `updated_at` of the last change inside the
 window. Steps falling after the window (last day 23:59:59 local) are not emitted and ground truth
 records only what was emitted; a row whose later steps fall outside the window keeps the status it
@@ -201,9 +210,14 @@ turns all of them off except the clock skew, which is a property of the warehous
   measured agreement rate over clerk rows; L07 exact warehouse `po_num` ~ shipping `po_num`;
   L07b the same for `po_number` (only when the rename is active); L08 bridge `shipment_no` ~
   `po_num`; L09 batch `file_name` ~ shipping `file` (entity `ent_shipping_file`); L10 bridge
-  `shipment_no` ~ `manifest_id` (role batch, entity `ent_manifest`).
-- `entities.json`: `ent_order` (every identifier field with its form, `po_number` only when the
-  rename is active), `ent_shipping_file`, `ent_manifest`.
+  `shipment_no` ~ `manifest_id` (role batch, entity `ent_manifest`); the bridges the data holds
+  because several identifiers sit in one record (added after the first M2 engine eval found them):
+  L11 bridge warehouse `id` ~ `po_num`, L12 bridge `id` ~ `order_ref` `digits.0`, L13 bridge
+  `order_ref` `digits.0` ~ `po_num` (role transaction, `ent_order`), L11b and L13b the same with
+  `po_number` (only when the rename is active), L14 bridge shipping `file` ~ `shipment_no` and
+  L15 bridge `file` ~ `po_num` (role batch, `ent_shipping_file`).
+- `entities.json`: `ent_order` (every identifier field with its form, the warehouse row `id`
+  included, `po_number` only when the rename is active), `ent_shipping_file`, `ent_manifest`.
 - `batches.json`: `batch_SHIP_YYYYMMDD_HHMM` keyed by `src_ship_sftp/file_name` and
   `batch_MAN-YYYYMMDD-01` keyed by `src_ship_log/manifest_id`, each with sorted `txn_ids`.
 - `faults.json`: the table above (`start`/`end` in UTC).
@@ -258,6 +272,10 @@ error naming `tzdata` if the zone cannot be loaded.
   after that line.
 - Noise counts per hour are Poisson draws around the expectation.
 - Payment methods: card 80%, paypal 12%, apple_pay 8%; shipment weights U(0.2, 30) kg.
+- Counters live at different magnitudes with a per-seed offset (see "Sources"): the spec's
+  examples (`c-88213`, `4471`, `X9-0442`, `88-210`, `SH-5521`) fix the shapes, not the ranges,
+  and dense counters in overlapping ranges made unrelated identifiers share thousands of
+  `digits`/`alnum` values, which the engine took for exact links indistinguishable from L05.
 
 ## Scenario C: "people_ops" (M2, plan package H)
 
@@ -368,6 +386,11 @@ Days are 1-based from `start_date`; with the default start (Wednesday 2026-09-23
 - Hires are anchored on the start date so that a 3-day run exercises every source but the SKU
   master (keyed the week after); the application and offer lines of the first days fall before
   the window and are not emitted.
+- The legacy volume (10 hires per weekday, 50 per week) is the founder-confirmed figure and is
+  kept on purpose although it puts the legacy `cand_ref` and `mail` fields at exactly 50 distinct
+  values in a 7-day profiler window, the engine's `min_distinct` floor: the profiler counts
+  distinct values exactly while the sample is not saturated (ADR 0047), so the fields qualify, and
+  a small acquired system sitting at the floor is a realistic case the eval should cover.
 - `employee_id` is `E-40210`, not `E40210`: a letter followed by digits also occurs inside ULID
   event ids by chance, which the leak test's substring rule counts as a leak; every identifier
   therefore carries punctuation, as the shop's do.
