@@ -55,15 +55,22 @@ jobs:
         run: uv run carto-schema check --dir packages/carto-schema/schemas
       - name: Simulator scenario A (14 days)
         run: make sim SCENARIO=shop DAYS=14 SEED=1
-      - name: Eval harness
+      - name: Eval harness (scoring self-check, M0 path)
         run: make eval SCENARIO=shop DAYS=14 SEED=1
+      - name: Eval with the engine, in memory (spec 18.4; analyzer, load, discover, map, score)
+        run: |
+          make eval-engine SCENARIO=shop DAYS=14 SEED=1 ENGINE=memory EVAL_OUT=eval/reports/engine
+          make sim SCENARIO=people_ops DAYS=28 SEED=1
+          make eval-engine SCENARIO=people_ops DAYS=28 SEED=1 ENGINE=memory EVAL_OUT=eval/reports/engine
       - name: Simulator output summary
         run: |
           echo "## Simulator output" >> "$GITHUB_STEP_SUMMARY"
-          du -sh sim-out/shop >> "$GITHUB_STEP_SUMMARY"
-          find sim-out/shop -type f | wc -l | xargs -I{} echo "{} files" >> "$GITHUB_STEP_SUMMARY"
-          echo "## Eval report" >> "$GITHUB_STEP_SUMMARY"
-          cat eval/reports/shop.md >> "$GITHUB_STEP_SUMMARY"
+          du -sh sim-out/shop sim-out/people_ops >> "$GITHUB_STEP_SUMMARY"
+          find sim-out/shop -type f | wc -l | xargs -I{} echo "{} files (shop)" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Eval report (engine, shop 14 days)" >> "$GITHUB_STEP_SUMMARY"
+          cat eval/reports/engine/shop.md >> "$GITHUB_STEP_SUMMARY"
+          echo "## Eval report (engine, people_ops 28 days)" >> "$GITHUB_STEP_SUMMARY"
+          cat eval/reports/engine/people_ops.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: eval-report
