@@ -1,17 +1,21 @@
 """Candidate generation (spec 9.2; ADR 0048).
 
 1. A MinHash LSH Ensemble over the window sketches of every candidate end (profiles that pass
-   ``q``) is queried once per end for other ends whose estimated containment is at least
-   ``containment_threshold``. A pair is kept when its ends belong to different systems or to
-   different templates of one system; an end is never paired with itself or with another form
-   of the same field (those overlap by construction).
+   ``q`` whose form carries an identifier, :func:`is_identifier_form`: ``date``, ``amount`` and
+   ``phonetic.k`` forms are composite components of spec 9.5, never exact keys) is queried once
+   per end for other ends whose estimated containment is at least ``containment_threshold``. A
+   pair is kept when its ends belong to different systems or to different templates of one
+   system; an end is never paired with itself or with another form of the same field (those
+   overlap by construction).
 2. Each LSH pair is ranked by the containment estimated from the bottom-k samples
    (``max(c_ab, c_ba)``; :func:`default_containment` is the exact bottom-k estimator, the
    profiler package offers the same over its sketches) so the per-run cap keeps the most
    promising pairs.
-3. Bridge pairs come first: every pair of candidate ends carried together by at least
+3. Bridge pairs come first: every pair of identifier ends carried together by at least
    ``bridge_min_events`` events (:meth:`EventStore.cooccurrences`), with the co-occurrence row
-   kept so verification can read the pairing consistency of 9.4.
+   kept so verification can read the pairing consistency of 9.4. A bridge end need not pass
+   ``q`` or ``min_distinct``: batch keys have few distinct values by nature (ADR 0026) and the
+   co-occurrence is the evidence; the role follows the fan-out.
 4. The cap ``max_candidates_per_run`` bounds bridges plus LSH pairs; pairs already decided
    (accepted, rejected) are appended after the cap with source ``repropose`` so a pass re-checks
    staleness and re-proposal without taking a slot from an undecided pair (ADR 0048).
@@ -35,6 +39,7 @@ from datasketch import MinHash, MinHashLSHEnsemble
 
 from carto_core.linker.model import Candidate
 from carto_core.store.model import FieldForm
+from carto_schema.forms import token_domain
 
 if TYPE_CHECKING:
     from carto_core.profiler.model import FieldProfile, WindowSketch
@@ -50,6 +55,7 @@ __all__ = [
     "MinHashDecoder",
     "default_containment",
     "default_minhash_decoder",
+    "is_identifier_form",
     "pair_allowed",
 ]
 
@@ -102,6 +108,18 @@ def default_minhash_decoder(data: bytes) -> MinHash:
     return MinHash(
         num_perm=len(values), seed=_MINHASH_SEED, hashvalues=values, scheme=_MINHASH_SCHEME
     )
+
+
+def is_identifier_form(form: str) -> bool:
+    """Whether a form carries an identifier: the forms of the ``id`` token domain of spec 8.4
+    (``raw``, ``norm``, ``alnum``, ``digits.k``). ``date``, ``amount`` and ``phonetic.k`` are
+    composite components (spec 9.5), never exact keys or bridge ends: two systems' totals
+    matching is not a key link, and a bridge through an amount would glue entities together
+    through their prices."""
+    try:
+        return token_domain(form) == "id"
+    except ValueError:
+        return False
 
 
 def _template_of(end: FieldForm) -> str:
@@ -168,7 +186,9 @@ class CandidateGenerator:
         decided: Iterable[tuple[FieldForm, FieldForm]] = (),
     ) -> CandidateSet:
         ends: dict[FieldForm, FieldProfile] = {
-            profile.end: profile for profile in profiles if profile.is_candidate
+            profile.end: profile
+            for profile in profiles
+            if profile.is_candidate and is_identifier_form(profile.end.form)
         }
         sketches: dict[FieldForm, WindowSketch] = {}
         for end in ends:
@@ -176,7 +196,7 @@ class CandidateGenerator:
             if sketch is not None:
                 sketches[end] = sketch
 
-        bridges, rows = self._bridge_pairs(tenant_id, store, window, ends)
+        bridges, rows = self._bridge_pairs(tenant_id, store, window)
         taken = {(c.a, c.b) for c in bridges}
         lsh = [c for c in self._lsh_pairs(ends, sketches) if (c.a, c.b) not in taken]
         ordered = [*bridges, *lsh]
@@ -198,17 +218,19 @@ class CandidateGenerator:
         )
 
     def _bridge_pairs(
-        self,
-        tenant_id: str,
-        store: EventStore,
-        window: Window,
-        ends: Mapping[FieldForm, FieldProfile],
+        self, tenant_id: str, store: EventStore, window: Window
     ) -> tuple[list[Candidate], dict[tuple[FieldForm, FieldForm], CooccurrenceRow]]:
+        """Every pair of identifier ends carried together by at least ``bridge_min_events``
+        events. A bridge needs neither end to pass ``q`` or ``min_distinct``: a batch key (a
+        manifest, a nightly file) has few distinct values by nature (ADR 0026) and the
+        co-occurrence itself is the evidence; the role then follows the fan-out (spec 9.3)."""
         rows: dict[tuple[FieldForm, FieldForm], CooccurrenceRow] = {}
         for row in store.cooccurrences(
             tenant_id, window, min_events=self._settings.bridge_min_events
         ):
-            if row.a not in ends or row.b not in ends or row.a.field_ref == row.b.field_ref:
+            if row.a.field_ref == row.b.field_ref:
+                continue
+            if not (is_identifier_form(row.a.form) and is_identifier_form(row.b.form)):
                 continue
             rows[_ordered(row.a, row.b)] = row
         ranked = sorted(rows.items(), key=lambda item: (-item[1].events, item[0]))

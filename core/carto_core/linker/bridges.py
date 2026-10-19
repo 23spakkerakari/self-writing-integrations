@@ -1,20 +1,24 @@
-"""Bridge scoring (spec 9.4).
+"""Bridge scoring (spec 9.3 roles, 9.4).
 
 Two identifier fields carried by the same events are a bridge candidate. What makes a bridge
 trustworthy is **pairing consistency**: the share of A values that always appear with the same
-B value (a functional dependency), and the reverse. From the two shares the rule reads the
-role and the score:
+B value (a functional dependency), and the reverse. From the two shares and the row's counts
+the rule reads the role and the score:
 
 - **Role.** The median fanout of a direction is exactly one when more than half of its values
   pair with exactly one partner, so both consistencies at or above
   :data:`MEDIAN_ONE_CONSISTENCY` (one half) mean "transaction-link fanout" in spec 9.4's words
-  (near one-to-one both ways); otherwise the bridge is an association (a customer id next to an
-  order id groups records, it does not identify one).
+  (near one-to-one both ways). Otherwise one side fans out: when its mean partners per value
+  (events over its distinct values) reach ``transaction_fanout_p99_max`` the bridge is a
+  ``batch`` (one manifest to many shipments, one file to many claims; spec 9.3, 9.7), else an
+  ``association`` (a customer id next to an order id groups records, it does not identify one).
 - **Score.** A transaction bridge whose larger consistency is at or above
   ``bridge_consistency_min`` scores ``max(logistic, consistency)``: a clean functional
   dependency written by the same event is a link whatever the lag features say. Any other
   bridge scores ``min(logistic, consistency)``, so two multi-valued fields that merely share
-  events never reach the proposal threshold on the strength of trivially containing each other.
+  events never reach the proposal threshold on the strength of trivially containing each other;
+  a batch or association bridge with a clean dependency in its one-to-one direction keeps its
+  full score and is shown as what it is.
 
 Without a co-occurrence row (a stored bridge whose pairs no longer co-occur) only
 ``features.pairing_consistency`` is known: the 9.3 role stands, the floor still decides between
@@ -34,11 +38,31 @@ if TYPE_CHECKING:
     from carto_core.settings import LinkerSettings
     from carto_core.store.model import CooccurrenceRow
 
-__all__ = ["MEDIAN_ONE_CONSISTENCY", "bridge_outcome"]
+__all__ = ["MEDIAN_ONE_CONSISTENCY", "bridge_outcome", "bridge_role"]
 
 MEDIAN_ONE_CONSISTENCY: Final = 0.5
 """More than half of the values pairing with exactly one partner is the same statement as
 "the median fanout is one"; a fact about medians, not a tunable threshold."""
+
+
+def _mean_partners(events: int, distinct: int) -> float:
+    return events / distinct if distinct > 0 else 0.0
+
+
+def bridge_role(cooccurrence: CooccurrenceRow, settings: LinkerSettings) -> LinkRole:
+    """The spec 9.3 role of a bridge from its co-occurrence row (module docstring)."""
+    if (
+        cooccurrence.consistency_ab >= MEDIAN_ONE_CONSISTENCY
+        and cooccurrence.consistency_ba >= MEDIAN_ONE_CONSISTENCY
+    ):
+        return LinkRole.TRANSACTION
+    fan_out = max(
+        _mean_partners(cooccurrence.events, cooccurrence.distinct_a),
+        _mean_partners(cooccurrence.events, cooccurrence.distinct_b),
+    )
+    if fan_out >= settings.transaction_fanout_p99_max:
+        return LinkRole.BATCH
+    return LinkRole.ASSOCIATION
 
 
 def bridge_outcome(
@@ -50,14 +74,13 @@ def bridge_outcome(
 ) -> tuple[float, LinkRole]:
     """``(score, role)`` for a bridge given its logistic ``probability`` and 9.3 ``role``."""
     if cooccurrence is not None:
-        low = min(cooccurrence.consistency_ab, cooccurrence.consistency_ba)
         high = max(cooccurrence.consistency_ab, cooccurrence.consistency_ba)
-        bridge_role = (
-            LinkRole.TRANSACTION if low >= MEDIAN_ONE_CONSISTENCY else LinkRole.ASSOCIATION
-        )
-        if bridge_role == LinkRole.TRANSACTION and high >= settings.bridge_consistency_min:
-            return max(probability, min(1.0, high)), bridge_role
-        return min(probability, high), bridge_role
+        bridge_kind = bridge_role(cooccurrence, settings)
+        if high >= settings.bridge_consistency_min:
+            if bridge_kind == LinkRole.TRANSACTION:
+                return max(probability, min(1.0, high)), bridge_kind
+            return probability, bridge_kind
+        return min(probability, high), bridge_kind
     consistency = features.pairing_consistency
     if consistency is None:
         return probability, role

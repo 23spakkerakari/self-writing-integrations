@@ -6,6 +6,7 @@ link is the rejected one never shares a family."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from hypothesis import given
@@ -79,6 +80,8 @@ def link(
 
 
 def test_families_use_accepted_transaction_links_and_bridges_only() -> None:
+    """Spec 9.6: accepted links of role transaction, exact or bridge; a bridge of role batch or
+    association never merges families (it would glue a file to the records it carries)."""
     links = [
         link(A, B),
         link(
@@ -86,13 +89,14 @@ def test_families_use_accepted_transaction_links_and_bridges_only() -> None:
             C,
             status=LinkStatus.AUTO_ACCEPTED,
             link_type=LinkType.BRIDGE,
-            role=LinkRole.ASSOCIATION,
+            role=LinkRole.TRANSACTION,
         ),
         link(C, D, role=LinkRole.ASSOCIATION),
         link(D, E, status=LinkStatus.PROPOSED),
         link(E, F, status=LinkStatus.REJECTED),
         link(F, G, status=LinkStatus.STALE),
         link(G, H, role=LinkRole.BATCH),
+        link(C, H, link_type=LinkType.BRIDGE, role=LinkRole.BATCH),
     ]
     families = build_families(links)
     assert [family.members for family in families] == [(A, B, C)]
@@ -234,3 +238,33 @@ def test_rejected_pairs_never_share_a_family_unless_accepted_links_connect_them(
         connected = find(item.a) == find(item.b)
         assert same_family == connected
         assert all(item.id not in family.link_ids for family in families)
+
+
+def test_form_variants_of_one_field_pair_are_one_edge() -> None:
+    a_alnum = FieldForm(A.field_ref, "alnum")
+    b_digits = FieldForm(B.field_ref, "digits.0")
+    variants = [
+        link(A, B),
+        replace(link(a_alnum, b_digits), id="lnk_variant", score=0.95),
+        replace(link(a_alnum, B), id="lnk_variant2", score=0.99),
+    ]
+    families = build_families(variants)
+    assert len(families) == 1
+    assert families[0].members == (A, B), "the most raw ends stand for the field pair"
+    assert families[0].link_ids == ("lnk_01",)
+    only_variants = build_families(variants[1:])
+    assert only_variants[0].link_ids == ("lnk_variant2",), "then the higher score"
+
+
+def test_forms_of_one_field_are_one_node() -> None:
+    """A raw link into B and a digits link out of B belong to one family (spec 9.6 builds
+    families over fields, not over forms)."""
+    b_digits = FieldForm(B.field_ref, "digits.0")
+    families = build_families(
+        [link(A, B), replace(link(b_digits, C), id="lnk_bc_digits"), link(D, E)]
+    )
+    assert [family.members for family in families] == sorted(
+        [tuple(sorted((A, B, b_digits, C))), (D, E)], key=entity_id_for
+    )
+    joined = next(family for family in families if A in family.members)
+    assert joined.link_ids == ("lnk_01", "lnk_bc_digits")

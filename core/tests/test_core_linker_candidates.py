@@ -20,6 +20,7 @@ from carto_core.linker.candidates import (
     CandidateGenerator,
     default_containment,
     default_minhash_decoder,
+    is_identifier_form,
     pair_allowed,
 )
 from carto_core.profiler.model import FieldProfile, ShapeShare, WindowSketch
@@ -268,7 +269,7 @@ def test_bridge_needs_the_minimum_events_and_candidate_ends() -> None:
         profiles=[profile(A, 500), profile(A_SAME_TEMPLATE, 500, candidate=False)],
         sketch_of=Source(sketches),
     )
-    assert enough.bridge_pairs == 0, "an end that fails q is not bridged"
+    assert enough.bridge_pairs == 1, "an end below q still bridges (batch keys, ADR 0026)"
     bridged = generator(bridge_min_events=5).generate(
         "default",
         store=store,
@@ -344,3 +345,86 @@ def test_mismatched_permutations_raise_candidate_error() -> None:
             profiles=[profile(A, 500), profile(B, 500)],
             sketch_of=Source(sketches),
         )
+
+
+# -- identifier forms only (spec 9.5: amounts, dates and phonetic codes are composite components)
+
+
+@pytest.mark.parametrize(
+    ("form", "identifier"),
+    [
+        ("raw", True),
+        ("norm", True),
+        ("alnum", True),
+        ("digits.0", True),
+        ("digits.2", True),
+        ("date", False),
+        ("amount", False),
+        ("phonetic.0", False),
+        ("phonetic.7", False),
+        ("bogus", False),
+    ],
+)
+def test_is_identifier_form(form: str, identifier: bool) -> None:
+    assert is_identifier_form(form) == identifier
+
+
+def test_amount_date_and_phonetic_ends_are_never_exact_candidates() -> None:
+    amount_a = FieldForm("sys_a/tpl_a/total", "amount")
+    amount_b = FieldForm("sys_b/tpl_b/amount", "amount")
+    date_a = FieldForm("sys_a/tpl_a/created", "date")
+    date_b = FieldForm("sys_b/tpl_b/created", "date")
+    name_a = FieldForm("sys_a/tpl_a/name", "phonetic.0")
+    name_b = FieldForm("sys_b/tpl_b/name", "phonetic.0")
+    sketches = {
+        A: sketch(A, ORDERS),
+        B: sketch(B, ORDERS),
+        amount_a: sketch(amount_a, ORDERS),
+        amount_b: sketch(amount_b, ORDERS),
+        date_a: sketch(date_a, ORDERS),
+        date_b: sketch(date_b, ORDERS),
+        name_a: sketch(name_a, ORDERS),
+        name_b: sketch(name_b, ORDERS),
+    }
+    result = generator().generate(
+        "default",
+        store=InMemoryEventStore(),
+        window=WINDOW,
+        profiles=[profile(end, 500) for end in sketches],
+        sketch_of=Source(sketches),
+    )
+    assert {(c.a, c.b) for c in result.candidates} == {(A, B)}
+
+
+def test_bridges_skip_non_identifier_ends_but_accept_low_cardinality_ones() -> None:
+    store = InMemoryEventStore()
+    manifest = FieldForm("sys_a/tpl_a/manifest_id", "raw")
+    total = FieldForm("sys_a/tpl_a/total", "amount")
+    store.add_events(
+        event(
+            f"s{n}",
+            "sys_a",
+            "tpl_a",
+            NOW - timedelta(hours=n % 48),
+            [
+                ("order_id", "raw", ORDERS[n], "9999"),
+                ("manifest_id", "raw", f"M{n % 7}", "A9"),
+                ("total", "amount", f"{n}.00", "99.99"),
+            ],
+        )
+        for n in range(60)
+    )
+    sketches = {A: sketch(A, ORDERS)}
+    profiles = [
+        profile(A, 500),
+        profile(manifest, 7, candidate=False),
+        profile(total, 60, candidate=True),
+    ]
+    result = generator().generate(
+        "default", store=store, window=WINDOW, profiles=profiles, sketch_of=Source(sketches)
+    )
+    pairs = {(c.a, c.b) for c in result.candidates}
+    assert (manifest, A) in pairs or (A, manifest) in pairs, "a batch key below q still bridges"
+    assert not any(total in pair for pair in pairs), "an amount never bridges an identifier"
+    assert result.bridge_pairs == 1
+    assert result.cooccurrences[next(iter(pairs))].events == 60

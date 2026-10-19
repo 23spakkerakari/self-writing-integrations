@@ -25,11 +25,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from carto_core.linker.repository import Entity
+from carto_core.store.model import FieldForm
 
 if TYPE_CHECKING:
     from carto_core.linker.model import KeyLink
     from carto_core.linker.repository import EntityRepository, LinkRepository
-    from carto_core.store.model import FieldForm
 
 __all__ = [
     "EntityNamer",
@@ -39,6 +39,7 @@ __all__ = [
     "build_families",
     "entity_id_for",
     "inherit_names",
+    "one_edge_per_field_pair",
 ]
 
 EntityNamer = Callable[[Sequence["FieldForm"]], str | None]
@@ -91,18 +92,46 @@ class _UnionFind:
         self._parent[root_b] = root_a
 
 
+def _edge_rank(link: KeyLink) -> tuple[int, float, str]:
+    raws = sum(1 for form in (link.a.form, link.b.form) if form == "raw")
+    return (-raws, -link.score, link.id)
+
+
+def one_edge_per_field_pair(links: Sequence[KeyLink]) -> list[KeyLink]:
+    """Of several usable links between the same two fields in different forms (``raw``,
+    ``alnum``, ``digits.k``: the engine's form variants), the one with the most ``raw`` ends,
+    then the highest score, is the family edge; the variants add no members of their own."""
+    best: dict[tuple[str, str], KeyLink] = {}
+    for link in links:
+        key = (min(link.a.field_ref, link.b.field_ref), max(link.a.field_ref, link.b.field_ref))
+        current = best.get(key)
+        if current is None or _edge_rank(link) < _edge_rank(current):
+            best[key] = link
+    chosen = {id(link) for link in best.values()}
+    return [link for link in links if id(link) in chosen]
+
+
+def _field_node(end: FieldForm) -> FieldForm:
+    """The union-find node of an end: its field, whatever the form."""
+    return FieldForm(end.field_ref, "")
+
+
 def build_families(links: Sequence[KeyLink]) -> list[Family]:
-    """Connected components over the usable links, ordered by entity id."""
-    usable = [link for link in links if link.is_usable_for_families]
+    """Connected components over the usable links, one edge per field pair, ordered by
+    entity id."""
+    usable = one_edge_per_field_pair([link for link in links if link.is_usable_for_families])
     if not usable:
         return []
+    # A field's forms are one node (spec 9.6 builds families over fields; ``raw`` and
+    # ``digits.0`` of one column name the same record), so the union runs over field refs
+    # while the members keep the forms the links use (``entity_fields.form``).
     components = _UnionFind()
     for link in usable:
-        components.union(link.a, link.b)
+        components.union(_field_node(link.a), _field_node(link.b))
     members: dict[FieldForm, set[FieldForm]] = {}
     link_ids: dict[FieldForm, set[str]] = {}
     for link in usable:
-        root = components.find(link.a)
+        root = components.find(_field_node(link.a))
         members.setdefault(root, set()).update((link.a, link.b))
         link_ids.setdefault(root, set()).add(link.id)
     families = [

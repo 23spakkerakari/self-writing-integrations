@@ -190,7 +190,13 @@ class KeyLink:
 
     @property
     def is_usable_for_families(self) -> bool:
-        """Accepted (or auto-accepted) transaction links and bridges form families (9.6)."""
-        return self.status in (LinkStatus.ACCEPTED, LinkStatus.AUTO_ACCEPTED) and (
-            self.role == LinkRole.TRANSACTION or self.link_type == LinkType.BRIDGE
+        """Accepted (or auto-accepted) links of role ``transaction`` form families (spec 9.6
+        "connected components over accepted transaction links"), exact ones and bridges alike.
+        A bridge of role ``batch`` (one file to many shipments) or ``association`` is shown in
+        the map and never merges families: it would glue a batch's entity to the records it
+        carries (spec 9.7 handles batches). Composite links never auto-accept and join a family
+        only once a reviewer accepts them."""
+        return (
+            self.status in (LinkStatus.ACCEPTED, LinkStatus.AUTO_ACCEPTED)
+            and self.role == LinkRole.TRANSACTION
         )

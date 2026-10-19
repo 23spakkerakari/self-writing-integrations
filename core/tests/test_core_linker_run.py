@@ -355,6 +355,61 @@ def test_an_accepted_link_goes_stale_when_b_stops_seeing_the_tokens() -> None:
     assert recorder.entries[-1].action == "link.stale"
 
 
+def test_form_variants_collapse_to_one_link_per_field_pair() -> None:
+    store = InMemoryEventStore()
+    events: list[CanonicalEvent] = []
+    for n in range(300):
+        value = f"{n + 1:04d}"
+        at = NOW - timedelta(days=3) + timedelta(minutes=5 * n)
+        events.append(
+            event(
+                f"a{n}",
+                "sys_a",
+                "tpl_a",
+                at,
+                [
+                    ("order_id", "raw", value, "9999"),
+                    ("order_id", "alnum", value, "9999"),
+                    ("merchant_ref", "raw", f"X9-{n:04d}", "A9-9999"),
+                    ("merchant_ref", "alnum", f"X9{n:04d}", "A99999"),
+                ],
+            )
+        )
+        events.append(
+            event(
+                f"b{n}",
+                "sys_b",
+                "tpl_b",
+                at + timedelta(hours=1),
+                [("order_ref", "digits.0", value, "9999"), ("order_ref", "alnum", value, "9999")],
+            )
+        )
+    store.add_events(events, stored_at=NOW)
+    link_pass, links, _entities, _recorder, _hook = make_pass(store)
+    report = link_pass.run(TENANT, full=True, now=NOW)
+    stored = links.list_links(TENANT)
+    by_fields = {(link.a.field_ref, link.b.field_ref, link.link_type): link for link in stored}
+    assert len(stored) == len(by_fields) == 2, "one row per field pair and type"
+    exact = by_fields[(ORDER_ID.field_ref, ORDER_REF.field_ref, LinkType.EXACT)]
+    assert exact.a.form == "raw", "the representative has the most raw ends"
+    assert exact.b.form in ("digits.0", "alnum")
+    variants = exact.extra["form_variants"]
+    assert len(variants) == 3
+    assert all(len(v) == 3 and 0.0 <= v[2] <= 1.0 for v in variants)
+    assert {tuple(v[:2]) for v in variants} >= {("alnum", "alnum")}
+    bridge = by_fields[(MERCHANT.field_ref, ORDER_ID.field_ref, LinkType.BRIDGE)]
+    assert (bridge.a.form, bridge.b.form) == ("raw", "raw")
+    assert len(bridge.extra["form_variants"]) == 3
+    assert report.proposed == 2
+
+    # A decision on the representative sticks to the field pair across passes.
+    link_pass.review.accept(TENANT, exact.id, actor="alice", expected_version=exact.version)
+    link_pass.run(TENANT, full=True, now=NOW)
+    assert len(links.list_links(TENANT)) == 2
+    accepted = links.get(TENANT, exact.id)
+    assert accepted is not None and accepted.status == LinkStatus.ACCEPTED
+
+
 # -- the sentence --------------------------------------------------------------------------------
 
 PO = FieldForm("sys_warehouse/tpl_po/po_num", "raw")

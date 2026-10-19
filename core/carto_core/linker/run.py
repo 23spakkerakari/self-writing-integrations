@@ -12,7 +12,10 @@ staleness and families over the window ``[now - window_days, now + 1 day)``:
    :class:`~carto_core.linker.score.Scorer`; a pair a hard filter discards is counted and
    dropped unless it is already a decided link, whose evidence is still refreshed so a reviewer
    sees why it decayed;
-4. :meth:`ReviewService.propose` upserts proposals, refreshes evidence, applies the re-proposal
+4. :func:`collapse_form_variants` keeps one link per field pair and type (the edge's ``raw``,
+   ``norm``, ``alnum`` and ``digits.k`` forms find the same pair several times; the reviewer
+   decides once, the other form pairs sit behind Details), then
+   :meth:`ReviewService.propose` upserts proposals, refreshes evidence, applies the re-proposal
    and staleness rules and auto-accept when enabled;
 5. :class:`~carto_core.linker.families.FamilyBuilder` rebuilds the entity families;
 6. ``composite_hook`` (package D, :meth:`~carto_core.linker.composite.CompositeMatcher.hook`)
@@ -25,7 +28,7 @@ and stored with the evidence; nothing in it is a token (spec 2.3 invariant 2).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -56,9 +59,68 @@ if TYPE_CHECKING:
     from carto_core.store.model import EventStore
     from carto_core.worker import WorkerContext
 
-__all__ = ["CompositeHook", "LinkPass", "LinkReport", "ProfileSource"]
+__all__ = [
+    "CompositeHook",
+    "LinkPass",
+    "LinkReport",
+    "ProfileSource",
+    "collapse_form_variants",
+]
 
 log = get_logger(component="linker")
+
+
+def _variant_rank(
+    item: ScoredLink, decided: set[tuple[FieldForm, FieldForm]]
+) -> tuple[int, int, float, FieldForm, FieldForm]:
+    raws = sum(1 for form in (item.a.form, item.b.form) if form == "raw")
+    return (0 if (item.a, item.b) in decided else 1, -raws, -item.score, item.a, item.b)
+
+
+def collapse_form_variants(
+    scored: Sequence[ScoredLink], *, decided: Collection[tuple[FieldForm, FieldForm]] = ()
+) -> list[ScoredLink]:
+    """One link per unordered field pair and link type. The edge emits several forms of one
+    field (``raw``, ``norm``, ``alnum``, ``digits.k``) and the join finds the same pair three or
+    four times over; the reviewer decides once. The representative is a pair already decided
+    (so the decision keeps applying to the field pair), else the pair with the most ``raw``
+    ends, then the highest score; the other form pairs are kept in
+    ``extra["form_variants"]`` as ``[form_a, form_b, score]`` for the Details view."""
+    decided_pairs = set(decided)
+    groups: dict[tuple[str, str, str], list[ScoredLink]] = {}
+    for item in scored:
+        first, second = sorted((item.a.field_ref, item.b.field_ref))
+        groups.setdefault((first, second, item.link_type.value), []).append(item)
+    out: list[ScoredLink] = []
+    for members in groups.values():
+        members.sort(key=lambda item: _variant_rank(item, decided_pairs))
+        head, *rest = members
+        if not rest:
+            out.append(head)
+            continue
+        variants = [
+            [
+                other.a.form if other.a.field_ref == head.a.field_ref else other.b.form,
+                other.b.form if other.a.field_ref == head.a.field_ref else other.a.form,
+                round(other.score, 6),
+            ]
+            for other in rest
+        ]
+        out.append(
+            ScoredLink(
+                a=head.a,
+                b=head.b,
+                link_type=head.link_type,
+                role=head.role,
+                direction=head.direction,
+                score=head.score,
+                features=head.features,
+                affected_volume=head.affected_volume,
+                extra=dict(head.extra) | {"form_variants": variants},
+            )
+        )
+    return out
+
 
 CompositeHook = Callable[..., "Sequence[ScoredLink] | None"]
 """Package D's entry point, called as ``hook(tenant_id=..., window=..., links=...)`` with the
@@ -285,6 +347,7 @@ class LinkPass:
                 extra={},
             )
             scored.append(self._with_sentence(tenant_id, item, outcome.filter_reason))
+        scored = collapse_form_variants(scored, decided=set(existing))
         proposed = self._review.propose(tenant_id, scored, now=at)
         families = self._families.rebuild(tenant_id, now=at)
         composite_links = 0

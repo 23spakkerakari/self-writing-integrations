@@ -252,3 +252,20 @@ def test_pair_domain_is_the_smaller_end_or_unknown() -> None:
 def test_bridge_share_without_profile_or_values() -> None:
     empty = bridge_features(row(distinct_a=0, single_b_a=0), {})
     assert empty.c_ab == 0.0 and empty.c_ba == 1.0
+
+
+def test_one_to_very_many_bridge_is_a_batch() -> None:
+    # Fourteen manifests, seven hundred shipments: every shipment names one manifest.
+    manifest_like = row(events=700, distinct_a=14, single_b_a=0, distinct_b=700, single_a_b=700)
+    item = bridge_features(manifest_like, {})
+    score, role = bridge_outcome(0.99, LinkRole.TRANSACTION, item, SETTINGS, manifest_like)
+    assert role == LinkRole.BATCH
+    assert score == pytest.approx(0.99)
+    few = row(events=60, distinct_a=14, single_b_a=0, distinct_b=60, single_a_b=60)
+    _score, role = bridge_outcome(
+        0.9, LinkRole.TRANSACTION, bridge_features(few, {}), SETTINGS, few
+    )
+    assert role == LinkRole.ASSOCIATION, "4 per value is one-to-few, not a batch"
+    lenient = LinkerSettings(transaction_fanout_p99_max=4.0)
+    _score, role = bridge_outcome(0.9, LinkRole.TRANSACTION, bridge_features(few, {}), lenient, few)
+    assert role == LinkRole.BATCH, "the batch threshold is the p99 fan-out setting"
