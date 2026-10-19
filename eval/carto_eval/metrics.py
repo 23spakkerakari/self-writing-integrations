@@ -39,6 +39,8 @@ OPEN_ENDED_FAULT_SPAN = timedelta(days=1)
 
 FieldKey = tuple[str, str, str, str]
 """A field and a form as a plain tuple: system, source, field, form."""
+FieldOnlyKey = tuple[str, str, str]
+"""A field as a plain tuple: system, source, field (family members, spec 9.6)."""
 LinkPair = tuple[FieldKey, FieldKey]
 """The two ends of a link in sorted order, so direction does not matter."""
 HopPair = tuple[str, str]
@@ -72,6 +74,11 @@ def pairs(n: int) -> int:
 def field_key(ref: FieldRef, form: str) -> FieldKey:
     """The hashable identity of a (field, form) end."""
     return (ref.system_id, ref.source_id, ref.field, form)
+
+
+def field_only_key(ref: FieldRef) -> FieldOnlyKey:
+    """The hashable identity of a field, whatever form a link used (entity purity)."""
+    return (ref.system_id, ref.source_id, ref.field)
 
 
 def link_pair(a: FieldRef, form_a: str, b: FieldRef, form_b: str) -> LinkPair:
@@ -155,19 +162,22 @@ def entity_purity(
 ) -> PurityResult:
     """18.4 "Entity family purity".
 
-    The purity of one predicted family is the largest share of its distinct (field, form)
-    members that belong to a single true entity; a member of no true entity counts in the size
-    and in no share. The metric is the size-weighted mean over predicted families: the sum of
-    the largest counts over the sum of the sizes. Families without members are ignored; no
-    family at all gives None.
+    The purity of one predicted family is the largest share of its distinct field members that
+    belong to a single true entity; a member of no true entity counts in the size and in no
+    share. Members are fields (system, source, field): spec 9.6 builds families over fields and
+    the form is how a link matched, not another member, so ``order_ref`` reached as ``raw`` by
+    one link and as ``digits.0`` by another is one member (changed 2026-10-18 with the M2
+    engine; the truth's forms are the ones its links use). The metric is the size-weighted mean
+    over predicted families: the sum of the largest counts over the sum of the sizes. Families
+    without members are ignored; no family at all gives None.
     """
-    owners: dict[FieldKey, set[str]] = {}
+    owners: dict[FieldOnlyKey, set[str]] = {}
     for entity in truth_entities:
         for member in entity.fields:
-            owners.setdefault(field_key(member.ref, member.form), set()).add(entity.entity_id)
+            owners.setdefault(field_only_key(member.ref), set()).add(entity.entity_id)
     families = members = pure_members = 0
     for family in predicted_entities:
-        distinct = {field_key(member.ref, member.form) for member in family.fields}
+        distinct = {field_only_key(member.ref) for member in family.fields}
         if not distinct:
             continue
         families += 1

@@ -273,14 +273,15 @@ def test_purity_is_one_for_the_truth_itself_and_undefined_without_families() -> 
     assert metrics.entity_purity(truth, [family("F0")]).purity is None
 
 
-def test_purity_counts_a_repeated_member_once_and_forms_separately() -> None:
+def test_purity_counts_a_repeated_member_once_whatever_its_forms() -> None:
     # F lists m1 twice and m4 once: distinct members m1, m4, one of them in E1: 1 of 2.
     truth = [entity("E1", member("m1")), entity("E2", member("m4"))]
     predicted = [family("F", member("m1"), member("m1"), member("m4"))]
     assert metrics.entity_purity(truth, predicted).purity == 0.5
-    # m1 in form digits.0 is a different member than m1 raw: it belongs to no entity
+    # m1 in form digits.0 is the same field as m1 raw (spec 9.6 families are over fields):
+    # one member, in E1, so the family is pure
     predicted = [family("F", member("m1"), member("m1", "digits.0"))]
-    assert metrics.entity_purity(truth, predicted).purity == 0.5
+    assert metrics.entity_purity(truth, predicted).purity == 1.0
 
 
 def test_purity_member_in_two_true_entities_counts_for_both() -> None:
