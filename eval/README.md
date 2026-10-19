@@ -54,15 +54,21 @@ make bench-linker                                      # spec 17 scale, measured
 
 The policy, stated in every report: the product keeps auto-accept off; in an eval run every
 engine proposal at or above `LinkerSettings.proposal_threshold` whose role is `transaction`,
-and every bridge, counts as accepted for family building, so entity purity measures the engine
-and not a simulated reviewer; composite links count only toward the composite metrics;
-association role links are reported but join no family; an exact link whose role is `batch` is
-reported as a batch key link (truth type `batch`). Two more rules come from the truth's
-vocabulary: the truth knows no templates, so an engine link between two templates' copies of
-one source field is counted (`same_field_pairs`) and not scored; and the truth names one form
-pair per link while the engine proposes every form pair that shares tokens, so per field pair
-the engine link with the most `raw` ends (then the highest score) stands as the prediction and
-the rest are counted as `form_variants`. The field-mapping section lists every truth link field
+exact or bridge, counts as accepted for family building, so entity purity measures the engine
+and not a simulated reviewer. Families are connected components over fields
+(system, source, field), whatever forms the links use, as the engine's are
+(`KeyLink.is_usable_for_families`); each member is reported once, as `raw` when a link reaches
+it as `raw` and else in the form most of its links use; a bridge of role `batch` or
+`association` (a file to its shipments) joins no family (spec 9.6, 9.7). Composite links count
+only toward the composite metrics; association role links are reported but join no family; an
+exact link whose role is `batch` is reported as a batch key link (truth type `batch`). Two more
+rules come from the truth's vocabulary: the truth knows no templates, so an engine link between
+two templates' copies of one source field is counted (`same_field_pairs`) and not scored, and a
+second link of the same field pair from another template is a `template_duplicate`; and the
+truth names one form pair per link, so per field pair the engine link with the most `raw` ends
+(then the highest score) stands as the prediction and the rest are counted as `form_variants`
+(zero since the linker itself proposes one link per field pair). The field-mapping section
+lists every truth link field
 no engine field reached (a naming mismatch), every truth link field reached but touched by no
 prediction (a miss), every tokenized engine field the truth does not name, and every engine
 field that could not be mapped, so nothing is silently scored as a miss.

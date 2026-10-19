@@ -61,6 +61,7 @@ __all__ = [
     "run_fit",
     "truth_field_pairs",
     "weights_version",
+    "write_weights",
 ]
 
 POSITIVE_TYPES: Final[frozenset[str]] = frozenset({"exact", "bridge"})
@@ -314,6 +315,17 @@ def evaluate(samples: Sequence[LabeledSample], weights: Weights, threshold: floa
     )
 
 
+def write_weights(out: Path, weights: Weights) -> None:
+    """Write the weights document and read it back through :func:`load_weights`."""
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(weights.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
+        load_weights(out)  # the file must read back as a valid weights document
+    except OSError as exc:
+        msg = f"cannot write {out}: {type(exc).__name__}"
+        raise FitError(msg) from exc
+
+
 def run_fit(
     scenarios: Sequence[str],
     *,
@@ -344,13 +356,7 @@ def run_fit(
         )
         collected.append(collect_samples(prepared, core))
     weights = fit(collected, today=today)
-    try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(weights.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
-        load_weights(out)  # the file must read back as a valid weights document
-    except OSError as exc:
-        msg = f"cannot write {out}: {type(exc).__name__}"
-        raise FitError(msg) from exc
+    write_weights(out, weights)
     threshold = core.linker.proposal_threshold
     per_scenario = {item.scenario: evaluate(item.samples, weights, threshold) for item in collected}
     overall = evaluate([s for item in collected for s in item.samples], weights, threshold)

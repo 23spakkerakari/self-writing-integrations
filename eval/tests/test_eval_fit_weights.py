@@ -1,6 +1,7 @@
-"""``carto-eval fit-weights`` (plan M2 decision 4; ADR 0049 item 1) on a small shop run: the
-samples are labelled from truth after mapping, the fitted file is a valid weights document that
-``load_weights`` accepts and the scorer runs with, the version names the data, and core never
+"""``carto-eval fit-weights`` (plan M2 decision 4; ADR 0049 item 1): the samples of a small shop
+run are labelled from truth after mapping (field pair, forms ignored; same-field pairs left
+out), a fit over mixed samples writes a weights document that ``load_weights`` accepts and the
+scorer runs with, the version names the data, a one-class sample set is refused, and core never
 imports scikit-learn. ``bench-linker`` runs at a toy size."""
 
 from __future__ import annotations
@@ -17,77 +18,87 @@ from carto_core.linker.weights import FEATURE_NAMES, Weights, load_weights
 from carto_core.settings import CoreSettings, LinkerSettings
 from carto_edge.pipeline.pii import RegexDetector
 from carto_eval import bench_linker, cli, fit_weights
+from carto_eval.driver import prepare
 from carto_eval.fit_weights import LabeledSample, ScenarioSamples
+from carto_simulator.api import GenerationRequest
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "core" / "carto_core"
 TODAY = datetime(2026, 10, 18, tzinfo=UTC)
 
 
+def sample(label: bool, **features: float) -> LabeledSample:
+    vector = dict.fromkeys(FEATURE_NAMES, 0.0) | features
+    return LabeledSample("x", vector, label, "lsh", "sys/tpl/a|raw", "sys/tpl/b|raw")
+
+
+def mixed() -> ScenarioSamples:
+    """Clean links against coincidental overlaps, the way the shipped weights describe them."""
+    positives = [
+        sample(True, c_ab=0.9 + i / 100, c_ba=0.85, log_n_match=6.0, lag_consistency=0.9)
+        for i in range(6)
+    ]
+    negatives = [
+        sample(False, c_ab=0.2 + i / 100, c_ba=0.15, log_n_match=4.0, chance_ratio=0.3)
+        for i in range(6)
+    ]
+    return ScenarioSamples("x", 3, tuple(positives + negatives), 12, 0)
+
+
 @pytest.fixture(scope="module")
-def fitted(tmp_path_factory: pytest.TempPathFactory) -> fit_weights.FitResult:
+def collected(tmp_path_factory: pytest.TempPathFactory) -> fit_weights.ScenarioSamples:
     root = tmp_path_factory.mktemp("fit")
-    return fit_weights.run_fit(
-        ["shop"],
-        sim_root=root,
-        out=root / "weights" / "fitted.json",
-        days=3,
-        daily_volume=200,
-        settings=CoreSettings(_env_file=None),
+    prepared = prepare(
+        GenerationRequest(scenario="shop", days=3, daily_volume=200),
+        root / "shop",
         detector=RegexDetector(),
-        today=TODAY,
     )
+    return fit_weights.collect_samples(prepared, CoreSettings(_env_file=None))
 
 
-def test_fit_writes_a_valid_weights_file(fitted: fit_weights.FitResult) -> None:
-    weights = load_weights(fitted.path)
-    assert weights == fitted.weights
+def test_samples_are_labelled_from_truth(collected: fit_weights.ScenarioSamples) -> None:
+    assert collected.scenario == "shop" and collected.days == 3
+    assert collected.candidates >= len(collected.samples) + collected.same_field
+    assert collected.positives > 0
+    assert all(set(item.vector) == set(FEATURE_NAMES) for item in collected.samples)
+    assert all("t1." not in item.a and "t1." not in item.b for item in collected.samples)
+    assert {item.source for item in collected.samples} <= {"lsh", "bridge"}
+    # the shipped weights propose the labelled positives at the proposal threshold
+    from carto_core.linker.weights import DEFAULT_WEIGHTS  # noqa: PLC0415
+
+    metrics = fit_weights.evaluate(collected.samples, DEFAULT_WEIGHTS, 0.5)
+    assert metrics.positives == collected.positives
+    assert metrics.recall is not None and metrics.recall > 0.5
+
+
+def test_fit_writes_a_valid_weights_file(tmp_path: Path) -> None:
+    weights = fit_weights.fit([mixed()], today=TODAY)
+    out = tmp_path / "weights" / "fitted.json"
+    fit_weights.write_weights(out, weights)
+    loaded = load_weights(out)
+    assert loaded == weights
     assert weights.version.startswith("fitted-20261018-") and len(weights.version) == 24
-    assert weights.fitted_on is not None and weights.fitted_on.startswith("shop (3 days, ")
+    assert weights.fitted_on == "x (3 days, 12 pairs)"
     assert set(weights.coefficients) == set(FEATURE_NAMES)
-    document = json.loads(fitted.path.read_text(encoding="utf-8"))
+    assert weights.coefficients["c_ab"] > 0 > weights.coefficients["chance_ratio"]
+    document = json.loads(out.read_text(encoding="utf-8"))
     assert Weights.model_validate(document) == weights
     # the scorer accepts the fitted set as it accepts the shipped one
-    scorer = Scorer(LinkerSettings(), weights)
-    assert scorer.weights.version == weights.version
-    assert "wrote" in fitted.lines()[-1]
-
-
-def test_samples_are_labelled_from_truth(fitted: fit_weights.FitResult) -> None:
-    (scenario,) = fitted.scenarios
-    assert scenario.scenario == "shop" and scenario.days == 3
-    assert scenario.candidates > scenario.positives > 0
-    assert scenario.same_field > 0  # order_id across the order log's templates
-    assert all(set(sample.vector) == set(FEATURE_NAMES) for sample in scenario.samples)
-    assert all("t1." not in sample.a and "t1." not in sample.b for sample in scenario.samples)
-    assert {sample.source for sample in scenario.samples} <= {"lsh", "bridge"}
-    overall = fitted.overall
-    assert overall.positives == scenario.positives
-    assert overall.precision is None or 0.0 <= overall.precision <= 1.0
-    assert overall.recall is None or 0.0 <= overall.recall <= 1.0
+    assert Scorer(LinkerSettings(), weights).weights.version == weights.version
+    metrics = fit_weights.evaluate(mixed().samples, weights, 0.5)
+    assert metrics.precision == 1.0 and metrics.recall == 1.0
 
 
 def test_fit_needs_both_classes() -> None:
-    one = ScenarioSamples(
-        "x",
-        1,
-        tuple(
-            LabeledSample("x", dict.fromkeys(FEATURE_NAMES, 0.5), True, "lsh", "a", "b")
-            for _ in range(3)
-        ),
-        3,
-        0,
-    )
+    one = ScenarioSamples("x", 1, tuple(sample(True, c_ab=0.5) for _ in range(3)), 3, 0)
     with pytest.raises(fit_weights.FitError, match="both classes"):
         fit_weights.fit([one], today=TODAY)
 
 
 def test_version_is_a_function_of_the_samples() -> None:
-    sample = LabeledSample("x", dict.fromkeys(FEATURE_NAMES, 0.5), True, "lsh", "a", "b")
-    other = LabeledSample("x", dict.fromkeys(FEATURE_NAMES, 0.4), True, "lsh", "a", "b")
-    first = fit_weights.weights_version([sample], TODAY)
-    assert first == fit_weights.weights_version([sample], TODAY)
-    assert first != fit_weights.weights_version([other], TODAY)
+    first = fit_weights.weights_version([sample(True, c_ab=0.5)], TODAY)
+    assert first == fit_weights.weights_version([sample(True, c_ab=0.5)], TODAY)
+    assert first != fit_weights.weights_version([sample(True, c_ab=0.4)], TODAY)
     assert first.startswith("fitted-20261018-")
 
 

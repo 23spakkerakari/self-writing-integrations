@@ -4,6 +4,7 @@ same-field and form-collapse rules, the policy families and the report."""
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from carto_eval.mapping import (
@@ -11,6 +12,7 @@ from carto_eval.mapping import (
     FieldMapping,
     collapse_forms,
     family_usable,
+    member_form,
     policy_families,
     policy_statement,
 )
@@ -138,7 +140,9 @@ def test_map_links_applies_the_policy_and_the_truth_vocabulary() -> None:
         record("l5-t2", o2, wms, score=0.96),  # the same truth pair from another template
         record("assoc", o1, pay, score=0.8, role="association"),
         record("batch", cart, pay, score=0.7, role="batch"),
-        record("bridge", o1, cart, score=0.6, link_type="bridge", role="association"),
+        record("bridge", o1, cart, score=0.6, link_type="bridge"),
+        record("batch-bridge", cart, wms, score=0.9, link_type="bridge", role="batch"),
+        record("assoc-bridge", pay, wms_alnum, score=0.9, link_type="bridge", role="association"),
         record("comp", pay, wms, score=0.5, link_type="composite"),
         record("low", cart, wms, score=0.3),
         record("rej", cart, pay, status="rejected"),
@@ -153,13 +157,14 @@ def test_map_links_applies_the_policy_and_the_truth_vocabulary() -> None:
     assert by_id["assoc"].link.link_type == "exact" and not by_id["assoc"].family_usable
     assert by_id["batch"].link.link_type == "batch" and not by_id["batch"].family_usable
     assert by_id["bridge"].link.link_type == "bridge" and by_id["bridge"].family_usable
+    assert not by_id["batch-bridge"].family_usable and not by_id["assoc-bridge"].family_usable
     assert by_id["comp"].link.link_type == "composite" and not by_id["comp"].family_usable
     assert not by_id["low"].family_usable
     assert "same" not in by_id and "rej" not in by_id and "mask" not in by_id
     assert report.same_field_pairs == 1
-    assert report.form_variants == 2
+    assert report.form_variants == 1 and report.template_duplicates == 1
     assert report.dropped_links == (("rej", "status rejected"), ("mask", "masked name"))
-    assert report.predicted_links == len(mapped) == 6
+    assert report.predicted_links == len(mapped) == 8
     assert report.family_links == 2 and report.composite_links == 1
     families = policy_families(mapped)
     assert len(families) == 1
@@ -242,5 +247,44 @@ def test_family_usable_rules() -> None:
     assert not family_usable("exact", "transaction", 0.49, 0.5)
     assert not family_usable("exact", "association", 0.9, 0.5)
     assert not family_usable("exact", "batch", 0.9, 0.5)
-    assert family_usable("bridge", "association", 0.9, 0.5)
+    assert family_usable("bridge", "transaction", 0.9, 0.5)
+    assert not family_usable("bridge", "association", 0.9, 0.5)
+    assert not family_usable("bridge", "batch", 0.9, 0.5)
     assert not family_usable("composite", "transaction", 0.9, 0.5)
+
+
+def test_policy_families_are_keyed_by_field_and_keep_the_forms() -> None:
+    """A field linked through raw on one side and digits.0 on another sits in one family (the
+    Order family must not split into a raw family and a digits family); a batch-role bridge
+    (a file to its shipments) never merges the file's entity into it."""
+    m = mapping()
+    o1 = end("sys_orders", "tpl_o1", "order_id")
+    o1_digits = end("sys_orders", "tpl_o1", "order_id", "digits.0")
+    cart = end("sys_orders", "tpl_o1", "cart_id")
+    wms = end("sys_warehouse", "tpl_wms", "order_ref", "digits.0")
+    pay = end("sys_payments", "tpl_p1", "merchantRef")
+    stock = end("sys_payments", "tpl_p1", "stock")
+    mapped, _report = m.map_links(
+        [
+            record("a", cart, o1),
+            record("b", o1_digits, wms),
+            record("c", pay, stock, link_type="bridge", role="batch"),
+            record("d", wms, pay),
+        ],
+        threshold=0.5,
+    )
+    families = policy_families(mapped)
+    assert len(families) == 1
+    members = {(f.ref.field, f.form) for f in families[0].fields}
+    # order_id is reached as raw (by cart_id) and digits.0 (by order_ref): one member, raw
+    assert members == {
+        ("cart_id", "raw"),
+        ("order_id", "raw"),
+        ("order_ref", "digits.0"),
+        ("merchantRef", "raw"),
+    }
+    assert member_form(Counter({"alnum": 2, "digits.0": 2})) == "alnum"
+    assert member_form(Counter({"alnum": 1, "raw": 1})) == "raw"
+    assert "template duplicates" in _report.to_markdown()
+    assert "transaction, exact or bridge" in policy_statement(0.5)
+    assert "joins no family" in policy_statement(0.5)

@@ -34,10 +34,13 @@ item 2 (:func:`family_usable`) and two rules the truth's vocabulary forces:
   ``(field, form)`` pairs, so a link the engine found only in a derived form the truth does not
   use still scores as a miss plus a false positive.
 
-:meth:`FieldMapping.map_entities` maps the engine's own families, :func:`policy_families`
-builds the families the policy implies, and :class:`MappingReport` lists every engine field that
-matched no truth field and every truth link field no engine field reached, rendered as a
-Markdown section, so a naming mismatch is visible and never silently scored as a miss.
+The linker itself now proposes one link per field pair (its ``extra["form_variants"]``
+lists the others), so the collapse is a no-op on current engine output and still counts what it
+removed. :meth:`FieldMapping.map_entities` maps the engine's own families,
+:func:`policy_families` builds the families the policy implies (over fields, transaction role
+only, as ``KeyLink.is_usable_for_families``), and :class:`MappingReport` lists every engine
+field that matched no truth field and every truth link field no engine field reached, rendered
+as a Markdown section, so a naming mismatch is visible and never silently scored as a miss.
 
 The ground truth is read here, in the eval harness; nothing of it reaches core.
 """
@@ -242,6 +245,8 @@ class MappingReport:
     """Engine links between two templates' copies of one source field (not scored)."""
     form_variants: int
     """Engine links collapsed into another form pair of the same field pair (not scored)."""
+    template_duplicates: int
+    """Engine links of the same field pair and forms from another template (not scored)."""
     ambiguous_templates: Mapping[str, Mapping[str, int]]
     locator_mismatches: int
     engine_links: int
@@ -263,6 +268,7 @@ class MappingReport:
             "pass1_only_fields": self.pass1_only_fields,
             "same_field_pairs": self.same_field_pairs,
             "form_variants": self.form_variants,
+            "template_duplicates": self.template_duplicates,
             "ambiguous_templates": {k: dict(v) for k, v in self.ambiguous_templates.items()},
             "locator_mismatches": self.locator_mismatches,
             "engine_links": self.engine_links,
@@ -283,7 +289,8 @@ class MappingReport:
                 f"{self.pass1_only_fields} of them in templates without events (pass 1 only). "
                 f"{self.engine_links} engine links: {self.predicted_links} scored as predictions "
                 f"({self.family_links} usable for families, {self.composite_links} composite), "
-                f"{self.form_variants} form variants of a scored field pair and "
+                f"{self.form_variants} form variants of a scored field pair, "
+                f"{self.template_duplicates} template duplicates of one and "
                 f"{self.same_field_pairs} same-field pairs across templates not scored; "
                 f"{self.locator_mismatches} locator mismatches."
             ),
@@ -342,23 +349,30 @@ def _listed(title: str, items: Sequence[str]) -> list[str]:
 
 
 def family_usable(link_type: str, role: str, score: float, threshold: float) -> bool:
-    """ADR 0049 item 2: proposed or accepted exact links of role ``transaction`` and bridges at
-    or above the proposal threshold count as accepted for family building; composite links
-    and association or batch role exact links do not."""
+    """ADR 0049 item 2 as the engine applies it (``KeyLink.is_usable_for_families``): proposed
+    or accepted exact links and bridges of role ``transaction`` at or above the proposal
+    threshold count as accepted for family building. A bridge of role ``batch`` (one file to
+    many shipments) or ``association`` never merges families (spec 9.6, 9.7); composite links
+    and association or batch role exact links do not either."""
     if score < threshold or link_type == "composite":
         return False
-    return role == "transaction" or link_type == "bridge"
+    return role == "transaction"
 
 
 def policy_statement(threshold: float) -> str:
     return (
         "Acceptance policy (ADR 0049 item 2): the product keeps auto-accept off; here every "
         f"engine proposal at or above the proposal threshold {threshold:.2f} whose role is "
-        "transaction, and every bridge, counts as accepted for family building, so entity purity "
-        "measures the engine and not a simulated reviewer. Composite links count only toward the "
-        "composite link metrics; association role links are reported but join no family; an "
-        "exact link whose role is batch is reported as a batch key link (truth link type "
-        "`batch`). The truth knows fields by source and names one form pair per link, so a link "
+        "transaction, exact or bridge, counts as accepted for family building, so entity purity "
+        "measures the engine and not a simulated reviewer. Families are connected components "
+        "over fields (system, source, field), whatever forms the links use, and each member is "
+        "reported once, as raw when a link reaches it as raw and else in the form most of its "
+        "links use; a bridge of role batch or association (a file to its shipments) joins no "
+        "family, as in the engine (spec 9.6, 9.7). Composite links count "
+        "only toward the composite link metrics; association role links are reported but join "
+        "no family; an exact link whose role is batch is reported as a batch key link (truth "
+        "link type `batch`). The truth knows fields by source and names one form pair per link, "
+        "so a link "
         "between two templates' copies of one field is not scored and, per field pair, the "
         "engine link with the most raw ends (then the highest score) stands for its form "
         "variants."
@@ -510,6 +524,14 @@ class FieldMapping:
                 )
             )
         mapped = collapse_forms(candidates)
+        kept = {_collapse_key(item): item for item in mapped}
+        variants = sum(
+            1
+            for item in candidates
+            if item not in mapped
+            and (item.link.form_a, item.link.form_b)
+            != (kept[_collapse_key(item)].link.form_a, kept[_collapse_key(item)].link.form_b)
+        )
         for item in mapped:
             by_type[item.engine_type] += 1
             for ref in (item.link.a, item.link.b):
@@ -521,7 +543,8 @@ class FieldMapping:
             len(engine_links),
             by_type,
             same_field=same_field,
-            form_variants=len(candidates) - len(mapped),
+            form_variants=variants,
+            template_duplicates=len(candidates) - len(mapped) - variants,
         )
         return mapped, report
 
@@ -556,6 +579,7 @@ class FieldMapping:
         *,
         same_field: int = 0,
         form_variants: int = 0,
+        template_duplicates: int = 0,
     ) -> MappingReport:
         unmappable: list[tuple[str, str]] = []
         not_in_truth: list[tuple[str, str]] = []
@@ -594,6 +618,7 @@ class FieldMapping:
             pass1_only_fields=pass1_only,
             same_field_pairs=same_field,
             form_variants=form_variants,
+            template_duplicates=template_duplicates,
             ambiguous_templates={
                 f"{system}/{template}": counts
                 for (system, template), counts in sorted(self._ambiguous.items())
@@ -626,19 +651,25 @@ def _collapse_rank(item: MappedLink) -> tuple[int, float, str]:
     return (-raws, -item.link.score, item.link_id)
 
 
+def _collapse_key(item: MappedLink) -> tuple[TruthField, TruthField, str]:
+    link = item.link
+    first, second = sorted(
+        (
+            (link.a.system_id, link.a.source_id, link.a.field),
+            (link.b.system_id, link.b.source_id, link.b.field),
+        )
+    )
+    return (first, second, item.engine_type)
+
+
 def collapse_forms(mapped: Sequence[MappedLink]) -> list[MappedLink]:
     """One link per unordered pair of truth fields and engine link type (module docstring):
-    the most ``raw`` ends, then the highest score, then the link id. Order is kept."""
+    the most ``raw`` ends, then the highest score, then the link id. Order is kept. With the
+    linker proposing one link per field pair this removes template duplicates only (the same
+    source field in several templates)."""
     best: dict[tuple[TruthField, TruthField, str], MappedLink] = {}
     for item in mapped:
-        link = item.link
-        first, second = sorted(
-            (
-                (link.a.system_id, link.a.source_id, link.a.field),
-                (link.b.system_id, link.b.source_id, link.b.field),
-            )
-        )
-        key = (first, second, item.engine_type)
+        key = _collapse_key(item)
         current = best.get(key)
         if current is None or _collapse_rank(item) < _collapse_rank(current):
             best[key] = item
@@ -646,12 +677,24 @@ def collapse_forms(mapped: Sequence[MappedLink]) -> list[MappedLink]:
     return [item for item in mapped if id(item) in keep]
 
 
-def policy_families(mapped: Sequence[MappedLink]) -> list[PredictedEntity]:
-    """Connected components over the ``family_usable`` links (ADR 0049 item 2), one
-    :class:`PredictedEntity` each, id ``fam_<n>`` in member order."""
-    parent: dict[tuple[str, str, str, str], tuple[str, str, str, str]] = {}
+def member_form(counts: Counter[str]) -> str:
+    """The one form a family member is reported with (see :func:`policy_families`)."""
+    if counts.get("raw"):
+        return "raw"
+    return min(counts, key=lambda form: (-counts[form], form)) if counts else "raw"
 
-    def find(key: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+
+def policy_families(mapped: Sequence[MappedLink]) -> list[PredictedEntity]:
+    """Connected components over the ``family_usable`` links (ADR 0049 item 2), keyed by field
+    ``(system, source, field)`` so a field linked through ``raw`` here and ``digits.0`` there
+    sits in one family (the engine's families are over fields too). The metric counts members
+    as ``(field, form)``, so each field is one member with the form its links use: ``raw`` when
+    any usable link reaches it as ``raw``, else the form most of them use (ties by name). One
+    :class:`PredictedEntity` per component, id ``fam_<n>`` in member order."""
+    parent: dict[TruthField, TruthField] = {}
+    forms: dict[TruthField, Counter[str]] = defaultdict(Counter)
+
+    def find(key: TruthField) -> TruthField:
         root = parent.setdefault(key, key)
         while root != parent[root]:
             root = parent[root]
@@ -663,13 +706,16 @@ def policy_families(mapped: Sequence[MappedLink]) -> list[PredictedEntity]:
         if not item.family_usable:
             continue
         link = item.link
-        first, second = link_pair(link.a, link.form_a, link.b, link.form_b)
+        first = (link.a.system_id, link.a.source_id, link.a.field)
+        second = (link.b.system_id, link.b.source_id, link.b.field)
+        forms[first][link.form_a] += 1
+        forms[second][link.form_b] += 1
         root_a, root_b = find(first), find(second)
         if root_a != root_b:
             if root_b < root_a:
                 root_a, root_b = root_b, root_a
             parent[root_b] = root_a
-    groups: dict[tuple[str, str, str, str], set[tuple[str, str, str, str]]] = defaultdict(set)
+    groups: dict[TruthField, set[TruthField]] = defaultdict(set)
     for key in list(parent):
         groups[find(key)].add(key)
     entities: list[PredictedEntity] = []
@@ -679,9 +725,10 @@ def policy_families(mapped: Sequence[MappedLink]) -> list[PredictedEntity]:
                 entity_id=f"fam_{index:04d}",
                 fields=[
                     EntityField(
-                        ref=FieldRef(system_id=system, source_id=source, field=name), form=form
+                        ref=FieldRef(system_id=system, source_id=source, field=name),
+                        form=member_form(forms[(system, source, name)]),
                     )
-                    for system, source, name, form in members
+                    for system, source, name in members
                 ],
             )
         )
