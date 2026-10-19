@@ -13,8 +13,10 @@ DAYS ?= 14
 SEED ?= 1
 SIM_OUT ?= sim-out
 EVAL_OUT ?= eval/reports
+ENGINE ?= memory
+WEIGHTS_OUT ?= eval/weights/fitted.json
 
-.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval leak bench bench-gateway analyze sec sbom images dev dev-down release clean web-setup web-check web-e2e
+.PHONY: help setup lint fmt type test test-unit test-integration cov check schema schema-check sim eval eval-engine fit-weights bench-linker leak bench bench-gateway analyze sec sbom images dev dev-down release clean web-setup web-check web-e2e
 
 help: ## Show targets
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -58,6 +60,15 @@ sim: ## Generate simulator data: make sim SCENARIO=shop DAYS=14 SEED=1
 
 eval: ## Score engine output (or the empty prediction) against ground truth: make eval SCENARIO=shop
 > $(UV) run carto-eval run --scenario $(SCENARIO) --days $(DAYS) --seed $(SEED) --sim-out $(SIM_OUT)/$(SCENARIO) --out $(EVAL_OUT)
+
+eval-engine: ## Analyze, load, discover, map and score in one run (M2): make eval-engine SCENARIO=shop DAYS=14 ENGINE=memory (people_ops: pass DAYS=28)
+> $(UV) run carto-eval run --engine $(ENGINE) --scenario $(SCENARIO) --days $(DAYS) --seed $(SEED) --sim-out $(SIM_OUT)/$(SCENARIO) --out $(EVAL_OUT)
+
+fit-weights: ## Fit the linker's logistic weights on scenario truth (ADR 0049): writes $(WEIGHTS_OUT)
+> $(UV) run carto-eval fit-weights --scenario shop --scenario people_ops --seed $(SEED) --sim-out $(SIM_OUT) --out $(WEIGHTS_OUT) --reuse-bundle
+
+bench-linker: ## Linker at the spec 17 scale (50 systems x 1,000 candidate fields), measured not gating
+> $(UV) run carto-eval bench-linker
 
 analyze: ## Offline analyzer over the simulator output: make analyze SCENARIO=shop (writes $(SIM_OUT)/$(SCENARIO).carto)
 > AS_OF="$$($(UV) run carto-sim as-of --out $(SIM_OUT)/$(SCENARIO))" && $(UV) run carto-edge analyze --config simulator/analyze.$(SCENARIO).yaml --input $(SIM_OUT)/$(SCENARIO) --out $(SIM_OUT)/$(SCENARIO).carto --state-dir $(SIM_OUT)/$(SCENARIO).edge-state --locator-map --as-of "$$AS_OF"
