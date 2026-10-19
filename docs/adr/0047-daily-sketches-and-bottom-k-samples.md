@@ -24,6 +24,10 @@ the same code path.
   and merges by taking the smallest `k` of the union.
 - Two bottom-k samples give an exact containment estimate of their union's smallest `k`, which
   the candidate generator uses to rank LSH candidates before the store join (ADR 0048).
+- A bottom-k sample that holds fewer than `k` hashes is the whole token set, so the distinct
+  count is exact there and the HyperLogLog estimate is used only once the sample is saturated
+  (added 2026-10-18 after the first eval: a source with exactly 50 distinct values in the
+  window must not fall under the `min_distinct` floor on an estimate's error).
 - `q(field)` combines the distinct ratio, the top-shape share, the length stability and the
   low value concentration exactly as spec 9.1 lists them; the weights of the combination and
   the floors (`0.4`, 50 distinct) are `ProfilerSettings`.
