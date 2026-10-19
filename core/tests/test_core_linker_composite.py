@@ -21,7 +21,13 @@ from carto_core.linker.composite import (
     components_from_json,
     components_json,
     cross_correlation,
+    event_coverage,
+    exact_field_pairs,
     hourly_series,
+    identifier_links,
+    key_event_series,
+    primary_component,
+    rolling_day,
     trigger_pairs,
 )
 from carto_core.linker.composite_blocking import (
@@ -33,14 +39,19 @@ from carto_core.linker.composite_blocking import (
     within_business_days,
 )
 from carto_core.linker.composite_em import (
+    AgreementMatrix,
     ComponentSpec,
     agreement_matrix,
     choose_threshold,
+    components_from,
     discover_components,
     estimate_u,
     fellegi_sunter_em,
+    label_vector,
     pair_weights,
     posteriors,
+    side_has,
+    split_components,
 )
 from carto_core.linker.model import (
     CompositeComponent,
@@ -52,7 +63,7 @@ from carto_core.linker.model import (
 )
 from carto_core.linker.review import ScoredLink
 from carto_core.settings import LinkerSettings
-from carto_core.store.model import FieldForm, HourlyVolume, Window
+from carto_core.store.model import FieldForm, HourlyVolume, IdentifierRow, Window
 
 SETTINGS = LinkerSettings()
 FRIDAY = datetime(2026, 10, 16, 15, 0, tzinfo=UTC)
@@ -206,7 +217,106 @@ def test_components_are_the_best_agreeing_end_pair_per_kind_and_per_attribute_ke
     assert by_kind["attribute"].a == FieldForm("sys_a/tpl/warehouse", "raw")
     assert by_kind["partial_identifier"].b == FieldForm("sys_b/tpl/ref", "digits.0")
     matrix = agreement_matrix(specs, a, b, [(0, 0)])
-    assert matrix.tolist() == [[True] * 5]
+    assert matrix.agree.tolist() == [[True] * 5]
+    assert matrix.present.tolist() == [[True] * 5]
+    assert all(
+        side_has(spec, a.events[0], "a") and side_has(spec, b.events[0], "b") for spec in specs
+    )
+
+
+def test_a_missing_field_is_neither_agreement_nor_disagreement() -> None:
+    a = side("sys_a", [side_event("a1", FRIDAY, date="d1", amount="x1")])
+    b = side("sys_b", [side_event("b1", MONDAY, date="d1", system="sys_b")])
+    specs = (
+        ComponentSpec(
+            "date", FieldForm("sys_a/tpl/when", "date"), FieldForm("sys_b/tpl/when", "date")
+        ),
+        ComponentSpec(
+            "amount", FieldForm("sys_a/tpl/total", "amount"), FieldForm("sys_b/tpl/total", "amount")
+        ),
+    )
+    matrix = agreement_matrix(specs, a, b, [(0, 0)])
+    assert matrix.agree.tolist() == [[True, False]]
+    assert matrix.present.tolist() == [[True, False]]
+    m = np.asarray([0.95, 0.95])
+    u = np.asarray([0.2, 0.01])
+    assert pair_weights(matrix, m, u)[0] == pytest.approx(np.log2(0.95 / 0.2)), (
+        "amount adds nothing"
+    )
+    assert not side_has(specs[1], b.events[0], "b")
+
+
+def test_exact_link_components_become_labels_and_label_the_pairs() -> None:
+    exact = frozenset({frozenset({"sys_a/tpl/ref", "sys_b/tpl/ref"})})
+    a = side(
+        "sys_a",
+        [
+            side_event("a1", FRIDAY, date="d1", partial="p1"),
+            side_event("a2", FRIDAY, date="d1", partial="p2"),
+            side_event("a3", FRIDAY, date="d1"),
+        ],
+    )
+    b = side(
+        "sys_b",
+        [
+            side_event("b1", MONDAY, date="d1", partial="p1", system="sys_b"),
+            side_event("b2", MONDAY, date="d1", system="sys_b"),
+        ],
+    )
+    pairs = [(0, 0), (1, 0), (2, 0), (0, 1)]
+    scoring, labels = split_components(discover_components(a, b, pairs), exact)
+    assert [spec.kind for spec in scoring] == ["date"]
+    assert [spec.kind for spec in labels] == ["partial_identifier"]
+    vector = label_vector(labels, a, b, pairs)
+    assert vector[0] == 1.0, "ids agree: a known match"
+    assert vector[1] == 0.0, "both carry an id and they differ: a known non-match"
+    assert np.isnan(vector[2]) and np.isnan(vector[3]), "no id on one side: unknown"
+    assert np.all(np.isnan(label_vector((), a, b, pairs)))
+
+
+def test_labels_identify_a_rule_with_one_informative_component() -> None:
+    # 9,000 same-date pairs, 180 of them true matches: without labels a lone name component
+    # cannot be separated from the prior; with the exact link labelling 95% of them it can.
+    rng = np.random.default_rng(4)
+    n, matches = 9_000, 180
+    truth = np.zeros(n, dtype=np.bool_)
+    truth[:matches] = True
+    name = np.where(truth, rng.random(n) < 0.97, rng.random(n) < 0.002)
+    agree = np.stack([np.ones(n, dtype=np.bool_), name], axis=1)
+    matrix = AgreementMatrix.complete(agree)
+    labels = np.where(rng.random(n) < 0.95, truth.astype(np.float64), np.nan)
+    u = np.asarray([0.15, 0.004])
+    result = fellegi_sunter_em(
+        matrix,
+        u,
+        iterations=10,
+        initial_prior=0.02,
+        update_u=True,
+        labels=labels,
+        match_density=0.03,
+    )
+    assert abs(result.m[1] - 0.97) < 0.03 and result.u[1] < 0.01
+    assert abs(result.prior - matches / n) < 0.01
+    posterior = posteriors(matrix, result.m, result.u, result.prior)
+    choice = choose_threshold(pair_weights(matrix, result.m, u), posterior, 0.9)
+    assert choice is not None and choice.matched == int(name[:matches].sum() + name[matches:].sum())
+    assert truth[pair_weights(matrix, result.m, u) >= choice.threshold].mean() > 0.9
+
+
+def test_match_density_moves_the_u_start_toward_the_random_pair_value() -> None:
+    # A block where nearly every pair is a match (amounts with cents): the observed agreement
+    # rate is m, not u; with the density at one the random-pair u stands and the block scores.
+    agree = np.ones((500, 1), dtype=np.bool_)
+    matrix = AgreementMatrix.complete(agree)
+    u = np.asarray([0.0001])
+    dense = fellegi_sunter_em(
+        matrix, u, iterations=10, initial_prior=0.5, update_u=True, match_density=1.0
+    )
+    sparse = fellegi_sunter_em(
+        matrix, u, iterations=10, initial_prior=0.5, update_u=True, match_density=0.0
+    )
+    assert posteriors(matrix, dense.m, dense.u, dense.prior)[0] > 0.99
+    assert posteriors(matrix, sparse.m, sparse.u, sparse.prior)[0] < 0.6
 
 
 def planted_matrix(
@@ -222,7 +332,9 @@ def test_em_recovers_planted_m_and_prior_within_five_points() -> None:
     m = [0.95, 0.8, 0.9, 0.7]
     u = [0.05, 0.2, 0.01, 0.3]
     matrix, _truth = planted_matrix(rng, m, u, prior=0.3, n=20_000)
-    result = fellegi_sunter_em(matrix, np.asarray(u), iterations=SETTINGS.composite_em_iterations)
+    result = fellegi_sunter_em(
+        AgreementMatrix.complete(matrix), np.asarray(u), iterations=SETTINGS.composite_em_iterations
+    )
     assert np.all(np.abs(result.m - np.asarray(m)) < 0.05), result.m.tolist()
     assert abs(result.prior - 0.3) < 0.05
     assert 1 <= result.iterations <= SETTINGS.composite_em_iterations
@@ -235,7 +347,11 @@ def test_em_with_update_u_recovers_u_from_a_wrong_start() -> None:
     u = [0.3, 0.05, 0.1]
     matrix, _truth = planted_matrix(rng, m, u, prior=0.2, n=30_000)
     result = fellegi_sunter_em(
-        matrix, np.asarray([0.1, 0.01, 0.01]), iterations=50, initial_prior=0.1, update_u=True
+        AgreementMatrix.complete(matrix),
+        np.asarray([0.1, 0.01, 0.01]),
+        iterations=50,
+        initial_prior=0.1,
+        update_u=True,
     )
     assert np.all(np.abs(result.u - np.asarray(u)) < 0.05), result.u.tolist()
     assert np.all(np.abs(result.m - np.asarray(m)) < 0.05), result.m.tolist()
@@ -252,13 +368,15 @@ def test_one_to_one_prior_is_the_smaller_side_over_the_pairs_capped_at_a_half() 
 
 def test_em_on_nothing_returns_the_starting_point() -> None:
     result = fellegi_sunter_em(
-        np.zeros((0, 2), dtype=np.bool_), np.asarray([0.1, 0.2]), iterations=5
+        AgreementMatrix.complete(np.zeros((0, 2), dtype=np.bool_)),
+        np.asarray([0.1, 0.2]),
+        iterations=5,
     )
     assert result.iterations == 0 and result.converged is False
     assert result.m.tolist() == [0.9, 0.9]
 
 
-def test_u_is_estimated_from_random_pairs_outside_the_blocks() -> None:
+def test_u_is_estimated_from_random_pairs_among_those_carrying_the_component() -> None:
     rng = np.random.default_rng(3)
     dates = [f"d{n}" for n in range(20)]
     amounts = [f"x{n}" for n in range(100)]
@@ -290,17 +408,30 @@ def test_u_is_estimated_from_random_pairs_outside_the_blocks() -> None:
             "amount", FieldForm("sys_a/tpl/total", "amount"), FieldForm("sys_b/tpl/total", "amount")
         ),
     )
-    u = estimate_u(specs, a, b, blocked=frozenset(), rng=rng, sample_pairs=5_000)
+    u = estimate_u(specs, a, b, rng=rng, sample_pairs=5_000)
     assert abs(u[0] - 0.05) < 0.05
     assert abs(u[1] - 0.01) < 0.05
-    # Every pair blocked: nothing can be sampled and u falls back to the smoothed floor.
-    everything = frozenset((i, j) for i in range(200) for j in range(200))
-    fallback = estimate_u(specs, a, b, blocked=everything, rng=rng, sample_pairs=100)
-    assert fallback.tolist() == [0.5, 0.5]
+    # Half of A without an amount: the amount rate is taken over the pairs that carry one.
+    thinned = side(
+        "sys_a",
+        [
+            side_event(
+                f"a{n}",
+                FRIDAY,
+                date=dates[n % 20],
+                amount=amounts[(n * 7) % 100] if n % 2 else None,
+            )
+            for n in range(200)
+        ],
+    )
+    conditioned = estimate_u(specs, thinned, b, rng=rng, sample_pairs=5_000)
+    assert abs(conditioned[1] - 0.01) < 0.05
+    # Nothing to sample: the smoothed floor.
+    assert estimate_u(specs, side("sys_a", []), b, rng=rng).tolist() == [0.5, 0.5]
 
 
 def test_weights_and_posteriors_follow_the_log_likelihood_ratios() -> None:
-    matrix = np.asarray([[True, True], [True, False], [False, False]])
+    matrix = AgreementMatrix.complete(np.asarray([[True, True], [True, False], [False, False]]))
     m = np.asarray([0.9, 0.8])
     u = np.asarray([0.1, 0.2])
     weights = pair_weights(matrix, m, u)
@@ -333,7 +464,8 @@ def test_threshold_reaches_the_target_on_a_planted_mixture() -> None:
     rng = np.random.default_rng(11)
     m = [0.97, 0.9, 0.95]
     u = [0.05, 0.1, 0.02]
-    matrix, truth = planted_matrix(rng, m, u, prior=0.4, n=20_000)
+    agree, truth = planted_matrix(rng, m, u, prior=0.4, n=20_000)
+    matrix = AgreementMatrix.complete(agree)
     result = fellegi_sunter_em(matrix, np.asarray(u), iterations=SETTINGS.composite_em_iterations)
     weights = pair_weights(matrix, result.m, result.u)
     posterior = posteriors(matrix, result.m, result.u, result.prior)
@@ -434,6 +566,54 @@ def test_trigger_fires_when_the_exact_link_covers_too_little_of_the_later_end() 
     assert reverse.triggered and reverse.later_end_coverage == 0.6
 
 
+def test_coverage_is_measured_against_the_later_ends_events() -> None:
+    # Scenario C: every non-null source_ref matches (token containment 1.0) but only 60% of
+    # the HRIS rows carry one.
+    link = exact("sys_onb", "sys_hris", 0.9, c_ab=0.6, c_ba=1.0)
+    events = {("sys_hris", "tpl"): 100}
+    assert event_coverage(link, "sys_hris", events) == (link.features.n_match / 100, 100)
+    assert event_coverage(link, "sys_hris", None) == (1.0, None)
+    assert event_coverage(link, "sys_hris", {}) == (1.0, None)
+    [trigger] = trigger_pairs(
+        [link], [adjacency("sys_onb", "sys_hris", 0.7)], SETTINGS, template_events=events
+    )
+    assert trigger.triggered and trigger.reason == "low_coverage"
+    assert trigger.later_end_coverage == pytest.approx(0.6) and trigger.later_end_events == 100
+    [covered] = trigger_pairs(
+        [exact("sys_onb", "sys_hris", 0.9, c_ab=0.95, c_ba=1.0)],
+        [adjacency("sys_onb", "sys_hris", 0.7)],
+        SETTINGS,
+        template_events=events,
+    )
+    assert not covered.triggered and covered.reason == "exact_link"
+    assert covered.later_end_coverage == pytest.approx(0.95)
+    # Coverage never exceeds one even when tokens repeat across events.
+    assert event_coverage(link, "sys_hris", {("sys_hris", "tpl"): 10})[0] == 1.0
+
+
+def test_links_between_weak_forms_are_not_exact_links_for_the_trigger() -> None:
+    amount_link = ScoredLink(
+        a=FieldForm("sys_pay/tpl/amount", "amount"),
+        b=FieldForm("sys_wh/tpl/total", "amount"),
+        link_type=LinkType.EXACT,
+        role=LinkRole.TRANSACTION,
+        direction=Direction.A_TO_B,
+        score=0.99,
+        features=features(0.95, 0.95),
+        affected_volume=90,
+    )
+    assert identifier_links([amount_link]) == []
+    assert exact_field_pairs([amount_link], SETTINGS.composite_exact_ceiling) == frozenset()
+    [trigger] = trigger_pairs([amount_link], [adjacency("sys_pay", "sys_wh", 0.9)], SETTINGS)
+    assert trigger.triggered and trigger.reason == "no_exact_link"
+    real = exact("sys_pay", "sys_wh", 0.9)
+    assert identifier_links([amount_link, real]) == [real]
+    assert exact_field_pairs([real], SETTINGS.composite_exact_ceiling) == frozenset(
+        {frozenset({"sys_pay/tpl/id", "sys_wh/tpl/ref"})}
+    )
+    assert exact_field_pairs([exact("sys_pay", "sys_wh", 0.5)], 0.5) == frozenset()
+
+
 def test_trigger_needs_the_volume_correlation() -> None:
     [trigger] = trigger_pairs(
         [],
@@ -481,6 +661,70 @@ def test_cross_correlation_finds_the_lag_of_a_shifted_series() -> None:
     assert lag == 5 and correlation > 0.99
     assert cross_correlation(base, np.ones_like(base), max_lag=72) == (0, 0.0)
     assert cross_correlation(base[:1], shifted[:1], max_lag=72) == (0, 0.0)
+
+
+def test_key_event_series_counts_each_key_carrying_event_once_per_system() -> None:
+    start = datetime(2026, 10, 12, 0, 0, tzinfo=UTC)
+    window = Window(start, start + timedelta(days=1))
+
+    sample_token = "t1." + "A" * 22
+
+    def row(event_id: str, system: str, at: datetime, field: str) -> IdentifierRow:
+        return IdentifierRow(
+            token=sample_token,
+            field_ref=f"{system}/tpl/{field}",
+            form="date",
+            shape="9999-99-99",
+            event_id=event_id,
+            system_id=system,
+            observed_at=at,
+            stored_at=at,
+        )
+
+    rows = [
+        row("e1", "sys_a", start + timedelta(hours=2, minutes=5), "when"),
+        row("e1", "sys_a", start + timedelta(hours=2, minutes=5), "other_date"),
+        row("e2", "sys_a", start + timedelta(hours=2, minutes=40), "when"),
+        row("e3", "sys_b", start + timedelta(hours=30), "when"),  # outside: dropped
+    ]
+    series, hours = key_event_series(rows, window)
+    assert hours == 24
+    assert series["sys_a"][2] == 2.0 and series["sys_a"].sum() == 2.0
+    assert "sys_b" not in series
+
+
+def test_rolling_day_sums_the_trailing_24_hours_and_aligns_day_scale_lags() -> None:
+    hours = 24 * 7
+    morning = np.zeros(hours)
+    spread = np.zeros(hours)
+    for day in range(5):  # a morning intake keyed over the next day's business hours
+        morning[day * 24 + 8] = 50.0
+        spread[(day + 1) * 24 + 9 : (day + 1) * 24 + 17] = 6.0
+    assert cross_correlation(morning, spread, 72)[1] < 0.5, "hourly shapes differ"
+    lag, correlation = cross_correlation(rolling_day(morning), rolling_day(spread), 72)
+    assert correlation >= 0.9 and 0 < lag <= 48
+    assert rolling_day(np.ones(30))[23] == 24.0 and rolling_day(np.ones(30))[0] == 1.0
+    assert rolling_day(np.zeros(0)).shape == (0,)
+
+
+def test_primary_component_weighs_the_agreement_weight_by_presence() -> None:
+    specs = (
+        ComponentSpec(
+            "partial_identifier", FieldForm("a/t/id", "digits.0"), FieldForm("b/t/ref", "digits.0")
+        ),
+        ComponentSpec(
+            "phonetic", FieldForm("a/t/name", "phonetic.0"), FieldForm("b/t/name", "phonetic.0")
+        ),
+    )
+    components = components_from(specs, np.asarray([1.0, 0.98]), np.asarray([0.002, 0.004]))
+    assert components[0].weight > components[1].weight, "the id fragment is rarer"
+    present = np.asarray([[True, True]] * 50 + [[False, True]] * 50)
+    matrix = AgreementMatrix(agree=present.copy(), present=present)
+    selected = np.arange(100)
+    spec, component = primary_component(specs, components, matrix, selected)
+    assert spec.kind == "phonetic" and component.kind == "phonetic", "present in every matched pair"
+    everyone = AgreementMatrix.complete(np.ones((100, 2), dtype=np.bool_))
+    assert primary_component(specs, components, everyone, selected)[0].kind == "partial_identifier"
 
 
 def test_hourly_series_is_dense_over_the_window() -> None:

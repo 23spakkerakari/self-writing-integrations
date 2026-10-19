@@ -240,9 +240,9 @@ def test_end_to_end_finds_one_composite_link_with_the_target_quality() -> None:
     assert (link.a, link.b) == (rule.components[0].a, rule.components[0].b)
     assert (link.a, link.b) in {(PAY_TOTAL, WH_TOTAL), (PAY_NAME, WH_NAME)}
     assert link.a.system_id == "sys_pay" and link.b.system_id == "sys_wh"
-    assert link.features.n_a == 420 and link.features.n_match == len(matched)
-    assert link.features.c_ab == pytest.approx(len({a for a, _ in matched}) / 420)
-    assert 0.6 <= link.features.c_ab <= 0.8
+    assert 0 < link.features.n_a <= 420, "A events carrying the field with a whole window inside"
+    assert link.features.n_match == len(matched)
+    assert 0.6 <= link.features.c_ab <= 1.0 and 0.5 <= link.features.c_ba <= 1.0
     assert link.features.lag_positive_share == 1.0
     assert link.features.lag_median is not None and link.features.lag_median > 0
     assert link.features.fanout_ab_median is None and link.features.chance_ratio is None
@@ -266,6 +266,47 @@ def test_end_to_end_finds_one_composite_link_with_the_target_quality() -> None:
     stored = rules.get(TENANT, link_id_for(TENANT, link.a, link.b))
     assert stored is not None and stored.rule == rule
     assert [row.id for row in rules.list_rules(TENANT)] == [stored.id]
+
+
+def test_a_single_shared_component_is_not_a_composite_rule() -> None:
+    """Two systems whose rows share only an amount (a cart total and the payment of it): the
+    pair is blocked and the amounts agree, but one weak pair is not a composite (spec 9.5)."""
+    rng = random.Random(7)
+    store = InMemoryEventStore()
+    events: list[CanonicalEvent] = []
+    days = [
+        d for d in (WINDOW.start.date() + timedelta(days=n) for n in range(1, 7)) if d.weekday() < 5
+    ]
+    for n in range(300):
+        day = rng.choice(days)
+        at = business_instant(rng, day)
+        amount = f"{n * 7 % 1000}.{n * 13 % 100:02d}"
+        events.append(
+            event(f"cart{n}", "sys_web", "tpl_cart", at, [("total", "amount", amount, "999.99")])
+        )
+        events.append(
+            event(
+                f"pay{n}",
+                "sys_pay",
+                "tpl_pay",
+                at + timedelta(minutes=rng.randrange(1, 30)),
+                [("amount", "amount", amount, "999.99")],
+            )
+        )
+    store.add_events(events, stored_at=NOW)
+    matcher = CompositeMatcher(
+        store=store,
+        settings=LinkerSettings(),
+        rules=InMemoryCompositeRuleRepository(),
+        clock=lambda: NOW,
+    )
+    with structlog.testing.capture_logs() as logs:
+        report = matcher.run(TENANT, WINDOW, [])
+    triggered = [o for o in report.outcomes if o.blocked_pairs > 0]
+    assert triggered, "the pair is adjacent and blocks on the amount"
+    assert report.rules == 0 and report.links == ()
+    assert any(entry["event"] == "composite needs at least two components" for entry in logs)
+    leak_free(logs)
 
 
 def test_disabled_or_uncorrelated_runs_produce_nothing() -> None:
@@ -315,8 +356,8 @@ def test_a_strong_exact_link_between_the_systems_switches_the_pair_off() -> None
         role=LinkRole.TRANSACTION,
         direction=Direction.A_TO_B,
         score=0.97,
-        features=_features(c_ab=0.7, c_ba=0.95),
-        affected_volume=300,
+        features=_features(c_ab=0.95, c_ba=0.95),
+        affected_volume=399,
     )
     report = matcher.run(TENANT, WINDOW, [covered])
     assert not any(
@@ -336,6 +377,16 @@ def test_a_strong_exact_link_between_the_systems_switches_the_pair_off() -> None
     )
     report = matcher.run(TENANT, WINDOW, [thin])
     assert any(o.trigger.reason == "low_coverage" and o.rule is not None for o in report.outcomes)
+    thin_trigger = next(
+        t for t in report.triggers if (t.system_a, t.system_b) == ("sys_pay", "sys_wh")
+    )
+    wh_events = sum(
+        count.events
+        for count in store.template_counts(TENANT, WINDOW)
+        if count.system_id == "sys_wh"
+    )
+    assert thin_trigger.later_end_events == wh_events > 0
+    assert thin_trigger.later_end_coverage == pytest.approx(int(420 * 0.4) / wh_events)
 
 
 def _features(*, c_ab: float, c_ba: float) -> Any:

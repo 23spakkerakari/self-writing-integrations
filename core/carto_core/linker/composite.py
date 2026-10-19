@@ -5,13 +5,17 @@ and the ``composite_rules`` repository.
 system pair ``(A earlier, B later)``:
 
 1. **Trigger.** The pair is a candidate when no exact or bridge link between the two systems
-   scores above ``composite_exact_ceiling``, or the best one covers less than
-   ``composite_coverage_floor`` of the later end (scenario C: the HRIS carries the candidate id
-   in 60% of its rows), *and* the hourly volumes of the two systems cross-correlate at or above
-   ``composite_adjacency_min_correlation`` at some lag from zero to
-   ``composite_window_business_days x 24`` hours (:func:`cross_correlation`: Pearson over the
-   aligned hourly series, B shifted back by the lag). Of the two orderings of a system pair the
-   one with the higher peak is kept; an exact tie keeps both.
+   on identifier forms scores above ``composite_exact_ceiling`` (a link between two ``date``,
+   ``amount`` or ``phonetic`` ends is composite evidence, not an exact link), or the best one
+   reaches less than ``composite_coverage_floor`` of the later end's *events* (its ``n_match``
+   over the events of that end's template; scenario C: the HRIS carries the candidate id in 60%
+   of its rows, so token containment would read 100%), *and* the two systems' volumes of
+   key-carrying events (:func:`key_event_series`: events with a ``date`` or ``amount`` token,
+   each once; log noise lines carry none) summed over a trailing day (:func:`rolling_day`)
+   cross-correlate at or above ``composite_adjacency_min_correlation`` at some lag from zero to
+   ``composite_window_business_days x 24`` hours (:func:`cross_correlation`: Pearson, B shifted
+   back by the lag). Of the two orderings of a system pair the one with the higher peak is kept;
+   an exact tie keeps both.
 2. **Blocking** (:mod:`carto_core.linker.composite_blocking`) and **scoring**
    (:mod:`carto_core.linker.composite_em`): components; ``u`` from random pairs; ``m``, the
    prior and the within-block agreement rates of non-matches from EM over
@@ -19,8 +23,9 @@ system pair ``(A earlier, B later)``:
    one-to-one prior; pair weights from ``m`` and the sampled ``u`` (what the rule stores and
    M3 re-applies); the threshold on those weights at which the posterior of the fitted
    mixture reaches ``composite_target_precision``.
-3. **Output.** One :class:`CompositeRule` per system pair with at least ``min_match`` matched
-   pairs (the spec 9.3 hard filter applies to composite links too), persisted through a
+3. **Output.** One :class:`CompositeRule` per system pair with at least :data:`MIN_COMPONENTS`
+   scoring components and at least ``min_match`` matched pairs (the spec 9.3 hard filter
+   applies to composite links too), persisted through a
    :class:`CompositeRuleRepository` under the id of the link, and one
    :class:`~carto_core.linker.review.ScoredLink` between the ends of the strongest component
    (``link_type`` composite, role transaction, direction A to B, score = estimated precision x
@@ -39,7 +44,7 @@ import hashlib
 import json
 import math
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -51,22 +56,31 @@ from sqlalchemy.exc import SQLAlchemyError
 from carto_common.logging import get_logger
 from carto_core.db.postgres import ping_engine
 from carto_core.linker.composite_blocking import (
+    AMOUNT_FORM,
     COMPOSITE_FORMS,
+    DATE_FORM,
+    PHONETIC_FORMS,
     SECONDS_PER_DAY,
     Side,
     block_pairs,
     load_side,
+    within_business_days,
 )
 from carto_core.linker.composite_em import (
+    AgreementMatrix,
+    ComponentSpec,
     agreement_matrix,
     choose_threshold,
     components_from,
     discover_components,
     estimate_u,
     fellegi_sunter_em,
+    label_vector,
     one_to_one_prior,
     pair_weights,
     posteriors,
+    side_has,
+    split_components,
 )
 from carto_core.linker.model import (
     CompositeComponent,
@@ -89,10 +103,12 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from carto_core.settings import LinkerSettings
-    from carto_core.store.model import EventStore, HourlyVolume
+    from carto_core.store.model import EventStore, HourlyVolume, IdentifierRow
 
 __all__ = [
     "MAX_COMPONENTS",
+    "MIN_COMPONENTS",
+    "WEAK_FORMS",
     "Adjacency",
     "CompositeMatch",
     "CompositeMatcher",
@@ -106,7 +122,13 @@ __all__ = [
     "adjacencies",
     "component_views",
     "cross_correlation",
+    "event_coverage",
+    "exact_field_pairs",
     "hourly_series",
+    "identifier_links",
+    "key_event_series",
+    "primary_component",
+    "rolling_day",
     "trigger_pairs",
 ]
 
@@ -115,6 +137,10 @@ log = get_logger(component="linker.composite")
 MAX_COMPONENTS: Final = 32
 """The most components a rule stores: ``EvidenceView.components`` (carto_schema.api) holds at
 most this many, strongest first."""
+MIN_COMPONENTS: Final = 2
+"""A composite rule combines weak field pairs (spec 9.5 "components"); one pair alone is the
+exact linker's business (an amount equal to an amount is not a composite match), and a
+one-component mixture cannot be told apart from its prior. Definitional, not a tuning knob."""
 HOURS_PER_DAY: Final = 24
 SECONDS_PER_HOUR: Final = 3_600
 MIN_SERIES_POINTS: Final = 2
@@ -140,6 +166,39 @@ def hourly_series(
             series[volume.system_id] = np.zeros(hours, dtype=np.float64)
         series[volume.system_id][index] += float(volume.events)
     return series, hours
+
+
+def key_event_series(
+    rows: Iterable[IdentifierRow], window: Window
+) -> tuple[dict[str, NDArray[np.float64]], int]:
+    """Dense per-system hourly counts of the events that carry a composite key (a ``date`` or
+    ``amount`` token), each event once, and the number of hours. Log noise lines without such a
+    key cannot be blocked, so they do not shape the adjacency signal either."""
+    start = window.start.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    hours = max(1, math.ceil((window.end - start) / timedelta(hours=1)))
+    series: dict[str, NDArray[np.float64]] = {}
+    seen: set[str] = set()
+    for row in rows:
+        if row.event_id in seen:
+            continue
+        seen.add(row.event_id)
+        index = int((row.observed_at.astimezone(UTC) - start) / timedelta(hours=1))
+        if index < 0 or index >= hours:
+            continue
+        if row.system_id not in series:
+            series[row.system_id] = np.zeros(hours, dtype=np.float64)
+        series[row.system_id][index] += 1.0
+    return series, hours
+
+
+def rolling_day(series: NDArray[np.float64]) -> NDArray[np.float64]:
+    """The hourly series summed over the trailing 24 hours. A clerk keys a morning's intake
+    over the next business day or two, so the hourly shapes of the two systems differ while
+    their daily volumes move together; the trailing-day sum is what the correlation compares."""
+    if series.shape[0] == 0:
+        return series
+    summed: NDArray[np.float64] = np.convolve(series, np.ones(HOURS_PER_DAY), mode="full")
+    return summed[: series.shape[0]]
 
 
 def cross_correlation(
@@ -176,10 +235,10 @@ class Adjacency:
 
 
 def adjacencies(
-    volumes: Sequence[HourlyVolume], window: Window, *, max_lag_hours: int
+    series: Mapping[str, NDArray[np.float64]], *, max_lag_hours: int
 ) -> list[Adjacency]:
-    """Every ordered pair of systems with events in the window and its peak correlation."""
-    series, _hours = hourly_series(volumes, window)
+    """Every ordered pair of systems in ``series`` (one aligned hourly series per system, as
+    :func:`key_event_series` then :func:`rolling_day` produce) and its peak correlation."""
     systems = sorted(series)
     result: list[Adjacency] = []
     for system_a in systems:
@@ -200,38 +259,88 @@ class SystemPairTrigger:
     best_exact_score: float | None
     """The best exact or bridge link between the two systems in this pass; None when none."""
     later_end_coverage: float | None
-    """That link's containment of the later system's end (``c_ba`` for A to B)."""
+    """The share of the later system's events that link reaches: its ``n_match`` over the
+    events of the later end's template in the window (one token per event in a row-shaped
+    source; capped at one), or its token containment when the template count is unknown.
+    Token containment alone would read 100% for a reference that is present in 60% of rows."""
     lag_hours: int
     correlation: float
     triggered: bool
     reason: str
     """``no_exact_link``, ``low_coverage``, ``exact_link``, ``no_adjacency`` or ``reverse``."""
+    later_end_events: int | None = None
+    """Events of the later end's template in the window, when known."""
 
 
 def _system_of(end: FieldForm) -> str:
     return end.system_id
 
 
+WEAK_FORMS: Final[frozenset[str]] = frozenset({DATE_FORM, AMOUNT_FORM, *PHONETIC_FORMS})
+"""Forms that never identify a record on their own: a link between two of them is composite
+evidence, not an exact link, whatever the candidate step called it."""
+
+
+def identifier_links(links: Sequence[ScoredLink]) -> list[ScoredLink]:
+    """The exact and bridge links between two systems whose ends are identifier forms."""
+    return [
+        link
+        for link in links
+        if link.link_type in (LinkType.EXACT, LinkType.BRIDGE)
+        and link.a.form not in WEAK_FORMS
+        and link.b.form not in WEAK_FORMS
+        and _system_of(link.a) != _system_of(link.b)
+    ]
+
+
+def exact_field_pairs(links: Sequence[ScoredLink], ceiling: float) -> frozenset[frozenset[str]]:
+    """The unordered field pairs (any forms) of the identifier links scoring above ``ceiling``;
+    :func:`~carto_core.linker.composite_em.split_components` turns them into labels."""
+    return frozenset(
+        frozenset({link.a.field_ref, link.b.field_ref})
+        for link in identifier_links(links)
+        if link.score > ceiling
+    )
+
+
 def _best_links(links: Sequence[ScoredLink]) -> dict[frozenset[str], ScoredLink]:
     best: dict[frozenset[str], ScoredLink] = {}
-    for link in links:
-        if link.link_type not in (LinkType.EXACT, LinkType.BRIDGE):
-            continue
+    for link in identifier_links(links):
         systems = frozenset({_system_of(link.a), _system_of(link.b)})
-        if len(systems) != 2:
-            continue
         current = best.get(systems)
         if current is None or link.score > current.score:
             best[systems] = link
     return best
 
 
+def _template_of(end: FieldForm) -> str:
+    return end.field_ref.split("/", 2)[1] if end.field_ref.count("/") >= 2 else ""
+
+
+def event_coverage(
+    link: ScoredLink, later_system: str, template_events: Mapping[tuple[str, str], int] | None
+) -> tuple[float, int | None]:
+    """``(coverage, events)`` of the later end (see :class:`SystemPairTrigger`)."""
+    later_end = link.b if _system_of(link.b) == later_system else link.a
+    containment = link.features.c_ba if later_end is link.b else link.features.c_ab
+    if template_events is None:
+        return containment, None
+    events = template_events.get((later_system, _template_of(later_end)))
+    if not events:
+        return containment, events
+    return min(1.0, link.features.n_match / events), events
+
+
 def trigger_pairs(
     links: Sequence[ScoredLink],
     adjacency: Sequence[Adjacency],
     settings: LinkerSettings,
+    *,
+    template_events: Mapping[tuple[str, str], int] | None = None,
 ) -> list[SystemPairTrigger]:
-    """Spec 9.5 trigger per ordered system pair (module docstring step 1)."""
+    """Spec 9.5 trigger per ordered system pair (module docstring step 1). ``template_events``
+    maps ``(system_id, template_id)`` to its events in the window (from
+    :meth:`~carto_core.store.model.EventStore.template_counts`) for the coverage test."""
     best = _best_links(links)
     peaks = {(item.system_a, item.system_b): item for item in adjacency}
     result: list[SystemPairTrigger] = []
@@ -239,10 +348,9 @@ def trigger_pairs(
         link = best.get(frozenset({item.system_a, item.system_b}))
         score = link.score if link is not None else None
         coverage: float | None = None
+        events: int | None = None
         if link is not None:
-            coverage = (
-                link.features.c_ba if _system_of(link.b) == item.system_b else link.features.c_ab
-            )
+            coverage, events = event_coverage(link, item.system_b, template_events)
         if link is None or score is None or score <= settings.composite_exact_ceiling:
             weak, reason = True, "no_exact_link"
         elif coverage is not None and coverage < settings.composite_coverage_floor:
@@ -264,6 +372,7 @@ def trigger_pairs(
                 correlation=item.correlation,
                 triggered=weak,
                 reason=reason,
+                later_end_events=events,
             )
         )
     return result
@@ -495,6 +604,8 @@ class CompositeReport:
     matched_pairs: int
     capped: int
     outcomes: tuple[CompositeOutcome, ...] = ()
+    triggers: tuple[SystemPairTrigger, ...] = ()
+    """Every ordered system pair considered, triggered or not, with the reason."""
 
     @property
     def links(self) -> tuple[ScoredLink, ...]:
@@ -530,6 +641,26 @@ def component_views(rule: CompositeRule) -> list[dict[str, Any]]:
     ]
 
 
+def primary_component(
+    specs: Sequence[ComponentSpec],
+    components: Sequence[CompositeComponent],
+    matrix: AgreementMatrix,
+    selected: NDArray[np.int64],
+) -> tuple[ComponentSpec, CompositeComponent]:
+    """The pair the link is named after: the component that contributes the most evidence
+    across the matched pairs, its agreement weight times the share of matched pairs that carry
+    it. A rare id fragment present in half the rows loses to a name present in all of them;
+    ties go to the first in :class:`ComponentSpec` order."""
+    best: tuple[float, int] | None = None
+    for index, component in enumerate(components):
+        share = float(matrix.present[selected, index].mean()) if selected.shape[0] else 0.0
+        score = component.weight * share
+        if best is None or score > best[0]:
+            best = (score, index)
+    assert best is not None  # noqa: S101 - specs is never empty here (checked by the caller)
+    return specs[best[1]], components[best[1]]
+
+
 def _seed(tenant_id: str, system_a: str, system_b: str) -> int:
     digest = hashlib.sha256("\n".join((tenant_id, system_a, system_b)).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
@@ -560,9 +691,18 @@ class CompositeMatcher:
         return self._last_report
 
     def hook(
-        self, *, tenant_id: str, window: Window, links: Sequence[ScoredLink]
+        self,
+        *,
+        tenant_id: str,
+        window: Window,
+        links: Sequence[ScoredLink],
+        profiles: Mapping[FieldForm, Any] | None = None,
     ) -> tuple[ScoredLink, ...]:
-        """The pass's ``composite_hook``: returns the composite links for it to propose."""
+        """The pass's ``composite_hook``: returns the composite links for it to propose.
+        ``profiles`` (the pass's field profiles, when it passes them) is accepted for forward
+        compatibility; coverage is read from the store's template counts, since a profile
+        counts the rows that carry a field and the question is the rows that do not."""
+        del profiles
         return self.run(tenant_id, window, links).links
 
     def run(self, tenant_id: str, window: Window, links: Sequence[ScoredLink]) -> CompositeReport:
@@ -572,9 +712,18 @@ class CompositeMatcher:
             self._last_report = report
             return report
         max_lag = settings.composite_window_business_days * HOURS_PER_DAY
-        volumes = self._store.hourly_volumes(tenant_id, window)
-        adjacency = adjacencies(volumes, window, max_lag_hours=max_lag)
-        triggers = trigger_pairs(links, adjacency, settings)
+        rows = self._store.identifier_rows(
+            tenant_id, window, forms=frozenset({DATE_FORM, AMOUNT_FORM})
+        )
+        series, _hours = key_event_series(rows, window)
+        smoothed = {system: rolling_day(values) for system, values in series.items()}
+        adjacency = adjacencies(smoothed, max_lag_hours=max_lag)
+        template_events: dict[tuple[str, str], int] = {}
+        for count in self._store.template_counts(tenant_id, window):
+            key = (count.system_id, count.template_id)
+            template_events[key] = template_events.get(key, 0) + count.events
+        triggers = trigger_pairs(links, adjacency, settings, template_events=template_events)
+        exact_pairs = exact_field_pairs(links, settings.composite_exact_ceiling)
         now = self._clock()
         outcomes: list[CompositeOutcome] = []
         sides: dict[str, Side] = {}
@@ -583,7 +732,9 @@ class CompositeMatcher:
                 continue
             side_a = self._side(sides, tenant_id, trigger.system_a, window)
             side_b = self._side(sides, tenant_id, trigger.system_b, window)
-            outcomes.append(self._match(tenant_id, window, trigger, side_a, side_b, now))
+            outcomes.append(
+                self._match(tenant_id, window, trigger, side_a, side_b, now, exact_pairs)
+            )
         report = CompositeReport(
             tenant_id=tenant_id,
             window=window,
@@ -593,6 +744,7 @@ class CompositeMatcher:
             matched_pairs=sum(len(o.matches) for o in outcomes),
             capped=sum(1 for o in outcomes if o.capped),
             outcomes=tuple(outcomes),
+            triggers=tuple(triggers),
         )
         log.info(
             "composite pass done",
@@ -624,6 +776,7 @@ class CompositeMatcher:
         side_a: Side,
         side_b: Side,
         now: datetime,
+        exact_pairs: Collection[frozenset[str]] = frozenset(),
     ) -> CompositeOutcome:
         settings = self._settings
         blocked = block_pairs(
@@ -645,18 +798,30 @@ class CompositeMatcher:
         )
         if not blocked.pairs:
             return empty
-        specs = discover_components(side_a, side_b, blocked.pairs)
-        if not specs:
+        specs, label_specs = split_components(
+            discover_components(side_a, side_b, blocked.pairs), exact_pairs
+        )
+        if len(specs) < MIN_COMPONENTS:
+            log.info(
+                "composite needs at least two components",
+                tenant_id=tenant_id,
+                system_a=trigger.system_a,
+                system_b=trigger.system_b,
+                components=len(specs),
+            )
             return empty
         rng = np.random.default_rng(_seed(tenant_id, trigger.system_a, trigger.system_b))
-        u = estimate_u(specs, side_a, side_b, blocked=frozenset(blocked.pairs), rng=rng)
+        u = estimate_u(specs, side_a, side_b, rng=rng)
         matrix = agreement_matrix(specs, side_a, side_b, blocked.pairs)
+        labels = label_vector(label_specs, side_a, side_b, blocked.pairs)
         em = fellegi_sunter_em(
             matrix,
             u,
             iterations=settings.composite_em_iterations,
             initial_prior=one_to_one_prior(len(side_a), len(side_b), len(blocked.pairs)),
             update_u=True,
+            labels=labels,
+            match_density=min(len(side_a), len(side_b)) / len(blocked.pairs),
         )
         weights = pair_weights(matrix, em.m, u)
         posterior = posteriors(matrix, em.m, em.u, em.prior)
@@ -681,17 +846,17 @@ class CompositeMatcher:
                 matched=len(matches),
             )
             return empty
-        components = tuple(
-            sorted(components_from(specs, em.m, u), key=lambda c: -c.weight)[:MAX_COMPONENTS]
-        )
+        scored = components_from(specs, em.m, u)
+        components = tuple(sorted(scored, key=lambda c: -c.weight)[:MAX_COMPONENTS])
         rule = CompositeRule(
             components=components,
             window_seconds=settings.composite_window_business_days * SECONDS_PER_DAY,
             threshold=choice.threshold,
             estimated_precision=choice.estimated_precision,
         )
+        primary = primary_component(specs, scored, matrix, selected)
         link = self._scored_link(
-            tenant_id, window, trigger, rule, side_a, side_b, blocked.pairs, selected
+            tenant_id, window, trigger, rule, primary, side_a, side_b, blocked.pairs, selected
         )
         self._rules.upsert(tenant_id, link_id_for(tenant_id, link.a, link.b), rule, now)
         return replace(empty, rule=rule, link=link, matches=matches)
@@ -702,12 +867,26 @@ class CompositeMatcher:
         window: Window,
         trigger: SystemPairTrigger,
         rule: CompositeRule,
+        primary: tuple[ComponentSpec, CompositeComponent],
         side_a: Side,
         side_b: Side,
         pairs: Sequence[tuple[int, int]],
         selected: NDArray[np.int64],
     ) -> ScoredLink:
-        strongest = rule.components[0]
+        """The link between the primary pair's ends. ``n_a`` counts the A events that carry the
+        primary field and whose whole matching window lies inside the data window (an event
+        near the end has not had its chance yet); ``n_b`` the B events carrying the primary
+        field; ``c_ab`` and ``c_ba`` are the matched shares of those."""
+        spec, strongest = primary
+        days = self._settings.composite_window_business_days
+        last = window.end - timedelta(microseconds=1)
+        eligible_a = {
+            i
+            for i, event in enumerate(side_a.events)
+            if side_has(spec, event, "a")
+            and not within_business_days(event.observed_at, last, days)
+        }
+        carrying_b = sum(1 for event in side_b.events if side_has(spec, event, "b"))
         matched_a: set[int] = set()
         matched_b: set[int] = set()
         lags: list[float] = []
@@ -718,15 +897,15 @@ class CompositeMatcher:
             lags.append(
                 (side_b.events[j].observed_at - side_a.events[i].observed_at) / timedelta(seconds=1)
             )
-        n_a, n_b = len(side_a), len(side_b)
+        n_a, n_b = len(eligible_a), carrying_b
         q25 = quantile_exact_low(lags, 0.25)
         q75 = quantile_exact_low(lags, 0.75)
         features = PairFeatures(
             n_a=n_a,
             n_b=n_b,
             n_match=len(lags),
-            c_ab=len(matched_a) / n_a if n_a else 0.0,
-            c_ba=len(matched_b) / n_b if n_b else 0.0,
+            c_ab=min(1.0, len(matched_a & eligible_a) / n_a) if n_a else 0.0,
+            c_ba=min(1.0, len(matched_b) / n_b) if n_b else 0.0,
             lag_median=quantile_exact_low(lags, 0.5),
             lag_iqr=(q75 - q25) if q25 is not None and q75 is not None else None,
             lag_positive_share=(sum(1 for lag in lags if lag > 0) / len(lags)) if lags else None,
