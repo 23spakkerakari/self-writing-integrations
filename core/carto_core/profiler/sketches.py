@@ -18,7 +18,10 @@ Per day a sketch holds:
 - a ``datasketch`` MinHash (``minhash_permutations``, default 128) over the token bytes, for the
   LSH index of spec 9.2, serialized as its ``hashvalues`` array, big-endian ``uint64``;
 - a HyperLogLog (``p`` = :data:`HLL_PRECISION`) for ``distinct``, serialized as its register
-  array;
+  array. It is only consulted once the bottom-k sample is saturated: a sample holding fewer
+  than ``k`` hashes is the whole token set, so :func:`distinct_estimate` returns its length,
+  exactly. Small ends matter: the ``min_distinct`` floor of spec 9.1 sits at 50, and a
+  HyperLogLog reading 49 for a field with exactly 50 values would drop a real key;
 - the bottom-k sample: the ``bottom_k`` (default 2,048) smallest :func:`token_hash` values,
   ascending. The hash is the first 8 bytes of SHA-256 over the token, so every process agrees
   without a shared seed. Two samples give the containment estimate of
@@ -420,10 +423,15 @@ def merge_window(sketches: Iterable[DaySketch], *, settings: ProfilerSettings) -
 # -- estimates --------------------------------------------------------------------------------
 
 
-def distinct_estimate(sketch: DaySketch | WindowSketch) -> int:
-    """The HyperLogLog cardinality estimate, rounded; 0 for an empty sketch."""
+def distinct_estimate(sketch: DaySketch | WindowSketch, *, k: int | None = None) -> int:
+    """Distinct tokens of the sketch: exactly ``len(bottom_k)`` while the sample is not
+    saturated (fewer than ``k`` hashes, ``k`` being ``ProfilerSettings.bottom_k``), the rounded
+    HyperLogLog estimate once it is; 0 for an empty sketch. Without ``k`` the HyperLogLog is
+    used whenever the sample is non-empty."""
     if sketch.count == 0:
         return 0
+    if k is not None and len(sketch.bottom_k) < k:
+        return len(sketch.bottom_k)
     hll = deserialize_hll(sketch.hll)
     with warnings.catch_warnings():
         # datasketch warns when the estimate sits near its small-range correction threshold;

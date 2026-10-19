@@ -361,6 +361,26 @@ def test_jaccard_estimate_tracks_overlap() -> None:
     assert jaccard_estimate(a, sketch(list(range(5000, 5100)), prof=prof)) < 0.1
 
 
+def test_distinct_estimate_is_exact_below_the_sample_capacity() -> None:
+    # SMALL.bottom_k is 64: 50 distinct tokens (seen several times each) leave the sample
+    # unsaturated, so the count is the sample size, not a HyperLogLog reading.
+    fifty = sketch([i % 50 for i in range(500)])
+    assert len(fifty.bottom_k) == 50
+    assert distinct_estimate(fifty, k=SMALL.bottom_k) == 50
+    assert distinct_estimate(fifty, k=SMALL.bottom_k) >= ProfilerSettings().min_distinct
+    # Exactly k distinct saturates the sample: the HyperLogLog answers from here on.
+    full = sketch(list(range(SMALL.bottom_k)))
+    assert len(full.bottom_k) == SMALL.bottom_k
+    hll_reading = round(float(deserialize_hll(full.hll).count()))
+    assert distinct_estimate(full, k=SMALL.bottom_k) == hll_reading
+    assert distinct_estimate(sketch(list(range(1000))), k=SMALL.bottom_k) == round(
+        float(deserialize_hll(sketch(list(range(1000))).hll).count())
+    )
+    # Without k the HyperLogLog is used, as before.
+    assert distinct_estimate(fifty) == round(float(deserialize_hll(fifty.hll).count()))
+    assert distinct_estimate(DaySketchBuilder(END, DAY, SMALL).build(), k=SMALL.bottom_k) == 0
+
+
 def test_distinct_estimate_tracks_distinct_tokens() -> None:
     repeated = [i % 300 for i in range(3000)]
     built = sketch(repeated)

@@ -186,6 +186,21 @@ def test_build_profile_clamps_the_null_rate_and_tolerates_no_template_count() ->
     assert build_profile(window, template_events=40, settings=prof).null_rate == 0.5
 
 
+def test_build_profile_counts_exactly_min_distinct_values_and_passes_the_floor() -> None:
+    # Scenario C's legacy source: exactly 50 distinct values in the window. The bottom-k sample
+    # (default 2,048) holds them all, so distinct is exact and the field is a candidate.
+    prof = ProfilerSettings(minhash_permutations=16)
+    rows = [_row(i % prof.min_distinct, "AAAA-9999") for i in range(400)]
+    profile = build_profile(_window(rows, prof), template_events=400, settings=prof)
+    assert profile.distinct == prof.min_distinct == 50
+    assert profile.is_candidate
+    # One short of the floor is still exact and still excluded.
+    rows = [_row(i % (prof.min_distinct - 1), "AAAA-9999") for i in range(400)]
+    profile = build_profile(_window(rows, prof), template_events=400, settings=prof)
+    assert profile.distinct == 49
+    assert not profile.is_candidate
+
+
 def test_build_profile_of_a_repeating_status_field_is_not_a_candidate() -> None:
     prof = ProfilerSettings(minhash_permutations=16, bottom_k=64)
     rows = [_row(i % 3, "AAAAAAA") for i in range(300)]

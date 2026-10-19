@@ -115,8 +115,11 @@ def build_profile(
 ) -> FieldProfile:
     """The :class:`FieldProfile` of a window sketch. ``template_events`` is the number of
     distinct events of the field's template over the same days; the null rate is the share of
-    them not carrying the field, clamped to [0, 1] (0 when the template count is unknown)."""
-    distinct = distinct_estimate(window)
+    them not carrying the field, clamped to [0, 1] (0 when the template count is unknown).
+    ``distinct`` is exact while the bottom-k sample is not saturated (see
+    :func:`~carto_core.profiler.sketches.distinct_estimate`), so an end with exactly
+    ``min_distinct`` values passes the floor."""
+    distinct = distinct_estimate(window, k=settings.bottom_k)
     shapes = top_shapes(window.shape_counts, settings.top_shapes)
     lengths = length_stats(window.length_counts)
     top_share = top_token_share(window.top_token_counts, window.count, settings.concentration_top_n)
