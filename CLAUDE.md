@@ -46,5 +46,8 @@ import, lint or test it.
   run and on the review fixes: branch `m1-review-fixes` (docs/plans/M1-review-fixes.md, ADRs
   0033 to 0043), all six packages and `fix-e2` merged into it and CI green on 2026-10-15; its PR
   to `main` is still to be opened. Items each ADR lists under Consequences as not built remain.
-- M2 Map discovery: plan drafted on branch `m2-map-discovery` on 2026-10-12 (docs/plans/M2.md).
-  Every question in the plan is answered; code starts after M1 acceptance. ADRs from 0046.
+- M2 Map discovery: built on branch `m2-map-discovery` on 2026-10-17 and 2026-10-18
+  (docs/plans/M2.md, ADRs 0046 to 0058): profiler, linker, composite links, console API and web
+  console, worker, LLM gateway, scenario C, eval driver, discover and gate report. Acceptance
+  waits on the eval targets of spec 18.4 (tuning round in the demo note) and a green CI run;
+  `fix-c2` is not merged into it yet. Next: M3 trace (write docs/plans/M3.md first).
