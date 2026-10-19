@@ -295,6 +295,58 @@ def test_purity_member_in_two_true_entities_counts_for_both() -> None:
 # ---------------------------------------------------------------------------------------------
 
 
+def test_bridges_are_compared_by_field_pair_whatever_the_forms() -> None:
+    """A bridge is a property of two fields in one record (spec 9.4): the truth may name it in
+    the form that links across systems, the engine stores one link per field pair."""
+    a = FieldRef(system_id="sys_w", source_id="src_w", field="order_ref")
+    b = FieldRef(system_id="sys_w", source_id="src_w", field="po_num")
+    c = FieldRef(system_id="sys_o", source_id="src_o", field="order_id")
+    truth = [
+        LinkTruth(
+            link_id="L13",
+            a=a,
+            form_a="digits.0",
+            b=b,
+            form_b="raw",
+            link_type="bridge",
+            role="transaction",
+            direction="undirected",
+            entity_id="E1",
+        ),
+        LinkTruth(
+            link_id="L5",
+            a=c,
+            form_a="raw",
+            b=a,
+            form_b="digits.0",
+            link_type="exact",
+            role="transaction",
+            direction="a_to_b",
+            entity_id="E1",
+        ),
+    ]
+    predicted = [
+        PredictedLink(
+            a=b, form_a="raw", b=a, form_b="raw", link_type="bridge", role="transaction", score=1.0
+        ),
+        PredictedLink(
+            a=a, form_a="raw", b=c, form_b="raw", link_type="exact", role="transaction", score=0.9
+        ),
+    ]
+    result = metrics.link_precision_recall(truth, predicted, frozenset({"exact", "bridge"}))
+    # the bridge matches in other forms; the exact link in another form does not
+    assert (result.matched, result.predicted, result.expected) == (1, 2, 2)
+    assert result.precision == 0.5 and result.recall == 0.5
+    # an exact prediction over a truth bridge's field pair counts, in any forms
+    predicted = [
+        PredictedLink(
+            a=a, form_a="raw", b=b, form_b="raw", link_type="exact", role="transaction", score=1.0
+        )
+    ]
+    result = metrics.link_precision_recall(truth[:1], predicted, frozenset({"exact", "bridge"}))
+    assert result.precision == 1.0 and result.recall == 1.0
+
+
 def test_link_precision_recall_ignores_direction_and_respects_the_type_filter() -> None:
     a, b, c = ref("a"), ref("b", "src_b"), ref("c", "src_c")
     d, e = ref("d", "src_d"), ref("e", "src_e")

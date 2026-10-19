@@ -43,6 +43,8 @@ FieldOnlyKey = tuple[str, str, str]
 """A field as a plain tuple: system, source, field (family members, spec 9.6)."""
 LinkPair = tuple[FieldKey, FieldKey]
 """The two ends of a link in sorted order, so direction does not matter."""
+FieldPair = tuple[FieldOnlyKey, FieldOnlyKey]
+"""The two fields of a link in sorted order, forms dropped (bridges)."""
 HopPair = tuple[str, str]
 
 
@@ -87,13 +89,29 @@ def link_pair(a: FieldRef, form_a: str, b: FieldRef, form_b: str) -> LinkPair:
     return (first, second)
 
 
+def field_pair(a: FieldRef, b: FieldRef) -> FieldPair:
+    """The unordered pair of fields of a link, whatever forms it used (bridges)."""
+    first, second = sorted((field_only_key(a), field_only_key(b)))
+    return (first, second)
+
+
+def _fields_of(pair: LinkPair) -> FieldPair:
+    (sa, oa, fa, _form_a), (sb, ob, fb, _form_b) = pair
+    first, second = sorted(((sa, oa, fa), (sb, ob, fb)))
+    return (first, second)
+
+
 @dataclass(frozen=True, slots=True)
 class PrecisionRecall:
-    """Set overlap between what the truth holds and what was predicted."""
+    """Set overlap between what the truth holds and what was predicted. ``matched_expected``
+    is set when the two sides are keyed differently (bridges by field pair, other links by
+    field and form) and the number of expected items reached can differ from the number of
+    predictions that hit; it defaults to ``matched``."""
 
     matched: int
     predicted: int
     expected: int
+    matched_expected: int | None = None
 
     @property
     def precision(self) -> float | None:
@@ -102,8 +120,9 @@ class PrecisionRecall:
 
     @property
     def recall(self) -> float | None:
-        """Matched over expected; None when the truth holds nothing of the kind."""
-        return ratio(self.matched, self.expected)
+        """Expected items reached over expected; None when the truth holds nothing of the kind."""
+        reached = self.matched if self.matched_expected is None else self.matched_expected
+        return ratio(reached, self.expected)
 
 
 def _overlap(expected: AbstractSet[object], predicted: AbstractSet[object]) -> PrecisionRecall:
@@ -126,21 +145,61 @@ def link_precision_recall(
 
     A link is the unordered pair of its (field, form) ends, so a predicted link in the other
     direction still matches, and a composite link is compared on its primary pair only (the
-    components are evidence, spec 9.5). ``link_types`` filters both sides: a truth bridge scored
-    with ``{"exact", "bridge"}`` matches a predicted exact link with the same ends, because the
-    table does not separate the two. The role is not compared.
+    components are evidence, spec 9.5). A bridge is compared by its field pair without the
+    forms: it is a property of two fields carried by one record (spec 9.4), every form of the
+    field co-occurs the same way, and the engine stores one link per field pair, so a truth
+    bridge named with ``digits.0`` and a predicted bridge in ``raw`` are the same link. A
+    bridge on either side also matches a non-bridge link over the same field pair, and a
+    non-bridge matches a non-bridge on field and form. ``link_types`` filters both sides: a
+    truth bridge scored with ``{"exact", "bridge"}`` matches a predicted exact link with the
+    same ends, because the table does not separate the two. The role is not compared.
     """
-    expected = {
-        link_pair(link.a, link.form_a, link.b, link.form_b)
-        for link in truth_links
-        if link.link_type in link_types
-    }
-    predicted = {
-        link_pair(link.a, link.form_a, link.b, link.form_b)
-        for link in predicted_links
-        if link.link_type in link_types
-    }
-    return _overlap(expected, predicted)
+    expected_forms: set[LinkPair] = set()
+    expected_fields: set[FieldPair] = set()
+    for link in truth_links:
+        if link.link_type not in link_types:
+            continue
+        if link.link_type == "bridge":
+            expected_fields.add(field_pair(link.a, link.b))
+        else:
+            expected_forms.add(link_pair(link.a, link.form_a, link.b, link.form_b))
+    predicted_forms: set[LinkPair] = set()
+    predicted_fields: set[FieldPair] = set()
+    for prediction in predicted_links:
+        if prediction.link_type not in link_types:
+            continue
+        if prediction.link_type == "bridge":
+            predicted_fields.add(field_pair(prediction.a, prediction.b))
+        else:
+            predicted_forms.add(
+                link_pair(prediction.a, prediction.form_a, prediction.b, prediction.form_b)
+            )
+    predicted_form_fields = {_fields_of(pair) for pair in predicted_forms}
+    expected_form_fields = {_fields_of(pair) for pair in expected_forms}
+    reached = sum(
+        1
+        for pair in expected_forms
+        if pair in predicted_forms or _fields_of(pair) in predicted_fields
+    ) + sum(
+        1
+        for fields in expected_fields
+        if fields in predicted_fields or fields in predicted_form_fields
+    )
+    hits = sum(
+        1
+        for pair in predicted_forms
+        if pair in expected_forms or _fields_of(pair) in expected_fields
+    ) + sum(
+        1
+        for fields in predicted_fields
+        if fields in expected_fields or fields in expected_form_fields
+    )
+    return PrecisionRecall(
+        matched=hits,
+        predicted=len(predicted_forms) + len(predicted_fields),
+        expected=len(expected_forms) + len(expected_fields),
+        matched_expected=reached,
+    )
 
 
 @dataclass(frozen=True, slots=True)
