@@ -7,7 +7,9 @@
 # the browser and the api see one origin (plan M2 decision 10). The api process reaches Dex
 # over the internal network through `api.oidc.backchannel_url` (http://dex:5556/dex).
 #
-# Four static users, one per spec 14.2 role, with throwaway passwords (bcrypt of "password").
+# Four static users, one per spec 14.2 role, with the throwaway password "password" (the bcrypt
+# hash below is of that public string and protects nothing; docs/security-exceptions.md records
+# the semgrep exception). Dex never runs in a customer install.
 # The group claim names the role; `api.bootstrap_group_roles` maps the groups on first start.
 
 issuer: ${CARTO_DEX_ISSUER}
@@ -43,18 +45,22 @@ enablePasswordDB: true
 # in the `groups` claim when the client requests the `groups` scope.
 staticPasswords:
   - email: admin@carto.local
+    # nosemgrep: generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: admin
     userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
   - email: engineer@carto.local
+    # nosemgrep: generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: engineer
     userID: 1f9a5d2e-0d4b-4f6c-9a3b-2c1d0e9f8a7b
   - email: viewer@carto.local
+    # nosemgrep: generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: viewer
     userID: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
   - email: auditor@carto.local
+    # nosemgrep: generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: auditor
     userID: 5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9
