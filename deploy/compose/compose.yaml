@@ -370,11 +370,16 @@ services:
     secrets: [oidc_client_secret]
     volumes:
       - ./dex/config.yaml:/etc/dex/config.yaml:ro
+    # The issuer and redirect URI are substituted into a copy of the config at start (Dex does
+    # not expand placeholders itself); the client secret reaches Dex through secretEnv.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
+        sed -e "s|\$${CARTO_DEX_ISSUER}|$${CARTO_DEX_ISSUER}|g"
+        -e "s|\$${CARTO_DEX_REDIRECT_URI}|$${CARTO_DEX_REDIRECT_URI}|g"
+        /etc/dex/config.yaml > /tmp/config.yaml &&
         CARTO_DEX_CLIENT_SECRET="$$(tr -d '\r\n' < /run/secrets/oidc_client_secret)"
-        exec dex serve /etc/dex/config.yaml
+        exec dex serve /tmp/config.yaml
     profiles: ["dev"]
 
   key-init:
