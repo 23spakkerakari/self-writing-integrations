@@ -51,6 +51,7 @@ import, lint or test it.
   console, worker, LLM gateway, scenario C, eval driver, discover and gate report. Eval on
   2026-10-19: scenario A meets every spec 18.4 target; scenario C meets four of five (exact and
   bridge recall 0.80, two legacy links under the distinct floor at that volume; founder call in
-  the demo note). Acceptance waits on that call, a green CI run (the ClickHouse and PostgreSQL
-  paths run only there) and the partner gate; `fix-c2` is not merged into it yet. Next: M3
-  trace (write docs/plans/M3.md first).
+  the demo note). CI green on all eleven jobs on 2026-10-20 (pushed as `m2-map-discovery-built`
+  at 2cb3bd0 because the rebased milestone branch needs the user's force push). Acceptance
+  waits on that founder call and the partner gate; `fix-c2` is not merged into it yet. Next:
+  M3 trace (write docs/plans/M3.md first).
