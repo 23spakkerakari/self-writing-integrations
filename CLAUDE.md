@@ -55,3 +55,6 @@ import, lint or test it.
   at 2cb3bd0 because the rebased milestone branch needs the user's force push). Acceptance
   waits on that founder call and the partner gate; `fix-c2` is not merged into it yet. Next:
   M3 trace (write docs/plans/M3.md first).
+- M3 Trace: plan drafted 2026-10-20 on branch `m3-trace` (docs/plans/M3.md, cut from
+  `m2-map-discovery` at 1e1b2d4). Eight founder questions open; code waits on the M2
+  acceptance, the answers and the `fix-c2` rebase. ADRs from 0059 when code starts.
