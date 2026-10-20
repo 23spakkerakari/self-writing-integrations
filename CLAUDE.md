@@ -48,6 +48,9 @@ import, lint or test it.
   to `main` is still to be opened. Items each ADR lists under Consequences as not built remain.
 - M2 Map discovery: built on branch `m2-map-discovery` on 2026-10-17 and 2026-10-18
   (docs/plans/M2.md, ADRs 0046 to 0058): profiler, linker, composite links, console API and web
-  console, worker, LLM gateway, scenario C, eval driver, discover and gate report. Acceptance
-  waits on the eval targets of spec 18.4 (tuning round in the demo note) and a green CI run;
-  `fix-c2` is not merged into it yet. Next: M3 trace (write docs/plans/M3.md first).
+  console, worker, LLM gateway, scenario C, eval driver, discover and gate report. Eval on
+  2026-10-19: scenario A meets every spec 18.4 target; scenario C meets four of five (exact and
+  bridge recall 0.80, two legacy links under the distinct floor at that volume; founder call in
+  the demo note). Acceptance waits on that call, a green CI run (the ClickHouse and PostgreSQL
+  paths run only there) and the partner gate; `fix-c2` is not merged into it yet. Next: M3
+  trace (write docs/plans/M3.md first).
