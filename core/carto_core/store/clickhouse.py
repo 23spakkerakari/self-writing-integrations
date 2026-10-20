@@ -179,14 +179,14 @@ _PAIR_JOIN: Final = (
 
 _COOCCURRENCES: Final = (
     "WITH ends AS ("
-    "SELECT event_id, field_ref, form, min(token) AS token, min(system_id) AS system_id "
+    "SELECT event_id, field_ref, form, min(token) AS token_min, min(system_id) AS system_id_min "
     "FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
     "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
     "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
     "GROUP BY event_id, field_ref, form), "
     "per_event AS ("
-    "SELECT event_id, min(system_id) AS system_id, "
-    "arraySort(groupArray((field_ref, form, token))) AS items "
+    "SELECT event_id, min(system_id_min) AS system_id, "
+    "arraySort(groupArray((field_ref, form, token_min))) AS items "
     "FROM ends GROUP BY event_id HAVING length(items) >= 2), "
     "pairs AS ("
     "SELECT system_id, "
@@ -230,16 +230,19 @@ _HOURLY_VOLUMES: Final = (
     "GROUP BY system_id, hour ORDER BY system_id, hour"
 )
 
+# Aggregated columns carry names of their own (``template_id_min``, not ``template_id``): a
+# ClickHouse alias that shadows the column it aggregates is inlined into outer expressions and
+# turns ``groupArray((..., token))`` into ``groupArray((..., min(token)))``, ILLEGAL_AGGREGATION.
 _EVENTS_WITH_KEYS_HEAD: Final = (
-    "SELECT e.event_id, e.template_id, e.observed_at, e.attributes, i.triples FROM ("
-    "SELECT event_id, min(template_id) AS template_id, min(observed_at) AS observed_at, "
-    "any(attributes) AS attributes FROM events WHERE tenant_id = {tenant_id:String} "
+    "SELECT e.event_id, e.template_id_min, e.observed_at_min, e.attributes_any, i.triples FROM ("
+    "SELECT event_id, min(template_id) AS template_id_min, min(observed_at) AS observed_at_min, "
+    "any(attributes) AS attributes_any FROM events WHERE tenant_id = {tenant_id:String} "
     "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
     "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
     "AND system_id = {system_id:String} GROUP BY event_id) AS e "
     "LEFT JOIN ("
-    "SELECT event_id, groupArray((field_ref, form, token)) AS triples FROM ("
-    "SELECT event_id, field_ref, form, min(token) AS token FROM event_identifiers "
+    "SELECT event_id, groupArray((field_ref, form, token_min)) AS triples FROM ("
+    "SELECT event_id, field_ref, form, min(token) AS token_min FROM event_identifiers "
     "WHERE tenant_id = {tenant_id:String} "
     "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
     "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "

@@ -600,14 +600,19 @@ _UPSERT_TEMPLATE = sqlalchemy.text(
 )
 _UPSERT_FIELD = sqlalchemy.text(
     "INSERT INTO fields (tenant_id, id, system_id, template_id, path, class, policy, pinned, "
-    "forms, count, shapes_json, first_seen, last_seen, created_at, updated_at) "
+    "forms, count, shapes_json, first_seen, last_seen, label, suggested_label, created_at, "
+    "updated_at) "
     "VALUES (:tenant_id, :id, :system_id, :template_id, :path, :class, :policy, :pinned, "
-    "CAST(:forms AS jsonb), :count, CAST(:shapes AS jsonb), :first_seen, :last_seen, :now, :now) "
+    "CAST(:forms AS jsonb), :count, CAST(:shapes AS jsonb), :first_seen, :last_seen, :label, "
+    ":suggested_label, :now, :now) "
     "ON CONFLICT (tenant_id, id) DO UPDATE SET class = EXCLUDED.class, "
     "policy = EXCLUDED.policy, pinned = EXCLUDED.pinned, forms = EXCLUDED.forms, "
     "count = EXCLUDED.count, shapes_json = EXCLUDED.shapes_json, "
     "first_seen = LEAST(fields.first_seen, EXCLUDED.first_seen), "
-    "last_seen = GREATEST(fields.last_seen, EXCLUDED.last_seen), updated_at = EXCLUDED.updated_at"
+    "last_seen = GREATEST(fields.last_seen, EXCLUDED.last_seen), "
+    "label = COALESCE(fields.label, EXCLUDED.label), "
+    "suggested_label = COALESCE(EXCLUDED.suggested_label, fields.suggested_label), "
+    "updated_at = EXCLUDED.updated_at"
 )
 _UPSERT_PROFILE = sqlalchemy.text(
     "INSERT INTO fields (tenant_id, id, system_id, template_id, path, class, policy, pinned, "
@@ -923,6 +928,8 @@ class PostgresMetadataStore:
                             "shapes": _shapes_json(pinned.shapes),
                             "first_seen": pinned.first_seen,
                             "last_seen": pinned.last_seen,
+                            "label": pinned.label,
+                            "suggested_label": pinned.suggested_label,
                             "now": now,
                         }
                     )
