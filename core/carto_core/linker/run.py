@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from carto_common.logging import get_logger
@@ -49,6 +49,7 @@ from carto_core.linker.score import Scorer
 from carto_core.linker.sentence import evidence_sentence
 from carto_core.linker.verify import DomainSizeFn, default_domain_size, verify
 from carto_core.linker.weights import load_weights
+from carto_core.profiler.run import profile_window
 from carto_core.store.model import FieldForm, Window
 
 if TYPE_CHECKING:
@@ -289,8 +290,10 @@ class LinkPass:
         return link_pass
 
     def window_for(self, now: datetime) -> Window:
-        start = now - timedelta(days=self._profiler.window_days)
-        return Window(start=start, end=now + timedelta(days=1))
+        """The profiler's read window at ``now`` (:func:`carto_core.profiler.run.profile_window`:
+        the last ``window_days`` UTC days plus the day ahead), so the join sees the same rows
+        the sketches do and ``n_a`` equals the profile's distinct count."""
+        return profile_window(now, self._profiler)
 
     def run(self, tenant_id: str, *, full: bool = False, now: datetime | None = None) -> LinkReport:
         at = now if now is not None else self._clock()

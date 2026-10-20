@@ -26,6 +26,7 @@ from datasketch import MinHash
 from carto_common.ids import derive_ulid
 from carto_core.audit import GENESIS_HASH, AuditEntry, chain_hash
 from carto_core.linker.composite import (
+    OUTCOME_STAGES,
     CompositeMatcher,
     CompositeReport,
     InMemoryCompositeRuleRepository,
@@ -213,6 +214,14 @@ def test_end_to_end_finds_one_composite_link_with_the_target_quality() -> None:
     assert (outcome.trigger.system_a, outcome.trigger.system_b) == ("sys_pay", "sys_wh")
     assert outcome.trigger.correlation >= LinkerSettings().composite_adjacency_min_correlation
     assert outcome.capped is False and outcome.blocked_pairs > len(truth)
+    assert outcome.stage == "rule" and outcome.components >= 3
+    assert outcome.em_prior is not None and 0.0 < outcome.em_prior < 1.0
+    assert 1 <= outcome.em_iterations <= LinkerSettings().composite_em_iterations
+    assert outcome.rule is not None and outcome.threshold == outcome.rule.threshold
+    assert outcome.estimated_precision == outcome.rule.estimated_precision
+    # Every other triggered ordering says where it stopped.
+    assert all(o.stage in OUTCOME_STAGES for o in report.outcomes)
+    assert all(o.stage != "rule" for o in report.outcomes if o is not outcome)
 
     matched = {(m.event_id_a, m.event_id_b) for m in outcome.matches}
     precision = len(matched & truth) / len(matched)
@@ -306,6 +315,9 @@ def test_a_single_shared_component_is_not_a_composite_rule() -> None:
     assert triggered, "the pair is adjacent and blocks on the amount"
     assert report.rules == 0 and report.links == ()
     assert any(entry["event"] == "composite needs at least two components" for entry in logs)
+    assert all(o.stage == "few_components" and o.components == 1 for o in triggered)
+    outcome_logs = [entry for entry in logs if entry["event"] == "composite pair outcome"]
+    assert len(outcome_logs) == len(report.outcomes)
     leak_free(logs)
 
 

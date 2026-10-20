@@ -19,6 +19,7 @@ from hypothesis import strategies as st
 from carto_core.linker.model import Candidate, Direction, LinkRole, LinkType, PairFeatures
 from carto_core.linker.score import (
     Scorer,
+    concentration_excess,
     direction_of,
     feature_vector,
     hard_filter,
@@ -335,3 +336,33 @@ def test_direction_flips_and_role_holds_when_the_ends_swap(
     assert direction_of(swapped, SETTINGS) == FLIPPED[direction_of(item, SETTINGS)]
     assert role_of(swapped, SETTINGS) == role_of(item, SETTINGS)
     assert hard_filter(swapped, SETTINGS) == hard_filter(item, SETTINGS)
+
+
+@pytest.mark.parametrize(
+    ("concentration", "n_match", "expected"),
+    [
+        (None, 500, 0.0),
+        (0.02, 500, 0.0),
+        (0.476, 21, 0.0),
+        (1.0, 21, 1.0),
+        (0.5, 20, 0.0),
+        (0.75, 20, 0.5),
+        (0.9, 5, 0.0),
+        (0.3, 0, 0.0),
+        (0.3, 100, pytest.approx(0.2 / 0.9)),
+    ],
+)
+def test_concentration_excess_over_the_flat_baseline(
+    concentration: float | None, n_match: int, expected: float
+) -> None:
+    assert concentration_excess(concentration, n_match) == expected
+
+
+def test_sparse_flat_link_is_not_read_as_concentrated() -> None:
+    """Twenty-one one-to-one matches put 48% in the top ten by arithmetic alone; the score
+    must not treat that as skew (a 60%-filled manual field inside one week)."""
+    sparse = features(n_a=50, n_b=150, n_match=21, c_ab=0.42, c_ba=0.14, concentration=10 / 21)
+    skewed = features(n_a=50, n_b=150, n_match=21, c_ab=0.42, c_ba=0.14, concentration=0.95)
+    assert feature_vector(sparse, SETTINGS)["concentration"] == 0.0
+    assert feature_vector(skewed, SETTINGS)["concentration"] > 0.9
+    assert Scorer(SETTINGS).probability(sparse) > Scorer(SETTINGS).probability(skewed)

@@ -67,6 +67,21 @@ The profiler reads `[start of (today - window_days + 1), start of (today + 2))` 
 `[now - window_days, now + 1 day)`, so day sketches cover whole days and a full pass equals the
 incremental passes (a property test holds it). The linker uses the same window.
 
+## 8. The concentration feature is the excess over the flat baseline
+
+Spec 9.3's `concentration` is the share of matches the ten most matched tokens hold. With `n`
+matched tokens of fan-out one that share is `10 / n` even when every token matches exactly once,
+so a sparse but clean link reads as concentrated. The hard filter keeps the literal definition
+(`concentration > 0.5` discards); the scoring feature is the excess over `10 / n`, rescaled to
+`[0, 1]` (`score.concentration_excess`).
+
+## 9. Composite matching tries both orderings of a system pair
+
+A clerk keys payments into purchase orders within hours, so the rolling-day correlation peaks of
+the two orderings are nearly equal and noise picked the wrong one (shop L06 blocked 110 pairs
+instead of 4,135). Both orderings are now matched and one rule stands per system pair, the one
+with more matched pairs, then the higher score; the other ordering is reported with its stage.
+
 ## Consequences
 
 - The reviewer reads one audit row per decision and finds linker-made transitions under the

@@ -15,6 +15,8 @@ import pytest
 
 from carto_core.linker.composite import (
     Adjacency,
+    CompositeMatch,
+    CompositeOutcome,
     InMemoryCompositeRuleRepository,
     PostgresCompositeRuleRepository,
     component_views,
@@ -26,6 +28,7 @@ from carto_core.linker.composite import (
     hourly_series,
     identifier_links,
     key_event_series,
+    one_rule_per_system_pair,
     primary_component,
     rolling_day,
     trigger_pairs,
@@ -627,17 +630,46 @@ def test_trigger_needs_the_volume_correlation() -> None:
     assert at_floor.triggered
 
 
-def test_trigger_keeps_the_ordering_with_the_higher_peak_and_both_on_a_tie() -> None:
+def test_both_orderings_of_an_adjacent_pair_are_tried() -> None:
+    # A clerk keys payments into purchase orders within hours: the rolling-day peaks read
+    # 0.93 one way and 0.95 the other, which says nothing about who leads.
     forward, backward = trigger_pairs(
-        [], [adjacency("sys_a", "sys_b", 0.9, lag=3), adjacency("sys_b", "sys_a", 0.7)], SETTINGS
-    )
-    assert forward.triggered and not backward.triggered and backward.reason == "reverse"
-    tied = trigger_pairs(
         [],
-        [adjacency("sys_a", "sys_b", 0.9, lag=0), adjacency("sys_b", "sys_a", 0.9, lag=0)],
+        [adjacency("sys_a", "sys_b", 0.93, lag=0), adjacency("sys_b", "sys_a", 0.95, lag=2)],
         SETTINGS,
     )
-    assert all(t.triggered for t in tied)
+    assert forward.triggered and backward.triggered
+    assert forward.reason == backward.reason == "no_exact_link"
+
+
+def test_one_rule_stands_per_system_pair() -> None:
+    def outcome(a: str, b: str, matched: int, score: float) -> CompositeOutcome:
+        trigger = trigger_pairs([], [adjacency(a, b, 0.9)], SETTINGS)[0]
+        link = ScoredLink(
+            a=FieldForm(f"{a}/tpl/total", "amount"),
+            b=FieldForm(f"{b}/tpl/total", "amount"),
+            link_type=LinkType.COMPOSITE,
+            role=LinkRole.TRANSACTION,
+            direction=Direction.A_TO_B,
+            score=score,
+            features=features(0.9, 0.9),
+            affected_volume=matched,
+        )
+        matches = tuple(CompositeMatch(f"a{n}", f"b{n}", 10.0) for n in range(matched))
+        return CompositeOutcome(trigger, 100, 100, matched, False, rule(), link, matches)
+
+    forward = outcome("sys_pay", "sys_wh", 4979, 0.8)
+    backward = outcome("sys_wh", "sys_pay", 143, 0.9)
+    other = outcome("sys_a", "sys_b", 50, 0.7)
+    empty = CompositeOutcome(forward.trigger, 100, 100, 0, False, None, None)
+    kept = one_rule_per_system_pair([backward, forward, other, empty])
+    assert [o.rule is not None for o in kept] == [False, True, True, False]
+    assert kept[0].link is None and kept[0].matches == () and kept[0].trigger is backward.trigger
+    assert kept[0].stage == "other_ordering" and kept[1].stage == "rule"
+    assert kept[1] is forward and kept[2] is other and kept[3] is empty
+    # Equal match counts: the higher score stands.
+    tie = one_rule_per_system_pair([outcome("x", "y", 30, 0.6), outcome("y", "x", 30, 0.7)])
+    assert [o.link.score if o.link else None for o in tie] == [None, 0.7]
 
 
 def test_bridges_count_as_exact_links_and_other_systems_do_not() -> None:

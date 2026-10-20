@@ -179,9 +179,11 @@ def test_discover_writes_links_entities_and_summary(run: tuple[Path, object]) ->
     # auto-accept is off, so the engine's own families are empty (the eval policy builds them)
     assert entities == []
     assert summary["as_of"] == AS_OF.isoformat()
+    # the profiler's day-aligned window (ADR 0058 item 7): the last window_days UTC days
+    # including today, plus the day ahead; the link pass joins over the same days
     assert summary["window"] == {
-        "start": (AS_OF - timedelta(days=7)).isoformat(),
-        "end": (AS_OF + timedelta(days=1)).isoformat(),
+        "start": (AS_OF - timedelta(days=6)).isoformat(),
+        "end": (AS_OF + timedelta(days=2)).isoformat(),
     }
     assert summary["weights_version"] == "v1-hand-set"
     assert summary["profile"]["full"] is True and summary["profile"]["rows_read"] == 4 * N

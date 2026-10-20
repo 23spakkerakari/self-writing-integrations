@@ -14,7 +14,8 @@ unit":
 - ``fanout_penalty``: how far the *smaller* of the two median fanouts sits above one, scaled by
   ``transaction_fanout_median_max``; one-to-many links keep one end at one and are not
   penalised (they become associations by role), many-to-many overlaps are;
-- ``concentration`` and ``chance_ratio`` (clipped at one) from the spec table;
+- ``concentration``: the top-ten share's excess over the flat baseline ``10 / n_match``
+  (:func:`concentration_excess`), and ``chance_ratio`` (clipped at one) from the spec table;
 - ``pairing_consistency``: the bridge consistency of 9.4, zero for exact pairs.
 
 A missing feature (no matches, unknown domain) contributes its neutral value. Every threshold
@@ -35,6 +36,7 @@ from carto_core.linker.model import (
     PairFeatures,
 )
 from carto_core.linker.weights import DEFAULT_WEIGHTS, Weights
+from carto_core.store.memory import CONCENTRATION_TOP_N
 
 if TYPE_CHECKING:
     from carto_core.settings import LinkerSettings
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
 __all__ = [
     "LAG_FLOOR_SECONDS",
     "Scorer",
+    "concentration_excess",
     "direction_of",
     "feature_vector",
     "hard_filter",
@@ -57,6 +60,22 @@ link whose events land within seconds is not called inconsistent by a few second
 
 def _or(value: float | None, default: float) -> float:
     return default if value is None else value
+
+
+def concentration_excess(concentration: float | None, n_match: int) -> float:
+    """The concentration feature: how far the top-ten share sits above the flat baseline.
+
+    Spec 9.3's ``concentration`` is the share of matches the ten most matched tokens hold. With
+    ``n`` matched tokens of fan-out one that share is ``10 / n`` even when every token matches
+    exactly once, so a sparse link (21 matches: 0.48) would read as nearly as concentrated as
+    a genuinely skewed one. The feature therefore measures the excess over the flat baseline,
+    rescaled to ``[0, 1]``; the hard filter keeps the spec's literal definition."""
+    if concentration is None or n_match <= 0:
+        return 0.0
+    baseline = min(1.0, CONCENTRATION_TOP_N / n_match)
+    if baseline >= 1.0:
+        return 0.0
+    return min(1.0, max(0.0, (concentration - baseline) / (1.0 - baseline)))
 
 
 def feature_vector(features: PairFeatures, settings: LinkerSettings) -> dict[str, float]:
@@ -80,7 +99,7 @@ def feature_vector(features: PairFeatures, settings: LinkerSettings) -> dict[str
         "lag_consistency": lag_consistency,
         "lag_direction": max(share, 1.0 - share),
         "fanout_penalty": fanout_penalty,
-        "concentration": min(1.0, max(0.0, _or(features.concentration, 0.0))),
+        "concentration": concentration_excess(features.concentration, features.n_match),
         "chance_ratio": min(1.0, max(0.0, _or(features.chance_ratio, 0.0))),
         "pairing_consistency": min(1.0, max(0.0, _or(features.pairing_consistency, 0.0))),
     }

@@ -14,8 +14,8 @@ system pair ``(A earlier, B later)``:
    each once; log noise lines carry none) summed over a trailing day (:func:`rolling_day`)
    cross-correlate at or above ``composite_adjacency_min_correlation`` at some lag from zero to
    ``composite_window_business_days x 24`` hours (:func:`cross_correlation`: Pearson, B shifted
-   back by the lag). Of the two orderings of a system pair the one with the higher peak is kept;
-   an exact tie keeps both.
+   back by the lag). Both orderings of an adjacent pair are tried; when both yield a rule, one
+   stands per system pair (:func:`one_rule_per_system_pair`).
 2. **Blocking** (:mod:`carto_core.linker.composite_blocking`) and **scoring**
    (:mod:`carto_core.linker.composite_em`): components; ``u`` from random pairs; ``m``, the
    prior and the within-block agreement rates of non-matches from EM over
@@ -108,6 +108,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MAX_COMPONENTS",
     "MIN_COMPONENTS",
+    "OUTCOME_STAGES",
     "WEAK_FORMS",
     "Adjacency",
     "CompositeMatch",
@@ -127,6 +128,7 @@ __all__ = [
     "hourly_series",
     "identifier_links",
     "key_event_series",
+    "one_rule_per_system_pair",
     "primary_component",
     "rolling_day",
     "trigger_pairs",
@@ -267,7 +269,7 @@ class SystemPairTrigger:
     correlation: float
     triggered: bool
     reason: str
-    """``no_exact_link``, ``low_coverage``, ``exact_link``, ``no_adjacency`` or ``reverse``."""
+    """``no_exact_link``, ``low_coverage``, ``exact_link`` or ``no_adjacency``."""
     later_end_events: int | None = None
     """Events of the later end's template in the window, when known."""
 
@@ -342,7 +344,6 @@ def trigger_pairs(
     maps ``(system_id, template_id)`` to its events in the window (from
     :meth:`~carto_core.store.model.EventStore.template_counts`) for the coverage test."""
     best = _best_links(links)
-    peaks = {(item.system_a, item.system_b): item for item in adjacency}
     result: list[SystemPairTrigger] = []
     for item in adjacency:
         link = best.get(frozenset({item.system_a, item.system_b}))
@@ -357,11 +358,8 @@ def trigger_pairs(
             weak, reason = True, "low_coverage"
         else:
             weak, reason = False, "exact_link"
-        reverse = peaks.get((item.system_b, item.system_a))
         if weak and item.correlation < settings.composite_adjacency_min_correlation:
             weak, reason = False, "no_adjacency"
-        elif weak and reverse is not None and reverse.correlation > item.correlation:
-            weak, reason = False, "reverse"
         result.append(
             SystemPairTrigger(
                 system_a=item.system_a,
@@ -568,6 +566,25 @@ class PostgresCompositeRuleRepository:
 
 # -- the matcher ---------------------------------------------------------------------------------
 
+STAGE_NO_PAIRS: Final = "no_blocked_pairs"
+STAGE_FEW_COMPONENTS: Final = "few_components"
+STAGE_NO_THRESHOLD: Final = "no_threshold"
+STAGE_BELOW_MIN_MATCH: Final = "below_min_match"
+STAGE_OTHER_ORDERING: Final = "other_ordering"
+STAGE_RULE: Final = "rule"
+OUTCOME_STAGES: Final[tuple[str, ...]] = (
+    STAGE_NO_PAIRS,
+    STAGE_FEW_COMPONENTS,
+    STAGE_NO_THRESHOLD,
+    STAGE_BELOW_MIN_MATCH,
+    STAGE_OTHER_ORDERING,
+    STAGE_RULE,
+)
+"""Where a triggered ordered pair stopped: no blocked pairs, fewer than :data:`MIN_COMPONENTS`
+scoring components, no threshold reaching ``composite_target_precision``, fewer than
+``min_match`` matched pairs, the other ordering of the system pair kept the rule
+(:func:`one_rule_per_system_pair`), or a rule."""
+
 
 @dataclass(frozen=True, slots=True)
 class CompositeMatch:
@@ -590,6 +607,17 @@ class CompositeOutcome:
     rule: CompositeRule | None
     link: ScoredLink | None
     matches: tuple[CompositeMatch, ...] = ()
+    stage: str = STAGE_RULE
+    """Where the pair stopped (:data:`OUTCOME_STAGES`); counts and parameters only below."""
+    components: int = 0
+    """Scoring components found over the blocked pairs (label components excluded)."""
+    labelled_pairs: int = 0
+    """Blocked pairs an exact link above the ceiling labels as a match or a non-match."""
+    em_prior: float | None = None
+    em_iterations: int = 0
+    em_converged: bool = False
+    threshold: float | None = None
+    estimated_precision: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,6 +687,44 @@ def primary_component(
             best = (score, index)
     assert best is not None  # noqa: S101 - specs is never empty here (checked by the caller)
     return specs[best[1]], components[best[1]]
+
+
+def one_rule_per_system_pair(outcomes: Sequence[CompositeOutcome]) -> list[CompositeOutcome]:
+    """Both orderings of an adjacent system pair are tried, because the peak correlation of
+    two rolling-day series cannot tell which system leads when both exceed the floor (a clerk
+    keys payments into purchase orders within hours: 0.93 one way, 0.95 the other). The wrong
+    ordering blocks few pairs and usually dies at the component or match floors; when both
+    orderings produce a rule, the one with more matched pairs (then the higher score) stands
+    and the other is reported without a rule, so the queue sees one link per system pair."""
+    best: dict[frozenset[str], int] = {}
+    for index, outcome in enumerate(outcomes):
+        if outcome.rule is None or outcome.link is None:
+            continue
+        key = frozenset({outcome.trigger.system_a, outcome.trigger.system_b})
+        current = best.get(key)
+        if current is None:
+            best[key] = index
+            continue
+        rival = outcomes[current]
+        assert rival.link is not None  # noqa: S101 - only indexes of outcomes with a link are kept
+        if (len(outcome.matches), outcome.link.score) > (len(rival.matches), rival.link.score):
+            best[key] = index
+    kept = set(best.values())
+    result: list[CompositeOutcome] = []
+    for index, outcome in enumerate(outcomes):
+        if outcome.rule is not None and index not in kept:
+            log.info(
+                "composite reverse ordering dropped",
+                system_a=outcome.trigger.system_a,
+                system_b=outcome.trigger.system_b,
+                matched=len(outcome.matches),
+            )
+            result.append(
+                replace(outcome, rule=None, link=None, matches=(), stage=STAGE_OTHER_ORDERING)
+            )
+        else:
+            result.append(outcome)
+    return result
 
 
 def _seed(tenant_id: str, system_a: str, system_b: str) -> int:
@@ -732,9 +798,31 @@ class CompositeMatcher:
                 continue
             side_a = self._side(sides, tenant_id, trigger.system_a, window)
             side_b = self._side(sides, tenant_id, trigger.system_b, window)
-            outcomes.append(
-                self._match(tenant_id, window, trigger, side_a, side_b, now, exact_pairs)
+            outcomes.append(self._match(tenant_id, window, trigger, side_a, side_b, exact_pairs))
+        outcomes = one_rule_per_system_pair(outcomes)
+        for outcome in outcomes:
+            log.info(
+                "composite pair outcome",
+                tenant_id=tenant_id,
+                system_a=outcome.trigger.system_a,
+                system_b=outcome.trigger.system_b,
+                stage=outcome.stage,
+                events_a=outcome.events_a,
+                events_b=outcome.events_b,
+                blocked_pairs=outcome.blocked_pairs,
+                capped=outcome.capped,
+                components=outcome.components,
+                labelled_pairs=outcome.labelled_pairs,
+                em_prior=outcome.em_prior,
+                em_iterations=outcome.em_iterations,
+                em_converged=outcome.em_converged,
+                threshold=outcome.threshold,
+                estimated_precision=outcome.estimated_precision,
+                matched=len(outcome.matches),
             )
+            if outcome.rule is not None and outcome.link is not None:
+                link_id = link_id_for(tenant_id, outcome.link.a, outcome.link.b)
+                self._rules.upsert(tenant_id, link_id, outcome.rule, now)
         report = CompositeReport(
             tenant_id=tenant_id,
             window=window,
@@ -775,7 +863,6 @@ class CompositeMatcher:
         trigger: SystemPairTrigger,
         side_a: Side,
         side_b: Side,
-        now: datetime,
         exact_pairs: Collection[frozenset[str]] = frozenset(),
     ) -> CompositeOutcome:
         settings = self._settings
@@ -794,13 +881,21 @@ class CompositeMatcher:
                 pairs=len(blocked.pairs),
             )
         empty = CompositeOutcome(
-            trigger, len(side_a), len(side_b), len(blocked.pairs), blocked.capped, None, None
+            trigger,
+            len(side_a),
+            len(side_b),
+            len(blocked.pairs),
+            blocked.capped,
+            None,
+            None,
+            stage=STAGE_NO_PAIRS,
         )
         if not blocked.pairs:
             return empty
         specs, label_specs = split_components(
             discover_components(side_a, side_b, blocked.pairs), exact_pairs
         )
+        empty = replace(empty, stage=STAGE_FEW_COMPONENTS, components=len(specs))
         if len(specs) < MIN_COMPONENTS:
             log.info(
                 "composite needs at least two components",
@@ -826,8 +921,22 @@ class CompositeMatcher:
         weights = pair_weights(matrix, em.m, u)
         posterior = posteriors(matrix, em.m, em.u, em.prior)
         choice = choose_threshold(weights, posterior, settings.composite_target_precision)
+        empty = replace(
+            empty,
+            stage=STAGE_NO_THRESHOLD,
+            labelled_pairs=int(np.count_nonzero(~np.isnan(labels))),
+            em_prior=em.prior,
+            em_iterations=em.iterations,
+            em_converged=em.converged,
+        )
         if choice is None:
             return empty
+        empty = replace(
+            empty,
+            stage=STAGE_BELOW_MIN_MATCH,
+            threshold=choice.threshold,
+            estimated_precision=choice.estimated_precision,
+        )
         selected = np.flatnonzero(weights >= choice.threshold)
         matches = tuple(
             CompositeMatch(
@@ -858,8 +967,7 @@ class CompositeMatcher:
         link = self._scored_link(
             tenant_id, window, trigger, rule, primary, side_a, side_b, blocked.pairs, selected
         )
-        self._rules.upsert(tenant_id, link_id_for(tenant_id, link.a, link.b), rule, now)
-        return replace(empty, rule=rule, link=link, matches=matches)
+        return replace(empty, rule=rule, link=link, matches=matches, stage=STAGE_RULE)
 
     def _scored_link(
         self,

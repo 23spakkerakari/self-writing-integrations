@@ -41,6 +41,7 @@ from carto_core.linker.sentence import (
     system_label,
 )
 from carto_core.profiler.model import FieldProfile, ShapeShare, WindowSketch
+from carto_core.profiler.run import profile_window
 from carto_core.settings import LinkerSettings, ProfilerSettings
 from carto_core.store.memory import InMemoryEventStore
 from carto_core.store.model import FieldForm, Window
@@ -219,11 +220,15 @@ def make_pass(
     return link_pass, links, entities, recorder, hook_calls
 
 
-def test_window_is_the_profiler_window_plus_a_day() -> None:
+def test_window_is_the_profiler_read_window() -> None:
+    """The join runs over the same days the sketches cover (profile_window): the last
+    ``window_days`` UTC days plus the day ahead, aligned to day starts."""
     link_pass, *_ = make_pass(InMemoryEventStore())
     window = link_pass.window_for(NOW)
-    assert window.start == NOW - timedelta(days=7)
-    assert window.end == NOW + timedelta(days=1)
+    today = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+    assert window.start == today - timedelta(days=6)
+    assert window.end == today + timedelta(days=2)
+    assert window == profile_window(NOW, PROFILER)
 
 
 def test_end_to_end_proposes_the_exact_link_and_the_bridge_not_the_noise() -> None:
