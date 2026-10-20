@@ -688,7 +688,8 @@ def test_the_postgres_ports_serve_one_request_per_port(
         tenant_id=TENANT,
         subject="alice",
         display_name="Alice",
-        roles=frozenset({Role.INTEGRATION_ENGINEER}),
+        # admin: the walk ends at GET /audit, which spec 14.2 grants admins and auditors
+        roles=frozenset({Role.ADMIN}),
         authenticated_at=NOW,
         ip="127.0.0.1",
         user_agent="pytest",
