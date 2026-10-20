@@ -230,7 +230,9 @@ class InMemoryEngine:
 
     def discover(self, bundle_dir: Path, *, out_dir: Path, as_of: datetime) -> list[str]:
         parts = self.load(bundle_dir, stored_at=as_of)
-        assert self.verified is not None  # noqa: S101 - set by load
+        if self.verified is None:  # set by load
+            msg = "the bundle was not verified"
+            raise RuntimeError(msg)
         result = discover(
             parts,
             tenant_id=self.settings.tenant_id,

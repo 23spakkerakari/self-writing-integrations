@@ -18,12 +18,15 @@ hold a redelivered batch twice until a merge runs (ADR 0034), so:
 - an event counts once: ``uniqExact(event_id)``, or a ``GROUP BY event_id``;
 - the watermark (:meth:`ClickHouseStore.max_stored_at`) is the latest of those per-row minima,
   so a duplicate copy stored later is never "new" again;
-- quantiles are ``quantileExactLow`` and the lag is ``(ms_b - ms_a) / 1000`` in Float64, which
-  is bit for bit what the reference computes.
+- a quantile is the element at index ``floor(level * (n - 1))`` of the sorted values, computed
+  explicitly with ``arraySort(groupArray(...))`` and a 1-based index (ClickHouse's own
+  ``quantileExactLow`` differs for small arrays), and the lag is ``(ms_b - ms_a) / 1000`` in
+  Float64, which is bit for bit what the reference computes.
 
 :meth:`pair_join` is one statement: the per-token aggregates of both ends (two subqueries
 joined on the token), a window ``row_number`` over the join-row product for the top-10
-concentration, and ``n_a`` and ``n_b`` as two scalar subqueries over the same window.
+concentration, ``n_a`` and ``n_b`` as two scalar subqueries over the same window, and an outer
+select that picks the quantiles out of the sorted arrays.
 :meth:`cooccurrences` never self-joins the table: it groups each event's deduplicated ends into
 a sorted array, expands the ``i < j`` pairs with array functions (at most 64 ends per event, spec
 7.1), then aggregates per pair and per ``(pair, token)`` for the functional-dependency counts
@@ -90,12 +93,10 @@ class QueryClient(Protocol):
 
 
 # -- fixed SQL ---------------------------------------------------------------------------------
-
-_WINDOW: Final = (
-    "tenant_id = {tenant_id:String} "
-    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
-    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC')"
-)
+#
+# Every statement is one string literal (adjacent literals only): the window condition
+# ``tenant_id = {tenant_id:String} AND observed_at >= ... AND observed_at < ...`` is written out
+# in each, so no SQL text is ever assembled at runtime (spec 14.7).
 
 _MAX_STORED_AT: Final = (
     "SELECT count(), max(stored_at) FROM ("
@@ -106,44 +107,52 @@ _MAX_STORED_AT: Final = (
 _IDENTIFIER_ROWS_HEAD: Final = (
     "SELECT min(token), field_ref, form, min(shape), event_id, min(system_id), "
     "min(observed_at), min(stored_at) AS stored_at "
-    "FROM event_identifiers WHERE " + _WINDOW
+    "FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC')"
 )
 _FORMS_FILTER: Final = " AND form IN {forms:Array(String)}"
 _IDENTIFIER_ROWS_GROUP: Final = " GROUP BY event_id, field_ref, form"
 _STORED_AFTER: Final = " HAVING stored_at > fromUnixTimestamp64Milli({stored_after:Int64}, 'UTC')"
 
 _TEMPLATE_COUNTS: Final = (
-    "SELECT system_id, template_id, toDate(observed_at, 'UTC') AS day, "  # noqa: S608 - fixed text
-    "uniqExact(event_id) AS events FROM events WHERE " + _WINDOW + " "
+    "SELECT system_id, template_id, toDate(observed_at, 'UTC') AS day, "
+    "uniqExact(event_id) AS events FROM events WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
     "GROUP BY system_id, template_id, day ORDER BY system_id, template_id, day"
 )
 
-
-def _end_filter(suffix: str) -> str:
-    return (
-        "tenant_id = {tenant_id:String} "
-        f"AND field_ref = {{field_{suffix}:String}} AND form = {{form_{suffix}:String}} "
-        "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
-        "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC')"
-    )
-
-
-def _end_tokens(suffix: str) -> str:
-    return (
-        "SELECT token, min(observed_at) AS first_at, uniqExact(event_id) AS n_events "
-        "FROM event_identifiers WHERE " + _end_filter(suffix) + " GROUP BY token"
-    )
-
-
+# Quantiles use the reference definition explicitly (ClickHouse's own quantileExactLow differs
+# for small arrays): the element at index floor(level * (n - 1)) of the sorted values, and
+# ClickHouse arrays are 1-based. ``greatest(length, 1)`` only keeps the index valid for an empty
+# array, whose values pair_join ignores (n_match is 0).
 _PAIR_JOIN: Final = (
-    "SELECT "  # noqa: S608 - fixed text, parameters only
-    "(SELECT uniqExact(token) FROM event_identifiers WHERE " + _end_filter("a") + ") AS n_a, "
-    "(SELECT uniqExact(token) FROM event_identifiers WHERE " + _end_filter("b") + ") AS n_b, "
+    "SELECT n_a, n_b, n_match, "
+    "lags[toUInt32(floor(0.25 * (greatest(length(lags), 1) - 1))) + 1] AS lag_q25, "
+    "lags[toUInt32(floor(0.5 * (greatest(length(lags), 1) - 1))) + 1] AS lag_median, "
+    "lags[toUInt32(floor(0.75 * (greatest(length(lags), 1) - 1))) + 1] AS lag_q75, "
+    "lag_positive, "
+    "fan_ab[toUInt32(floor(0.5 * (greatest(length(fan_ab), 1) - 1))) + 1] AS fan_ab_median, "
+    "fan_ab[toUInt32(floor(0.99 * (greatest(length(fan_ab), 1) - 1))) + 1] AS fan_ab_p99, "
+    "fan_ba[toUInt32(floor(0.5 * (greatest(length(fan_ba), 1) - 1))) + 1] AS fan_ba_median, "
+    "fan_ba[toUInt32(floor(0.99 * (greatest(length(fan_ba), 1) - 1))) + 1] AS fan_ba_p99, "
+    "top_product, total_product "
+    "FROM ("
+    "SELECT "
+    "(SELECT uniqExact(token) FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND field_ref = {field_a:String} AND form = {form_a:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC')) AS n_a, "
+    "(SELECT uniqExact(token) FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND field_ref = {field_b:String} AND form = {form_b:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC')) AS n_b, "
     "count() AS n_match, "
-    "quantilesExactLow(0.25, 0.5, 0.75)(lag) AS lag_q, "
+    "arraySort(groupArray(lag)) AS lags, "
     "countIf(lag > 0) AS lag_positive, "
-    "quantilesExactLow(0.5, 0.99)(count_b) AS fan_ab, "
-    "quantilesExactLow(0.5, 0.99)(count_a) AS fan_ba, "
+    "arraySort(groupArray(count_b)) AS fan_ab, "
+    "arraySort(groupArray(count_a)) AS fan_ba, "
     "sumIf(product, rank <= {top_n:UInt64}) AS top_product, "
     "sum(product) AS total_product "
     "FROM ("
@@ -153,14 +162,28 @@ _PAIR_JOIN: Final = (
     "SELECT a.token AS token, "
     "(toUnixTimestamp64Milli(b.first_at) - toUnixTimestamp64Milli(a.first_at)) / 1000 AS lag, "
     "a.n_events AS count_a, b.n_events AS count_b, a.n_events * b.n_events AS product "
-    "FROM (" + _end_tokens("a") + ") AS a INNER JOIN (" + _end_tokens("b") + ") AS b "
-    "ON a.token = b.token))"
+    "FROM ("
+    "SELECT token, min(observed_at) AS first_at, uniqExact(event_id) AS n_events "
+    "FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND field_ref = {field_a:String} AND form = {form_a:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') GROUP BY token) AS a "
+    "INNER JOIN ("
+    "SELECT token, min(observed_at) AS first_at, uniqExact(event_id) AS n_events "
+    "FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND field_ref = {field_b:String} AND form = {form_b:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') GROUP BY token) AS b "
+    "ON a.token = b.token)))"
 )
 
 _COOCCURRENCES: Final = (
     "WITH ends AS ("
     "SELECT event_id, field_ref, form, min(token) AS token, min(system_id) AS system_id "
-    "FROM event_identifiers WHERE " + _WINDOW + " GROUP BY event_id, field_ref, form), "
+    "FROM event_identifiers WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
+    "GROUP BY event_id, field_ref, form), "
     "per_event AS ("
     "SELECT event_id, min(system_id) AS system_id, "
     "arraySort(groupArray((field_ref, form, token))) AS items "
@@ -201,18 +224,26 @@ _COOCCURRENCES: Final = (
 
 _HOURLY_VOLUMES: Final = (
     "SELECT system_id, toStartOfHour(observed_at) AS hour, uniqExact(event_id) AS events "
-    "FROM events WHERE " + _WINDOW + " GROUP BY system_id, hour ORDER BY system_id, hour"
+    "FROM events WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
+    "GROUP BY system_id, hour ORDER BY system_id, hour"
 )
 
 _EVENTS_WITH_KEYS_HEAD: Final = (
-    "SELECT e.event_id, e.template_id, e.observed_at, e.attributes, i.triples FROM ("  # noqa: S608
+    "SELECT e.event_id, e.template_id, e.observed_at, e.attributes, i.triples FROM ("
     "SELECT event_id, min(template_id) AS template_id, min(observed_at) AS observed_at, "
-    "any(attributes) AS attributes FROM events "
-    "WHERE " + _WINDOW + " AND system_id = {system_id:String} GROUP BY event_id) AS e "
+    "any(attributes) AS attributes FROM events WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
+    "AND system_id = {system_id:String} GROUP BY event_id) AS e "
     "LEFT JOIN ("
     "SELECT event_id, groupArray((field_ref, form, token)) AS triples FROM ("
     "SELECT event_id, field_ref, form, min(token) AS token FROM event_identifiers "
-    "WHERE " + _WINDOW + " AND system_id = {system_id:String}"
+    "WHERE tenant_id = {tenant_id:String} "
+    "AND observed_at >= fromUnixTimestamp64Milli({start:Int64}, 'UTC') "
+    "AND observed_at < fromUnixTimestamp64Milli({end:Int64}, 'UTC') "
+    "AND system_id = {system_id:String}"
 )
 _EVENTS_WITH_KEYS_TAIL: Final = (
     " GROUP BY event_id, field_ref, form) GROUP BY event_id) AS i ON e.event_id = i.event_id"
@@ -239,12 +270,13 @@ def _window_parameters(tenant_id: str, window: Window) -> dict[str, Any]:
     return {"tenant_id": tenant_id, "start": _ms(window.start), "end": _ms(window.end)}
 
 
-def _quantile(values: Sequence[Any], index: int) -> float | None:
+def _quantile(value: Any) -> float | None:
+    """A quantile the statement picked out of a sorted array, as a float (``None`` if absent)."""
     try:
-        value = float(values[index])
-    except (IndexError, TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError):
         return None
-    return None if value != value else value  # NaN from an empty aggregate
+    return None if number != number else number  # NaN guard
 
 
 class ClickHouseStore:
@@ -357,20 +389,20 @@ class ClickHouseStore:
                 fanout_ba_p99=None,
                 concentration=None,
             )
-        lag_q, lag_positive, fan_ab, fan_ba = row[3], int(row[4]), row[5], row[6]
-        top_product, total_product = int(row[7]), int(row[8])
-        q25, q75 = _quantile(lag_q, 0), _quantile(lag_q, 2)
+        q25, lag_median, q75 = _quantile(row[3]), _quantile(row[4]), _quantile(row[5])
+        lag_positive = int(row[6])
+        top_product, total_product = int(row[11]), int(row[12])
         return PairJoin(
             n_a=n_a,
             n_b=n_b,
             n_match=n_match,
-            lag_median_seconds=_quantile(lag_q, 1),
+            lag_median_seconds=lag_median,
             lag_iqr_seconds=(q75 - q25) if q25 is not None and q75 is not None else None,
             lag_positive_share=lag_positive / n_match,
-            fanout_ab_median=_quantile(fan_ab, 0),
-            fanout_ab_p99=_quantile(fan_ab, 1),
-            fanout_ba_median=_quantile(fan_ba, 0),
-            fanout_ba_p99=_quantile(fan_ba, 1),
+            fanout_ab_median=_quantile(row[7]),
+            fanout_ab_p99=_quantile(row[8]),
+            fanout_ba_median=_quantile(row[9]),
+            fanout_ba_p99=_quantile(row[10]),
             concentration=top_product / total_product if total_product else None,
         )
 

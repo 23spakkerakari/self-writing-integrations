@@ -355,33 +355,33 @@ def row_to_sketch(row: Mapping[Any, Any]) -> DaySketch:
 
 # -- PostgreSQL -------------------------------------------------------------------------------
 
-_SKETCH_COLUMNS: Final = (
-    "tenant_id, field_id, form, day, count, shape_counts, length_counts, minhash, hll, "
-    "bottom_k, top_token_counts, first_seen, last_seen, sketch_version"
-)
 _UPSERT_SKETCH = sqlalchemy.text(
-    f"INSERT INTO field_sketches ({_SKETCH_COLUMNS}, created_at, updated_at) VALUES "  # noqa: S608 - column list is a constant
-    "(:tenant_id, :field_id, :form, :day, :count, CAST(:shape_counts AS JSONB), "
-    "CAST(:length_counts AS JSONB), :minhash, :hll, :bottom_k, "
+    "INSERT INTO field_sketches (tenant_id, field_id, form, day, count, shape_counts, "
+    "length_counts, minhash, hll, bottom_k, top_token_counts, first_seen, last_seen, "
+    "sketch_version, created_at, updated_at) VALUES (:tenant_id, :field_id, :form, :day, :count, "
+    "CAST(:shape_counts AS JSONB), CAST(:length_counts AS JSONB), :minhash, :hll, :bottom_k, "
     "CAST(:top_token_counts AS JSONB), :first_seen, :last_seen, :sketch_version, now(), now()) "
     "ON CONFLICT (tenant_id, field_id, form, day) DO UPDATE SET count = EXCLUDED.count, "
     "shape_counts = EXCLUDED.shape_counts, length_counts = EXCLUDED.length_counts, "
     "minhash = EXCLUDED.minhash, hll = EXCLUDED.hll, bottom_k = EXCLUDED.bottom_k, "
     "top_token_counts = EXCLUDED.top_token_counts, first_seen = EXCLUDED.first_seen, "
-    "last_seen = EXCLUDED.last_seen, sketch_version = EXCLUDED.sketch_version, "
-    "updated_at = now()"
+    "last_seen = EXCLUDED.last_seen, sketch_version = EXCLUDED.sketch_version, updated_at = now()"
 )
 _SELECT_DAY = sqlalchemy.text(
-    f"SELECT {_SKETCH_COLUMNS} FROM field_sketches WHERE tenant_id = :tenant_id "  # noqa: S608
-    "AND field_id = :field_id AND form = :form AND day = :day"
+    "SELECT tenant_id, field_id, form, day, count, shape_counts, length_counts, minhash, hll, "
+    "bottom_k, top_token_counts, first_seen, last_seen, sketch_version FROM field_sketches "
+    "WHERE tenant_id = :tenant_id AND field_id = :field_id AND form = :form AND day = :day"
 )
 _SELECT_DAYS = sqlalchemy.text(
-    f"SELECT {_SKETCH_COLUMNS} FROM field_sketches WHERE tenant_id = :tenant_id "  # noqa: S608
-    "AND day = ANY(:days) ORDER BY field_id, form, day"
+    "SELECT tenant_id, field_id, form, day, count, shape_counts, length_counts, minhash, hll, "
+    "bottom_k, top_token_counts, first_seen, last_seen, sketch_version FROM field_sketches "
+    "WHERE tenant_id = :tenant_id AND day = ANY(:days) ORDER BY field_id, form, day"
 )
 _SELECT_DAYS_OF_ENDS = sqlalchemy.text(
-    f"SELECT {_SKETCH_COLUMNS} FROM field_sketches WHERE tenant_id = :tenant_id "  # noqa: S608
-    "AND day = ANY(:days) AND field_id = ANY(:field_ids) ORDER BY field_id, form, day"
+    "SELECT tenant_id, field_id, form, day, count, shape_counts, length_counts, minhash, hll, "
+    "bottom_k, top_token_counts, first_seen, last_seen, sketch_version FROM field_sketches "
+    "WHERE tenant_id = :tenant_id AND day = ANY(:days) AND field_id = ANY(:field_ids) "
+    "ORDER BY field_id, form, day"
 )
 _DELETE_BEFORE = sqlalchemy.text(
     "DELETE FROM field_sketches WHERE tenant_id = :tenant_id AND day < :day"

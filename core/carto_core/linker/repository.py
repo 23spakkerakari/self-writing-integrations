@@ -393,50 +393,56 @@ class InMemoryEntityRepository:
 
 # -- PostgreSQL --------------------------------------------------------------------------------
 
-_LINK_COLUMNS = (
-    "id, field_a, form_a, field_b, form_b, link_type, role, direction, score, evidence_json, "
-    "status, entity_id, reject_reason, decided_by, decided_at, version, affected_volume, "
-    "ambiguous_merges, baseline_match_rate, first_proposed_at, note, updated_at"
-)
 _SELECT_LINK = sqlalchemy.text(
-    f"SELECT {_LINK_COLUMNS} FROM key_links WHERE tenant_id = :tenant_id AND id = :id"  # noqa: S608
+    "SELECT id, field_a, form_a, field_b, form_b, link_type, role, direction, score, "
+    "evidence_json, status, entity_id, reject_reason, decided_by, decided_at, version, "
+    "affected_volume, ambiguous_merges, baseline_match_rate, first_proposed_at, note, updated_at "
+    "FROM key_links WHERE tenant_id = :tenant_id AND id = :id"
 )
 _SELECT_BY_ENDS = sqlalchemy.text(
-    f"SELECT {_LINK_COLUMNS} FROM key_links WHERE tenant_id = :tenant_id "  # noqa: S608
-    "AND field_a = :field_a AND form_a = :form_a AND field_b = :field_b AND form_b = :form_b"
+    "SELECT id, field_a, form_a, field_b, form_b, link_type, role, direction, score, "
+    "evidence_json, status, entity_id, reject_reason, decided_by, decided_at, version, "
+    "affected_volume, ambiguous_merges, baseline_match_rate, first_proposed_at, note, updated_at "
+    "FROM key_links WHERE tenant_id = :tenant_id AND field_a = :field_a AND form_a = :form_a "
+    "AND field_b = :field_b AND form_b = :form_b"
 )
 _SELECT_LINKS = sqlalchemy.text(
-    f"SELECT {_LINK_COLUMNS} FROM key_links WHERE tenant_id = :tenant_id ORDER BY id"  # noqa: S608
+    "SELECT id, field_a, form_a, field_b, form_b, link_type, role, direction, score, "
+    "evidence_json, status, entity_id, reject_reason, decided_by, decided_at, version, "
+    "affected_volume, ambiguous_merges, baseline_match_rate, first_proposed_at, note, updated_at "
+    "FROM key_links WHERE tenant_id = :tenant_id ORDER BY id"
 )
 _UPSERT_LINK = sqlalchemy.text(
-    "INSERT INTO key_links (tenant_id, id, field_a, form_a, field_b, form_b, link_type, role, "  # noqa: S608 - the only interpolation is the constant column list
+    "INSERT INTO key_links (tenant_id, id, field_a, form_a, field_b, form_b, link_type, role, "
     "direction, score, evidence_json, status, entity_id, reject_reason, decided_by, decided_at, "
     "version, affected_volume, ambiguous_merges, baseline_match_rate, first_proposed_at, note, "
-    "created_at, updated_at) "
-    "VALUES (:tenant_id, :id, :field_a, :form_a, :field_b, :form_b, :link_type, :role, "
-    ":direction, :score, CAST(:evidence_json AS JSONB), :status, :entity_id, :reject_reason, "
-    ":decided_by, :decided_at, 1, :affected_volume, :ambiguous_merges, :baseline_match_rate, "
-    ":first_proposed_at, :note, :now, :now) "
-    "ON CONFLICT (tenant_id, field_a, form_a, field_b, form_b) DO UPDATE SET "
-    "link_type = EXCLUDED.link_type, role = EXCLUDED.role, direction = EXCLUDED.direction, "
-    "score = EXCLUDED.score, evidence_json = EXCLUDED.evidence_json, status = EXCLUDED.status, "
+    "created_at, updated_at) VALUES (:tenant_id, :id, :field_a, :form_a, :field_b, :form_b, "
+    ":link_type, :role, :direction, :score, CAST(:evidence_json AS JSONB), :status, :entity_id, "
+    ":reject_reason, :decided_by, :decided_at, 1, :affected_volume, :ambiguous_merges, "
+    ":baseline_match_rate, :first_proposed_at, :note, :now, :now) ON CONFLICT (tenant_id, "
+    "field_a, form_a, field_b, form_b) DO UPDATE SET link_type = EXCLUDED.link_type, "
+    "role = EXCLUDED.role, direction = EXCLUDED.direction, score = EXCLUDED.score, "
+    "evidence_json = EXCLUDED.evidence_json, status = EXCLUDED.status, "
     "entity_id = EXCLUDED.entity_id, reject_reason = EXCLUDED.reject_reason, "
     "decided_by = EXCLUDED.decided_by, decided_at = EXCLUDED.decided_at, "
     "version = key_links.version + 1, affected_volume = EXCLUDED.affected_volume, "
     "ambiguous_merges = EXCLUDED.ambiguous_merges, "
     "baseline_match_rate = EXCLUDED.baseline_match_rate, "
     "first_proposed_at = COALESCE(key_links.first_proposed_at, EXCLUDED.first_proposed_at), "
-    "note = EXCLUDED.note, updated_at = EXCLUDED.updated_at "
-    f"RETURNING {_LINK_COLUMNS}"
+    "note = EXCLUDED.note, updated_at = EXCLUDED.updated_at RETURNING id, field_a, form_a, "
+    "field_b, form_b, link_type, role, direction, score, evidence_json, status, entity_id, "
+    "reject_reason, decided_by, decided_at, version, affected_volume, ambiguous_merges, "
+    "baseline_match_rate, first_proposed_at, note, updated_at"
 )
 _DECIDE_LINK = sqlalchemy.text(
-    "UPDATE key_links SET status = :status, role = COALESCE(:role, role), "  # noqa: S608 - the only interpolation is the constant column list
+    "UPDATE key_links SET status = :status, role = COALESCE(:role, role), "
     "reject_reason = :reject_reason, decided_by = :decided_by, decided_at = :decided_at, "
-    "note = :note, version = version + 1, "
-    "baseline_match_rate = COALESCE(:baseline_match_rate, baseline_match_rate), "
-    "updated_at = :decided_at "
-    "WHERE tenant_id = :tenant_id AND id = :id AND version = :expected_version "
-    f"RETURNING {_LINK_COLUMNS}"
+    "note = :note, version = version + 1, baseline_match_rate = COALESCE(:baseline_match_rate, "
+    "baseline_match_rate), updated_at = :decided_at WHERE tenant_id = :tenant_id AND id = :id "
+    "AND version = :expected_version RETURNING id, field_a, form_a, field_b, form_b, link_type, "
+    "role, direction, score, evidence_json, status, entity_id, reject_reason, decided_by, "
+    "decided_at, version, affected_volume, ambiguous_merges, baseline_match_rate, "
+    "first_proposed_at, note, updated_at"
 )
 _INSERT_DECISION = sqlalchemy.text(
     "INSERT INTO key_link_decisions (tenant_id, key_link_id, version, status, reject_reason, "

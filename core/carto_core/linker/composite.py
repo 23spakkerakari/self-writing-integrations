@@ -470,25 +470,24 @@ class InMemoryCompositeRuleRepository:
         return True
 
 
-_RULE_COLUMNS = (
-    "id, key_link_id, components_json, window_seconds, threshold, estimated_precision, updated_at"
-)
 _SELECT_RULE = sqlalchemy.text(
-    f"SELECT {_RULE_COLUMNS} FROM composite_rules WHERE tenant_id = :tenant_id AND id = :id"  # noqa: S608
+    "SELECT id, key_link_id, components_json, window_seconds, threshold, estimated_precision, "
+    "updated_at FROM composite_rules WHERE tenant_id = :tenant_id AND id = :id"
 )
 _SELECT_RULES = sqlalchemy.text(
-    f"SELECT {_RULE_COLUMNS} FROM composite_rules WHERE tenant_id = :tenant_id ORDER BY id"  # noqa: S608
+    "SELECT id, key_link_id, components_json, window_seconds, threshold, estimated_precision, "
+    "updated_at FROM composite_rules WHERE tenant_id = :tenant_id ORDER BY id"
 )
 _UPSERT_RULE = sqlalchemy.text(
-    "INSERT INTO composite_rules (tenant_id, id, key_link_id, components_json, window_seconds, "  # noqa: S608 - the only interpolation is the constant column list
-    "threshold, estimated_precision, created_at, updated_at) "
-    "VALUES (:tenant_id, :id, :key_link_id, CAST(:components_json AS JSONB), :window_seconds, "
-    ":threshold, :estimated_precision, :now, :now) "
-    "ON CONFLICT (tenant_id, id) DO UPDATE SET key_link_id = EXCLUDED.key_link_id, "
-    "components_json = EXCLUDED.components_json, window_seconds = EXCLUDED.window_seconds, "
-    "threshold = EXCLUDED.threshold, estimated_precision = EXCLUDED.estimated_precision, "
-    "updated_at = EXCLUDED.updated_at "
-    f"RETURNING {_RULE_COLUMNS}"
+    "INSERT INTO composite_rules (tenant_id, id, key_link_id, components_json, window_seconds, "
+    "threshold, estimated_precision, created_at, updated_at) VALUES (:tenant_id, :id, "
+    ":key_link_id, CAST(:components_json AS JSONB), :window_seconds, :threshold, "
+    ":estimated_precision, :now, :now) ON CONFLICT (tenant_id, id) DO UPDATE "
+    "SET key_link_id = EXCLUDED.key_link_id, components_json = EXCLUDED.components_json, "
+    "window_seconds = EXCLUDED.window_seconds, threshold = EXCLUDED.threshold, "
+    "estimated_precision = EXCLUDED.estimated_precision, updated_at = EXCLUDED.updated_at "
+    "RETURNING id, key_link_id, components_json, window_seconds, threshold, estimated_precision, "
+    "updated_at"
 )
 
 
@@ -685,7 +684,9 @@ def primary_component(
         score = component.weight * share
         if best is None or score > best[0]:
             best = (score, index)
-    assert best is not None  # noqa: S101 - specs is never empty here (checked by the caller)
+    if best is None:  # specs is never empty here (checked by the caller)
+        msg = "no component to name the link after"
+        raise ValueError(msg)
     return specs[best[1]], components[best[1]]
 
 
@@ -706,7 +707,9 @@ def one_rule_per_system_pair(outcomes: Sequence[CompositeOutcome]) -> list[Compo
             best[key] = index
             continue
         rival = outcomes[current]
-        assert rival.link is not None  # noqa: S101 - only indexes of outcomes with a link are kept
+        if rival.link is None:  # only indexes of outcomes with a link are kept
+            msg = "a kept outcome has no link"
+            raise RuntimeError(msg)
         if (len(outcome.matches), outcome.link.score) > (len(rival.matches), rival.link.score):
             best[key] = index
     kept = set(best.values())

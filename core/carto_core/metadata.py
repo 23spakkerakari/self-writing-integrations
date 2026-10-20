@@ -663,50 +663,51 @@ _PIN_FIELDS = sqlalchemy.text(
 _PINS = sqlalchemy.text(
     "SELECT payload -> 'field_policies' AS pins FROM edge_inventories WHERE tenant_id = :tenant_id"
 )
-_SYSTEM_COLUMNS: Final = "id, name, description, owner_group, criticality, updated_at"
 _SYSTEMS = sqlalchemy.text(
-    "SELECT " + _SYSTEM_COLUMNS + " FROM systems WHERE tenant_id = :tenant_id ORDER BY id"  # noqa: S608
+    "SELECT id, name, description, owner_group, criticality, updated_at FROM systems "
+    "WHERE tenant_id = :tenant_id ORDER BY id"
 )
 _SYSTEM = sqlalchemy.text(
-    "SELECT " + _SYSTEM_COLUMNS + " FROM systems WHERE tenant_id = :tenant_id AND id = :id"  # noqa: S608
+    "SELECT id, name, description, owner_group, criticality, updated_at FROM systems "
+    "WHERE tenant_id = :tenant_id AND id = :id"
 )
 _RENAME_SYSTEM = sqlalchemy.text(
-    "UPDATE systems SET name = COALESCE(:name, name), "  # noqa: S608 - the only interpolation is the constant column list
-    "description = COALESCE(:description, description), updated_at = :now "
-    "WHERE tenant_id = :tenant_id AND id = :id "
-    "AND FLOOR(EXTRACT(EPOCH FROM updated_at) * 1000) = :expected_version "
-    "RETURNING " + _SYSTEM_COLUMNS
-)
-_SOURCE_COLUMNS: Final = (
-    "s.id, s.system_id, s.type, s.enabled, s.config_json, s.secret_ref, s.backfill_days, "
-    "s.schedule, s.last_test, s.last_test_at, s.edge_id, s.status, s.updated_at, "
-    "h.status AS h_status, h.last_success_at AS h_last_success_at, h.lag_seconds AS h_lag_seconds, "
-    "h.error_count AS h_error_count, h.buffer_depth AS h_buffer_depth, "
-    "h.oldest_buffered_at AS h_oldest_buffered_at, h.message AS h_message, "
-    "h.received_at AS h_received_at, h.sent_at AS h_sent_at"
+    "UPDATE systems SET name = COALESCE(:name, name), description = COALESCE(:description, "
+    "description), updated_at = :now WHERE tenant_id = :tenant_id AND id = :id "
+    "AND FLOOR(EXTRACT(EPOCH FROM updated_at) * 1000) = :expected_version RETURNING id, name, "
+    "description, owner_group, criticality, updated_at"
 )
 _SOURCES = sqlalchemy.text(
-    "SELECT " + _SOURCE_COLUMNS + " FROM sources AS s LEFT JOIN source_health AS h "  # noqa: S608
-    "ON h.tenant_id = s.tenant_id AND h.source_id = s.id WHERE s.tenant_id = :tenant_id "
-    "ORDER BY s.id"
+    "SELECT s.id, s.system_id, s.type, s.enabled, s.config_json, s.secret_ref, s.backfill_days, "
+    "s.schedule, s.last_test, s.last_test_at, s.edge_id, s.status, s.updated_at, "
+    "h.status AS h_status, h.last_success_at AS h_last_success_at, "
+    "h.lag_seconds AS h_lag_seconds, h.error_count AS h_error_count, "
+    "h.buffer_depth AS h_buffer_depth, h.oldest_buffered_at AS h_oldest_buffered_at, "
+    "h.message AS h_message, h.received_at AS h_received_at, h.sent_at AS h_sent_at "
+    "FROM sources AS s LEFT JOIN source_health AS h ON h.tenant_id = s.tenant_id "
+    "AND h.source_id = s.id WHERE s.tenant_id = :tenant_id ORDER BY s.id"
 )
 _SOURCE = sqlalchemy.text(
-    "SELECT " + _SOURCE_COLUMNS + " FROM sources AS s LEFT JOIN source_health AS h "  # noqa: S608
-    "ON h.tenant_id = s.tenant_id AND h.source_id = s.id WHERE s.tenant_id = :tenant_id "
-    "AND s.id = :id"
-)
-_FIELD_COLUMNS: Final = (
-    "id, system_id, template_id, path, class, policy, pinned, forms, count, shapes_json, "
-    "first_seen, last_seen, distinct_estimate, null_rate, quality, is_candidate, label, "
-    "suggested_label"
+    "SELECT s.id, s.system_id, s.type, s.enabled, s.config_json, s.secret_ref, s.backfill_days, "
+    "s.schedule, s.last_test, s.last_test_at, s.edge_id, s.status, s.updated_at, "
+    "h.status AS h_status, h.last_success_at AS h_last_success_at, "
+    "h.lag_seconds AS h_lag_seconds, h.error_count AS h_error_count, "
+    "h.buffer_depth AS h_buffer_depth, h.oldest_buffered_at AS h_oldest_buffered_at, "
+    "h.message AS h_message, h.received_at AS h_received_at, h.sent_at AS h_sent_at "
+    "FROM sources AS s LEFT JOIN source_health AS h ON h.tenant_id = s.tenant_id "
+    "AND h.source_id = s.id WHERE s.tenant_id = :tenant_id AND s.id = :id"
 )
 _FIELDS = sqlalchemy.text(
-    "SELECT " + _FIELD_COLUMNS + " FROM fields WHERE tenant_id = :tenant_id "  # noqa: S608
-    "AND (:any_system OR system_id = :system_id) AND (:all_fields OR is_candidate) "
-    "AND (:from_start OR id > :after) ORDER BY id LIMIT :limit"
+    "SELECT id, system_id, template_id, path, class, policy, pinned, forms, count, shapes_json, "
+    "first_seen, last_seen, distinct_estimate, null_rate, quality, is_candidate, label, "
+    "suggested_label FROM fields WHERE tenant_id = :tenant_id AND (:any_system "
+    "OR system_id = :system_id) AND (:all_fields OR is_candidate) AND (:from_start "
+    "OR id > :after) ORDER BY id LIMIT :limit"
 )
 _FIELD = sqlalchemy.text(
-    "SELECT " + _FIELD_COLUMNS + " FROM fields WHERE tenant_id = :tenant_id AND id = :id"  # noqa: S608
+    "SELECT id, system_id, template_id, path, class, policy, pinned, forms, count, shapes_json, "
+    "first_seen, last_seen, distinct_estimate, null_rate, quality, is_candidate, label, "
+    "suggested_label FROM fields WHERE tenant_id = :tenant_id AND id = :id"
 )
 _TEMPLATES = sqlalchemy.text(
     "SELECT system_id, id, template_text, kind, display_name, event_type_label, first_seen, "

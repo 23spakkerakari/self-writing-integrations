@@ -49,7 +49,8 @@ _INSERT = sqlalchemy.text(
 )
 _PAGE = sqlalchemy.text(
     "SELECT id, at, actor, action, target, before, after, reason, request_id, row_hash "
-    "FROM audit_log WHERE tenant_id = :tenant_id AND (:before_id IS NULL OR id < :before_id) "
+    "FROM audit_log WHERE tenant_id = :tenant_id "
+    "AND (CAST(:before_id AS BIGINT) IS NULL OR id < CAST(:before_id AS BIGINT)) "
     "ORDER BY id DESC LIMIT :limit"
 )
 _WALK = sqlalchemy.text(

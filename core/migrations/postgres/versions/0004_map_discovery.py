@@ -21,6 +21,12 @@ Grants (spec 2.3 invariant 9, 14.4 per-service users) are applied only when the 
 and ``SELECT`` on ``audit_log``; ``carto_ingest`` writes templates, fields, systems, sources,
 the inventories, source health and the batch ledger and nothing else. Every statement here is a
 fixed string: no value is interpolated.
+
+The columns the models hold as optional are nullable: ``entities.name`` and ``description`` (an
+entity carries only a suggested name until a reviewer confirms one), ``key_links.note`` and
+``first_proposed_at``, ``key_link_decisions.note`` and ``field_sketches.first_seen``. This
+revision was edited in place for that after M2's first CI run (2026-10-19): it had been applied
+only to the CI containers, never to a database that is kept.
 """
 
 from __future__ import annotations
@@ -102,7 +108,7 @@ def _tstz(name: str, *, nullable: bool) -> sa.Column[Any]:
 def _guarded(role: str, statements: Sequence[str]) -> str:
     """A ``DO`` block that runs ``statements`` only when ``role`` exists (fixed strings)."""
     body = " ".join(statements)
-    guard = f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN "  # noqa: S608
+    guard = f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN "  # noqa: S608  # nosec B608 - role is one of the fixed role names
     return guard + body + " END IF; END $$;"
 
 
@@ -253,7 +259,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
         ),
-        _tstz("first_seen", nullable=False),
+        _tstz("first_seen", nullable=True),
         _tstz("last_seen", nullable=True),
         sa.Column("sketch_version", sa.Integer(), nullable=False, server_default="1"),
         *_audit_columns(),
@@ -289,8 +295,8 @@ def upgrade() -> None:
         sa.Column("affected_volume", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("ambiguous_merges", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("baseline_match_rate", sa.Float(), nullable=True),
-        _tstz("first_proposed_at", nullable=False),
-        sa.Column("note", sa.Text(), nullable=False, server_default=""),
+        _tstz("first_proposed_at", nullable=True),
+        sa.Column("note", sa.Text(), nullable=True),
         *_audit_columns(),
         sa.PrimaryKeyConstraint("tenant_id", "id", name="pk_key_links"),
         sa.UniqueConstraint(
@@ -316,7 +322,7 @@ def upgrade() -> None:
         sa.Column("reject_reason", sa.String(32), nullable=True),
         sa.Column("decided_by", sa.String(256), nullable=False),
         _tstz("decided_at", nullable=False),
-        sa.Column("note", sa.Text(), nullable=False, server_default=""),
+        sa.Column("note", sa.Text(), nullable=True),
         sa.Column("score_at_decision", sa.Float(), nullable=False),
         *_audit_columns(),
         sa.PrimaryKeyConstraint("id", name="pk_key_link_decisions"),
@@ -350,10 +356,10 @@ def upgrade() -> None:
         "entities",
         _tenant(),
         sa.Column("id", sa.String(64), nullable=False),
-        sa.Column("name", sa.String(128), nullable=False),
+        sa.Column("name", sa.String(128), nullable=True),
         sa.Column("suggested_name", sa.String(128), nullable=True),
         sa.Column("name_confirmed", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("description", sa.Text(), nullable=False, server_default=""),
+        sa.Column("description", sa.Text(), nullable=True),
         *_audit_columns(),
         sa.PrimaryKeyConstraint("tenant_id", "id", name="pk_entities"),
     )

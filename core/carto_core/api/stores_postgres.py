@@ -55,24 +55,23 @@ def _json(value: object) -> Any:
     return value
 
 
-_SESSION_COLUMNS = (
-    "id, tenant_id, subject, csrf_token, authenticated_at, last_seen_at, expires_at, "
-    "roles_json, display_name, ip, user_agent"
-)
 _INSERT_SESSION = sqlalchemy.text(
-    f"INSERT INTO sessions ({_SESSION_COLUMNS}, created_at, updated_at) VALUES (:id, "  # noqa: S608
+    "INSERT INTO sessions (id, tenant_id, subject, csrf_token, authenticated_at, last_seen_at, "
+    "expires_at, roles_json, display_name, ip, user_agent, created_at, updated_at) VALUES (:id, "
     ":tenant_id, :subject, :csrf_token, :authenticated_at, :last_seen_at, :expires_at, "
     "CAST(:roles_json AS jsonb), :display_name, :ip, :user_agent, :now, :now)"
 )
 _SELECT_SESSION = sqlalchemy.text(
-    f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE id = :id"  # noqa: S608
+    "SELECT id, tenant_id, subject, csrf_token, authenticated_at, last_seen_at, expires_at, "
+    "roles_json, display_name, ip, user_agent FROM sessions WHERE id = :id"
 )
 _TOUCH_SESSION = sqlalchemy.text(
     "UPDATE sessions SET last_seen_at = :last_seen_at, updated_at = :last_seen_at WHERE id = :id"
 )
 _DELETE_SESSION = sqlalchemy.text("DELETE FROM sessions WHERE id = :id")
 _DELETE_SESSION_RETURNING = sqlalchemy.text(
-    f"DELETE FROM sessions WHERE id = :id RETURNING {_SESSION_COLUMNS}"  # noqa: S608
+    "DELETE FROM sessions WHERE id = :id RETURNING id, tenant_id, subject, csrf_token, "
+    "authenticated_at, last_seen_at, expires_at, roles_json, display_name, ip, user_agent"
 )
 _SWEEP_SESSIONS = sqlalchemy.text("DELETE FROM sessions WHERE expires_at < :now")
 
@@ -286,10 +285,13 @@ _INSERT_GROUP = sqlalchemy.text(
     ":now, :now) ON CONFLICT DO NOTHING"
 )
 _INSERT_BINDING = sqlalchemy.text(
-    "INSERT INTO role_bindings (id, tenant_id, group_name, role, scope_json, created_at, "
-    "updated_at) VALUES (:id, :tenant_id, :group_name, :role, CAST(:scope_json AS jsonb), "
+    "INSERT INTO role_bindings (tenant_id, group_name, role, scope_json, created_at, "
+    "updated_at) VALUES (:tenant_id, :group_name, :role, CAST(:scope_json AS jsonb), "
     ":now, :now)"
 )
+"""``role_bindings.id`` is a sequence (migration 0004): the row takes the next value and
+:meth:`PostgresRoleBindingStore.list` reports it as a string. The seed's own ids (the in-memory
+store's) are not stored."""
 
 
 class PostgresRoleBindingStore:
@@ -339,7 +341,6 @@ class PostgresRoleBindingStore:
                     connection.execute(
                         _INSERT_BINDING,
                         {
-                            "id": binding.id,
                             "tenant_id": binding.tenant_id,
                             "group_name": binding.group_name,
                             "role": binding.role.value,

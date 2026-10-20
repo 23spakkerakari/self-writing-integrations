@@ -44,7 +44,7 @@ class FakeBehaviour(StrEnum):
     OBEY_INJECTION = "obey_injection"
     EXTRA_FIELDS = "extra_fields"
     INVALID_JSON = "invalid_json"
-    TOKEN_LABEL = "token_label"  # noqa: S105 - a behaviour name, not a secret
+    TOKEN_LABEL = "token_label"  # noqa: S105  # nosec B105 - test double, not a credential
     OVERSIZE_LABEL = "oversize_label"
     UNKNOWN_TARGET = "unknown_target"
     FENCED_JSON = "fenced_json"
@@ -59,7 +59,7 @@ class CapturedCall:
     output_schema: dict[str, object]
 
 
-_FAKE_TOKEN = "t1.AAAAAAAAAAAAAAAAAAAAAA"  # noqa: S105 - a token-shaped test string, not a secret
+_FAKE_TOKEN = "t1.AAAAAAAAAAAAAAAAAAAAAA"  # noqa: S105  # nosec B105 - test double, not a credential
 
 
 class FakeProvider:

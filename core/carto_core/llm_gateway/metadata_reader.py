@@ -45,25 +45,19 @@ class MetadataReaderError(Exception):
     """The summaries could not be read; the message names the exception type only."""
 
 
-_COLUMNS: Final = (
-    "f.id AS field_id, f.path, f.system_id, f.shapes_json, s.name AS system_name, t.template_text"
-)
-_JOINS: Final = (
-    "FROM fields AS f "
-    "LEFT JOIN systems AS s ON s.id = f.system_id AND s.tenant_id = f.tenant_id "
-    "LEFT JOIN templates AS t ON t.tenant_id = f.tenant_id AND t.system_id = f.system_id "
-    "AND t.id = f.template_id "
-)
 _BY_IDS = sqlalchemy.text(
-    "SELECT " + _COLUMNS + " " + _JOINS + "WHERE f.tenant_id = :tenant_id "
+    "SELECT f.id AS field_id, f.path, f.system_id, f.shapes_json, s.name AS system_name, "
+    "t.template_text FROM fields AS f LEFT JOIN systems AS s ON s.id = f.system_id "
+    "AND s.tenant_id = f.tenant_id LEFT JOIN templates AS t ON t.tenant_id = f.tenant_id "
+    "AND t.system_id = f.system_id AND t.id = f.template_id WHERE f.tenant_id = :tenant_id "
     "AND f.id = ANY(:ids) ORDER BY f.id"
 )
 _BY_ENTITY = sqlalchemy.text(
-    "SELECT DISTINCT ON (f.id) "
-    + _COLUMNS
-    + " "
-    + _JOINS
-    + "JOIN entity_fields AS e ON e.tenant_id = f.tenant_id AND e.field_id = f.id "
+    "SELECT DISTINCT ON (f.id) f.id AS field_id, f.path, f.system_id, f.shapes_json, "
+    "s.name AS system_name, t.template_text FROM fields AS f LEFT JOIN systems AS s "
+    "ON s.id = f.system_id AND s.tenant_id = f.tenant_id LEFT JOIN templates AS t "
+    "ON t.tenant_id = f.tenant_id AND t.system_id = f.system_id AND t.id = f.template_id "
+    "JOIN entity_fields AS e ON e.tenant_id = f.tenant_id AND e.field_id = f.id "
     "WHERE f.tenant_id = :tenant_id AND e.entity_id = :entity_id ORDER BY f.id"
 )
 

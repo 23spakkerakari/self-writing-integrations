@@ -15,7 +15,8 @@ Semantics every implementation must share:
   copy's, so a redelivered duplicate is never "new" again for a watermark.
 - **Windows** are half-open on ``observed_at``: ``start <= observed_at < end``.
 - **Quantiles** are "exact low": the element at index ``floor(level * (n - 1))`` of the sorted
-  values (ClickHouse ``quantileExactLow``), so the two implementations agree bit for bit.
+  values, which the ClickHouse store computes explicitly over the sorted array, so the two
+  implementations agree bit for bit.
 - **Ordering** of streamed rows is unspecified; callers never rely on it.
 - Nothing here returns raw values: tokens, shapes, counts and times only (spec 2.3 invariant 2).
 """

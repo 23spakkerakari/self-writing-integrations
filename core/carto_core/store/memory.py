@@ -37,7 +37,9 @@ CONCENTRATION_TOP_N = 10
 
 def quantile_exact_low(values: Sequence[float], level: float) -> float | None:
     """The element at index ``floor(level * (n - 1))`` of the sorted values; ``None`` if empty.
-    Matches ClickHouse ``quantileExactLow``, so both implementations agree exactly."""
+    The ClickHouse store indexes a sorted ``groupArray`` the same way, so both implementations
+    agree exactly (ClickHouse's own ``quantileExactLow`` picks another element for small arrays
+    at levels like 0.99)."""
     if not values:
         return None
     ordered = sorted(values)
