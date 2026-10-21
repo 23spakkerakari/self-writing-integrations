@@ -57,4 +57,7 @@ import, lint or test it.
   M3 trace (write docs/plans/M3.md first).
 - M3 Trace: plan drafted 2026-10-20 on branch `m3-trace` (docs/plans/M3.md, cut from
   `m2-map-discovery` at 1e1b2d4). Eight founder questions open; code waits on the M2
-  acceptance, the answers and the `fix-c2` rebase. ADRs from 0059 when code starts.
+  acceptance, the answers and the `fix-c2` rebase. ADRs from 0060 when code starts.
+- Spec direction 2026-10-21 on branch `spec-data-layer` (ADR 0059, proposed): hosted data layer,
+  business rules and hosted deployment as v2 (spec 22.2 to 22.4); partial failures, stale data
+  and missed events into M4 (spec 10.1, 10.2); partner questions 9 to 25 in spec 23 open.
