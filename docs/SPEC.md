@@ -75,6 +75,7 @@ The one-line customer pitch: _"We show you how your systems talk to each other, 
 - **Not an APM tool.** We don't instrument code or require agents inside applications. We read what already exists.
 - **Not a SIEM or log store of record.** We keep only what we need to map, trace and alert, for a bounded retention period.
 - **Not an AI SRE for cloud infrastructure.** We focus on business transactions across business systems, not Kubernetes incidents.
+- v2 adds a hosted **data layer** on top of the map (Section 22.2): one case, every system's selected fields, values shown from a per-tenant data plane. v1 positioning is unchanged.
 
 Our differentiator: **correlation without re-instrumentation.** We infer which identifiers match across systems that don't share an ID, including hops done by hand.
 
@@ -322,6 +323,8 @@ Workers coordinate through PostgreSQL job leases (`SELECT ... FOR UPDATE SKIP LO
 **Tradeoff (decided):** in-customer deployment makes security review and data residency simple and avoids us ever holding PHI, at the cost of harder upgrades, support and fleet visibility. This is the right trade for regulated design partners. The edge/core split keeps a hosted-core SaaS option open for v2, where only the edge runs on-prem and core receives tokenized data.
 
 Keep `tenant_id` on every table from day one, even though v1 has one tenant.
+
+**Direction change, 2026-10-21 (ADR 0059):** v2 hosts core in our cloud, multi-tenant, with a per-tenant isolated data plane for the data layer (Section 22.4). The v1 model above and ADR 0002 stay in force for the design partners until Section 23 question 13 is answered.
 
 ---
 
@@ -784,6 +787,9 @@ Performance target: assembly keeps up with 2,000 events/s on the reference node,
 | `volume`       | Per hop per hour-of-week, median and MAD over the last 4 weeks (needs 2 weeks)                                                                                                                                                       | Alert if count drops by at least 70% and below median minus 4 x MAD, or is zero for 2 consecutive intervals that are normally non-zero.                           |
 | `error_rate`   | Per node per 15 min                                                                                                                                                                                                                  | Alert if errors are at least 10, at least 3x baseline, and above baseline p99.                                                                                    |
 | `freshness`    | Per source: learned max gap between events, connector lag                                                                                                                                                                            | Visibility gap if lag exceeds threshold or no events for longer than the learned max gap.                                                                         |
+| `completeness` | Per batch (Section 9.7): expected count from the file's declared row count, a loader log line (`loaded file <name> rows <n>`) or the learned median per batch key | Alert when the transactions linked to the batch are below the expected count by more than the tolerance (default 1%) once the batch's deadline (the hop deadline of its first hop) has passed. Added 2026-10-21, M4; Section 23 question 21. |
+| `follow_up` | Configured only: after node X for transactions matching an attribute condition, expect node Y within T | One-off expectations that no periodicity can learn (an inspection after a submission, a reserve change after a claim note). Alert when T passes without Y and no visibility gap covers Y's system. Added 2026-10-21, M4. |
+| `consistency` | Reserved for Section 22.3: if system A says X then system B must say Y within T | Not evaluated in v1; the kind exists so rules of Section 22.3 become expectations without a schema change. |
 | `schema_drift` | Per system                                                                                                                                                                                                                           | New template burst, a high-volume field disappearing, top shape share of an identifier field dropping by half, or an accepted link's match rate dropping by half. |
 
 - Users can create or override any expectation ("Shipping file by 21:30 America/New_York, Mon to Fri"; "Warehouse to Shipping within 45 min during business hours").
@@ -795,6 +801,9 @@ Performance target: assembly keeps up with 2,000 events/s on the reference node,
 - Every 30 s: hop deadlines, schedules, freshness. Every 5 min: volume, error rate, drift.
 - **Stall:** an open transaction whose current node has a `hop_deadline` and `now > last_seen + deadline` (calendar-adjusted) with no visibility gap on the next system.
 - **Visibility gap takes precedence.** If the next system's sources are failing or lagging more than half the deadline, do not raise a stall. Raise or update a visibility gap alert instead ("We stopped receiving Warehouse logs at 20:58; 37 orders can't be confirmed"). This is how we avoid blaming the business for our own blind spot.
+- **Partial failures by slice** (added 2026-10-21, M4; Section 23 question 21). For every hop with a `hop_deadline`, keep baselines per slice of each low-cardinality attribute on the sending node (the top 20 values per attribute, at most 200 slices per hop). A slice raises a partial stall when its stalled share exceeds the hop's overall stalled share by lift at least 3 with at least 20 stalled transactions in the slice, and the hop as a whole is not stalled (a systemic stall suppresses slice alerts). One alert per hop, slice and day, carrying the "what's different" evidence of Section 10.4 item 6. The same slicing applies to `error_rate` and `volume`.
+- **Stale data** (added 2026-10-21). Source level: the `freshness` expectation above. Record level: a transaction whose downstream copy has not moved after an upstream change is a stall of its hop; a value on the data layer page is stale by the definition of Section 22.2. For a source without timestamps, staleness is measured against the learned cadence of the source, then against ingest time (Section 23 question 22).
+- **Missed events** (added 2026-10-21). A hop deadline catches a missed next step on a known path; `schedule` catches a missed periodic arrival; `completeness` catches records missing from a batch; `follow_up` catches a one-off expected event. A missed event raises one alert naming what was expected, by when, and what was last seen, with the likely causes of Section 10.4.
 
 ### 10.3 Aggregation, dedupe, suppression
 
@@ -1328,9 +1337,11 @@ Build in order. Each milestone ends with: acceptance criteria passing in CI, an 
 
 ---
 
-## 22. v2 preview: Fix & connect (do not build in v1)
+## 22. v2 preview (do not build in v1)
 
-Documented so v1 doesn't block it.
+Documented so v1 doesn't block it. Section 22.1 is the original Fix and connect preview. Sections 22.2 to 22.4 were added on 2026-10-21 from the founder's direction (ADR 0059): a hosted data layer, business rule reconciliation and the hosted deployment model.
+
+### 22.1 Fix and connect
 
 - A separate **actuator** service at edge trust level (it needs raw values to write), with its own deployment, write-scoped credentials, network policy and license flag. Disabled unless explicitly enabled.
 - **Shadow mode first:** for a confirmed manual hop, generate the record a person would enter (from stored field correspondences and human-confirmed transform rules), compare to what was actually entered, report per-field accuracy over several weeks. Nothing is written.
@@ -1340,6 +1351,98 @@ Documented so v1 doesn't block it.
 - **Remediation actions** (replay a stuck message, re-run a job, refresh a credential) as typed, reviewed actions with dry-run.
 
 What v1 must preserve: `ReadConnector` stays read-only with no write methods; manual hop field correspondences are stored (Section 11.4); the audit schema can represent actions and approvals.
+
+### 22.2 Data layer
+
+Added 2026-10-21 from the founder's direction. Items marked **Decided** came from the founder; items marked **Assumed** are the building agent's defaults and stand until the design partner answers the matching question in Section 23. Nothing in this section is built in v1.
+
+**What it is.** A hosted page where an underwriter opens one case and sees, from every connected system that holds a record for that case's party, the fields an admin selected for that line of business: each with its source, its "as of" time, a staleness flag, and both values side by side when systems disagree. The map (Sections 9 and 11) is the foundation: it discovers which systems hold the party, under which identifiers, through which change feeds. The data layer then fetches values for one case at a time, caches them in a per-tenant data plane, and renders them. It is the first feature whose purpose is to show clear values, so it runs at the edge trust level, never in core.
+
+- **Decided:** a person looking up one case comes first; a system consuming an API comes second. Commercial lines; the first persona is an underwriter. Federated at run time, cached, with "as of" per field and staleness flagged. One schema per line of business, defined by an admin. Conflicts show both values with provenance. First connectors Guidewire, ServiceNow and Salesforce, plus Excel and Google Sheets, plus metered third-party data vendors. Lookup identifiers: name with address, policy number, claim number, VIN, FEIN; never date of birth or SSN. Per user: 100 case opens and 5,000 fields per hour; supervisors see case opens in real time. Background refresh for pinned cases and cases with activity in the last 3 days. v2, alongside Fix and connect.
+- **Assumed:** a case is a claim first, a submission second (Section 23, question 9). The confidence threshold for an automatic match is 0.8, which is the "medium-high" the founder named. Overrides live in the layer and never change the source (see "Overrides"). Stale values warn and never block. The supervisor is a new role.
+
+**Invariants, in addition to Section 2.3 (every one has an automated test):**
+
+- D1. **One case at a time.** Values leave the data plane only as one case, to one authenticated user, under the per-user limits. The only bulk output is the audited per-case export.
+- D2. **Case values never enter core.** They live in the tenant's data plane, encrypted with tenant keys (AES-256-GCM, KMS-wrapped), with a time to live and a purge per case. Core keeps tokens, the map and the audit.
+- D3. **Every case open, export, override, schema change and budget change is audited** (invariant 6), and a supervisor can see opens as they happen.
+- D4. **No silent identity merge.** A record below the confidence threshold is shown as a possible match for a person to confirm and never populates the case on its own. The page shows the confidence and the evidence of every match.
+- D5. **Still read-only toward sources** (invariant 1). Overrides live in the layer. A write to a source happens only through the actuator of Section 22.1 with its approvals.
+- D6. **Per-call costs are metered** per tenant and source against a budget, with a self-alert before the budget is spent.
+- D7. **The LLM never sees case values** (invariant 5 extended): it may see the schema, field names and code lists, nothing from a case.
+
+**Concepts.**
+
+| Term | Meaning |
+| --- | --- |
+| **Case** | The unit a user opens: a claim (Assumed first) or a submission. Keyed by the party's identifiers across systems, resolved through the map. |
+| **Party** | A person, business, policy or vehicle the case concerns. A case has one primary party and may list related parties. |
+| **Case schema** | Per line of business: the fields the admin selected from each source, with label, type, freshness threshold and display group. Versioned; a change is audited and applies to cases opened afterwards. |
+| **Provenance** | For each value: source, record identifier (as a token), field path, fetched at, source's own "as of" when it has one. |
+| **Staleness** | A value is stale when its "as of" is older than the field's freshness threshold, or when a change event arrived for its record and the refetch has not completed. |
+| **Override** | A value a reviewer entered in place of a fetched one, kept beside the original with reason, actor and time. |
+| **Sandbox** | The state of a case before it is published to underwriters: matches confirmed, overrides applied. **Assumed** reading of the founder's "someone overriding values before it sits in the data layer" (Section 23, question 11). |
+| **Pin** | A user's mark that a case must stay fresh; pinned cases refresh in the background. |
+| **Budget** | Calls and cost allowed per source per period; the API call allowances of Salesforce, Guidewire and ServiceNow count too. |
+
+**Sources.** Every connector is read-only (invariant 1) and serves both the map (change events into the canonical event of Section 7.1) and the data layer (record fetch by identifier).
+
+| Source | Change feed for the map and refresh | Record fetch for the case | Notes |
+| --- | --- | --- | --- |
+| Guidewire (ClaimCenter, PolicyCenter, Cloud API) | App events and the Cloud API's updated-since queries | Cloud API by claim, policy or account number | Assumed first for claims |
+| Salesforce | Change Data Capture and Event Monitoring | REST by record id, SOQL by external id | API call allowance per day is a budget |
+| ServiceNow | Business-rule webhooks and the audit table | Table API by sys_id or number | Cases, incidents, tasks |
+| Google Sheets | Drive change feed and push notifications (file version and modified time) | Sheet read; rows diffed against the last read by the sheet's key column | No cell-level history; the diff produces row-change events |
+| Excel on OneDrive or SharePoint | Microsoft Graph delta queries and change notifications (change tag, modified time) | Workbook read; rows diffed by the key column | Same as Sheets |
+| Excel on a file share or SFTP | Size, modified time and content hash by polling, through the edge | Workbook read | No history |
+| Third-party data vendors (Assumed: ISO, LexisNexis, D&B) | None; fetched on open or on a schedule | Vendor API by FEIN, VIN or address | Metered (D6) |
+| Custom REST APIs | Declarative connector: auth type, pagination style, updated-since query | Declarative: lookup endpoint and field map | After the named connectors |
+
+**Lookup and identity resolution.**
+
+1. The user types an allowed identifier or opens a case from a worklist. The data plane computes the forms and tokens of Section 8.4.
+2. Core answers from the map: the entity family the identifier belongs to, the systems whose fields carry it or a linked identifier, and for composite links the matched records with their posterior (Section 9.5). Core sees tokens only.
+3. The data plane fetches each system's record by its own identifier, in parallel, and renders fields as sources answer.
+4. Matches at or above the threshold populate the case; matches below it are listed as possible matches with evidence (which identifiers agreed, which did not) for a reviewer to confirm. A confirmed or rejected match is remembered and audited, and feeds the linker's evidence.
+5. A case in the sandbox is reviewed (matches, overrides) and published; a published case is what underwriters open. **Assumed** that the sandbox is optional per tenant.
+
+**Overrides (Assumed, awaiting the founder's choice between the two readings in Section 23, question 12).** An override replaces the displayed value, keeps the fetched value beside it with reason, actor and time, and is audited. The source is not changed. When a later fetch brings a value that differs from the overridden original, the source wins, the override is marked superseded, and the ledger keeps all three values. Write-back of an override into the source is a proposed correction for the actuator of Section 22.1. The ledger is the record of wrong values the founder asked for, and the input to the rule registry of Section 22.3.
+
+**Refresh and freshness.** A case is fetched on open and served from the cache within each field's time to live (**Assumed** 15 minutes for API sources without a change feed, until the next change event for sources with one, 24 hours for vendor data). Pinned cases and cases with activity in the last 3 days refresh in the background, ordered by staleness, within the budgets. A change event for a record of a cached case marks its fields stale and queues a refetch. The page shows "as of" on every field and a stale marker with the reason.
+
+**Limits and supervision.** Per user and hour: 100 case opens and 5,000 fields (settings; a case open counts the fields it renders). Beyond a limit the API answers 429, the page explains, and the supervisor is notified. The **supervisor** role (Assumed new; Section 23, question 14) sees a live view of case opens (who, which case, since when, how many fields) and the audit log of their team, and can pin or unpin cases. The case gate is one dependency, like the authorization layer of Section 14.2, and the authorization matrix test covers it.
+
+**Output.** The case page in the console, with three or four themes as design-token sets over one layout; the data is identical across themes. A per-case CSV export, audited as a bulk reveal of that case; the export is an action, never the page's data path. `GET /cases/{case_id}` and `GET /cases/search?q=` for other systems, under the same gate, with API keys (Section 14.1). Revealed values are never cached in the browser and the page keeps them in memory only.
+
+**Data model (data plane, PostgreSQL per tenant).** `case_schemas` (lob, version, fields), `case_fields` (schema, source, path, label, type, freshness_seconds, group), `cases` (case_id, lob, primary party tokens, status: sandbox or published, pinned, last_activity_at, purge_after), `case_matches` (case, system, record token, confidence, evidence, decided_by), `case_values` (case, field, ciphertext, as_of, fetched_at, provenance, stale_reason), `override_ledger` (case, field, original ciphertext, override ciphertext, reason, actor, superseded_by_value_at), `case_opens` (actor, case, opened_at, fields_rendered; the supervisor's live view reads it), `source_budgets` (source, period, calls, cost, limit, alert_at). Values are ciphertext with AAD of tenant, case and field; keys per tenant in the cloud KMS; purge per case deletes rows and the audit keeps counts only.
+
+**Performance targets (Assumed).** Case open from cache p95 under 2 s; first federated open renders partial results within 2 s and completes p95 under 15 s; refetch after a change event p95 under 5 minutes; 100 concurrent users per tenant.
+
+**Testing.** The leak test of Section 18.3 extended: markers planted in case values must appear only in the data plane's ciphertext and in the response to the authorized case open, never in core tables, product logs, LLM payloads or notifications. Simulator scenario D, "commercial lines": a carrier's claim system, a CRM, a ticketing system, a broker spreadsheet and a vendor stub, with party truth for identity resolution and planted conflicts. Authorization matrix including the supervisor and the case gate; limit tests; budget tests; override ledger tests; purge tests.
+
+**Milestones (Assumed, after M6).** DL1: case schema, Salesforce connector, lookup through the map, case page with provenance and "as of", audit, limits. DL2: Guidewire, ServiceNow, Sheets and Excel connectors, change feeds, background refresh, staleness. DL3: sandbox and overrides, supervisor role and live view, export, API, budgets, scenario D in the eval. Acceptance per milestone follows the pattern of Section 21.
+
+### 22.3 Business rules and reconciliation
+
+Added 2026-10-21. The founder's goal: partners understand what data means across systems, reconcile conflicting business rules, and keep data in step. Every item is **Assumed** until the design partner answers questions 15 to 20 in Section 23. Four layers, each reusing the map's review loop (Section 9.6):
+
+1. **Semantic mapping.** Entities group identifier fields today; **attribute families** group fields that mean the same thing across systems (status, effective date, premium, limit) into one canonical attribute per line of business. Proposed from field names, shapes and the case schema; confirmed in the review queue. For low-cardinality values, which core holds in clear, carto proposes **value crosswalks** from co-occurrence across linked transactions (`status=OPEN` in one system coincides with `state=2` in another), scored like links and reviewed.
+2. **Rule registry.** Per canonical attribute, versioned, reviewed and audited rules of these kinds: `authority` (which system is the source of truth), `precedence` (latest effective date wins, or latest fetch wins), `transform` (time zone, currency, units, code list through a crosswalk), `constraint` (allowed values, ranges, required when), `consistency` (if A says X then B must say Y within T). The LLM may suggest rules from field names, code lists and the override ledger, never from values (D7).
+3. **Conflict detection.** A detector job compares linked records under the rules. For high-cardinality values it compares tokens, so it finds that two addresses differ without seeing either; resolution needs reveal or the case page. Each conflict is a review item with the rule, the evidence and both values where permitted, and a `consistency` rule is also an expectation of Section 10.1 that can alert. Resolutions (which value stands, and why) are kept beside the override ledger of Section 22.2 and refine the rules.
+4. **Synchronization.** v1 and the data layer are read-only. "Keeping data in step" means detecting drift and routing it: to a person, to the ticketing system, or to the actuator of Section 22.1 as a proposed correction with approvals.
+
+Groundwork that v1 keeps so this is not blocked: the `attributes` map on events (Section 7.1) and the composite blocking on attribute values (Section 9.5) are the crosswalk evidence; the expectation kinds of Section 10.1 include `consistency` as a reserved kind; the review queue and audit are generic over item types.
+
+### 22.4 Hosted deployment
+
+Added 2026-10-21. **Decided:** core runs in our cloud, and the data layer's data plane runs there too, as the default. This amends the v1 deployment model of Section 5.5 and ADR 0002 for v2; whether the v1 design partners stay in their own environment is open (Section 23, question 13).
+
+- **Core** is multi-tenant: one deployment, `tenant_id` on every row (kept since day one), tenant-scoped keys for tokens and sessions, per-tenant rate limits and retention. Core still holds tokens, maps, alerts and audit only.
+- **Data plane** is per tenant and isolated: its own database, its own KMS keys, its own network segment, its own connector credentials in the cloud secret manager; no shared process holds two tenants' values. It runs in our cloud by default and in the customer's network on request, with the same image and configuration.
+- **Edge** stays available for sources that only the customer's network can reach (file shares, databases, syslog) and for customers who require tokenization on their side. For SaaS sources the data plane's connectors are the edge.
+- **Inbound webhooks** from Salesforce, ServiceNow, Google and Microsoft terminate on a per-tenant HTTPS endpoint with signature verification and the body caps of Section 8.1; polling is the fallback for customer-hosted data planes without a public endpoint.
+- **Invariant 4 restated for the hosted model:** event data leaves the customer only as tokens to core, and as case values to that customer's own data plane; no cross-tenant path exists and no values reach our staff; support access to a tenant's data plane is break-glass, time-boxed and audited.
+- **Prerequisites before the first hosted customer:** a SOC 2 program, data processing terms (the founder expects the first signature within a month of the first customer), tenant deletion and export procedures, cloud KMS and secret manager wrappers (the M6 items of ADR 0012 and 0013), and a per-tenant cost model that includes the metered sources.
 
 ---
 
@@ -1353,6 +1456,26 @@ What v1 must preserve: `ReadConnector` stays read-only with no write methods; ma
 6. Make `carto-edge` source-available to customers for security review (recommended for trust)?
 7. Counsel review: BAA needs, pilot agreements, data processing terms.
 8. Pricing model (outside this build spec).
+
+Added 2026-10-21, for the founder and the design partner (Sections 10, 22.2 to 22.4). Each has the building agent's assumption in brackets; the spec stands on the assumption until the answer arrives.
+
+9. Is the first case a claim or an underwriting submission, and which lines within commercial? [claim first]
+10. Which Guidewire products and deployment (cloud or on-premises), and is Salesforce the CRM or the broker portal? [ClaimCenter and PolicyCenter on Guidewire Cloud; Salesforce as CRM]
+11. The sandbox: who reviews a case before it is published, is it mandatory for every case or only for low-confidence matches, and may underwriters see unpublished cases? [optional per tenant; reviewers see all, underwriters see published]
+12. Overrides: layer-only with the source untouched and a later source change winning, or a proposed correction written back through the actuator with approvals? [layer-only]
+13. Do the v1 design partners stay in their own environment, or does v1 move to the hosted model now? [they stay; hosted arrives with the data layer]
+14. Is the supervisor a new role, or a permission added to admin? [new role]
+15. Three real conflicts between systems, in the partner's words (different meanings of "active", effective dates, rounding, customer hierarchies). [none known]
+16. Who owns a resolution: the business owner of each system, a data steward, or the integration engineer? [a data steward per line of business]
+17. Are rules per field, per entity, per flow or per segment, and how often do they change? [per canonical attribute, reviewed quarterly]
+18. Does "synchronized" mean carto writes corrections back, or reports drift for someone else to fix? [reports drift; write-back is the actuator]
+19. When systems disagree and no rule exists, what should the user see? [both values with provenance and a prompt to propose a rule]
+20. How much may the LLM propose from field names and code lists? [rules and crosswalks as suggestions, confirmed by a person]
+21. What is a partial failure in the partner's words: a share of a batch, one segment of traffic, one record? [a segment, found by attribute slice]
+22. How is "stale" defined for a source without timestamps? [the learned cadence of the source, then ingest time]
+23. Who receives a missed-event alert and what do they do with it? [the owning team of the receiving system, through the configured channel]
+24. What false-alert rate per flow per day is tolerated? [one, as Section 18.4]
+25. Should stale values on the case page warn or block? [warn]
 
 ---
 
